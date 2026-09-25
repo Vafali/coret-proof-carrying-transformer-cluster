@@ -28,20 +28,42 @@ def validate_property(root: Path, property_id: str) -> dict:
             or result.get("independent_checker_accepted") is not True
             or result.get("generic_fallback_count") != 0
             or result.get("all_support_claims_validated") is not True
-            or result.get("all_provenance_consistent") is not True):
+            or result.get("all_provenance_consistent") is not True
+            or result.get("outward_fresh_radius_envelopes") is not True
+            or result.get("deterministic_support_reduction_lineage") is not True
+            or result.get("checker_failure_count") != 0
+            or result.get("soundness_or_proof_failure_count") != 0):
         raise RuntimeError(f"property acceptance failure: {property_id}")
     queries = sorted((directory / "queries").glob("query_*_result_v1.json"))
     rows = [verified_json(path) for path in queries]
     if [row["query_ordinal"] for row in rows] != list(range(len(rows))):
         raise RuntimeError(f"query ordinal chain differs: {property_id}")
     for path, row in zip(queries, rows):
+        predicates = row.get("acceptance_predicates", {})
         if (row.get("independent_checker_accepted") is not True
-                or row.get("generic_fallback_count") != 0):
+                or row.get("generic_fallback_count") != 0
+                or row.get("all_support_claims_validated") is not True
+                or row.get("provenance_ID_consistent") is not True
+                or row.get("outward_fresh_radius_envelopes") is not True
+                or row.get("deterministic_support_reduction_lineage") is not True
+                or row.get("acceptance_first_failure") is not None
+                or not predicates or not all(predicates.values())):
             raise RuntimeError(f"query acceptance failure: {path}")
         certificate = path.with_name(path.name.replace("_result_", "_certificates_"))
         if row.get("complete_certificate") and not certificate.is_file():
             raise RuntimeError(f"missing query certificate: {certificate}")
-        if certificate.is_file(): verified_json(certificate)
+        if certificate.is_file():
+            cert = verified_json(certificate)
+            cert_predicates = cert.get("acceptance_predicates", {})
+            if (cert.get("independent_checker_accepted") is not True
+                    or cert.get("generic_family_invocations") != 0
+                    or cert.get("all_support_claims_validated") is not True
+                    or cert.get("provenance_ID_consistent") is not True
+                    or cert.get("outward_fresh_radius_envelopes") is not True
+                    or cert.get("deterministic_support_reduction_lineage") is not True
+                    or not cert_predicates
+                    or not all(cert_predicates.values())):
+                raise RuntimeError(f"certificate acceptance failure: {certificate}")
     journal = directory / "query_events_v1.jsonl"
     if journal.is_file():
         events = [json.loads(line) for line in journal.read_text().splitlines()

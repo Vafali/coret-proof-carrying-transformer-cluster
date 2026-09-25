@@ -97,6 +97,17 @@ It verifies manifests, hashes, baseline immutability, query chains, checker and
 provenance status, zero fallback, unique ownership, all 127 properties, and the
 historical duplicate. Conflicts are fatal and are never overwritten.
 
+## Fresh homogeneous A40 production
+
+The final main three-layer benchmark uses the immutable plan in
+`frozen/a40_fresh_127_plan.json`: all 127 properties start fresh on two A40s.
+It does not import the auxiliary 49-property A4000 baseline. Each worker owns
+four deterministic chunks predicted at approximately 6.0--6.1 hours, uses an
+isolated working directory and cache tree, and requests one named physical GPU.
+The `slurm/a40_worker{0,1}_chunk.sbatch` launchers run these resumable chunks;
+`scripts/merge_a40_fresh_results.py` performs the final fail-closed 127-property
+merge. The L40S node is not part of this production plan.
+
 ## Security and third-party source
 
 DeepT is fetched from `https://github.com/eth-sri/DeepT.git`; its upstream

@@ -1,0 +1,147 @@
+{
+  "canonical_manifest_sha256": "a1ffad9327352433ca7fa16f3ea5f2369415fd7ecb4b3353da1f63669d24f683",
+  "chunk_index": 3,
+  "objective_cost": 6349,
+  "parent_plan_sha256": "71a653cb038cb5ab786183634e94267fd2fc91cc0bbae28e0fcc8c9cdc66685d",
+  "physical_gpu": "gpu1",
+  "predicted_seconds": 21833.358671429723,
+  "properties": [
+    {
+      "benchmark_ordinal": 3,
+      "objective_cost": 400,
+      "predicted_seconds": 1375.5463015548733,
+      "property_id": "deept_table7_stdln3_s000_line504_tok04",
+      "sentence_ordinal": 0,
+      "sequence_length": 20,
+      "token_position": 4
+    },
+    {
+      "benchmark_ordinal": 7,
+      "objective_cost": 400,
+      "predicted_seconds": 1375.5463015548733,
+      "property_id": "deept_table7_stdln3_s000_line504_tok08",
+      "sentence_ordinal": 0,
+      "sequence_length": 20,
+      "token_position": 8
+    },
+    {
+      "benchmark_ordinal": 15,
+      "objective_cost": 400,
+      "predicted_seconds": 1375.5463015548733,
+      "property_id": "deept_table7_stdln3_s000_line504_tok16",
+      "sentence_ordinal": 0,
+      "sequence_length": 20,
+      "token_position": 16
+    },
+    {
+      "benchmark_ordinal": 25,
+      "objective_cost": 729,
+      "predicted_seconds": 2506.9331345837563,
+      "property_id": "deept_table7_stdln3_s001_line1794_tok08",
+      "sentence_ordinal": 1,
+      "sequence_length": 27,
+      "token_position": 8
+    },
+    {
+      "benchmark_ordinal": 33,
+      "objective_cost": 729,
+      "predicted_seconds": 2506.9331345837563,
+      "property_id": "deept_table7_stdln3_s001_line1794_tok16",
+      "sentence_ordinal": 1,
+      "sequence_length": 27,
+      "token_position": 16
+    },
+    {
+      "benchmark_ordinal": 41,
+      "objective_cost": 729,
+      "predicted_seconds": 2506.9331345837563,
+      "property_id": "deept_table7_stdln3_s001_line1794_tok24",
+      "sentence_ordinal": 1,
+      "sequence_length": 27,
+      "token_position": 24
+    },
+    {
+      "benchmark_ordinal": 50,
+      "objective_cost": 289,
+      "predicted_seconds": 993.8322028733959,
+      "property_id": "deept_table7_stdln3_s003_line2031_tok02",
+      "sentence_ordinal": 3,
+      "sequence_length": 17,
+      "token_position": 2
+    },
+    {
+      "benchmark_ordinal": 56,
+      "objective_cost": 289,
+      "predicted_seconds": 993.8322028733959,
+      "property_id": "deept_table7_stdln3_s003_line2031_tok08",
+      "sentence_ordinal": 3,
+      "sequence_length": 17,
+      "token_position": 8
+    },
+    {
+      "benchmark_ordinal": 72,
+      "objective_cost": 256,
+      "predicted_seconds": 880.3496329951189,
+      "property_id": "deept_table7_stdln3_s005_line1931_tok01",
+      "sentence_ordinal": 5,
+      "sequence_length": 16,
+      "token_position": 1
+    },
+    {
+      "benchmark_ordinal": 80,
+      "objective_cost": 256,
+      "predicted_seconds": 880.3496329951189,
+      "property_id": "deept_table7_stdln3_s005_line1931_tok11",
+      "sentence_ordinal": 5,
+      "sequence_length": 16,
+      "token_position": 11
+    },
+    {
+      "benchmark_ordinal": 88,
+      "objective_cost": 256,
+      "predicted_seconds": 880.3496329951189,
+      "property_id": "deept_table7_stdln3_s006_line882_tok14",
+      "sentence_ordinal": 6,
+      "sequence_length": 16,
+      "token_position": 14
+    },
+    {
+      "benchmark_ordinal": 94,
+      "objective_cost": 324,
+      "predicted_seconds": 1114.1925042594473,
+      "property_id": "deept_table7_stdln3_s007_line1172_tok10",
+      "sentence_ordinal": 7,
+      "sequence_length": 18,
+      "token_position": 10
+    },
+    {
+      "benchmark_ordinal": 102,
+      "objective_cost": 324,
+      "predicted_seconds": 1114.1925042594473,
+      "property_id": "deept_table7_stdln3_s008_line1172_tok08",
+      "sentence_ordinal": 8,
+      "sequence_length": 18,
+      "token_position": 8
+    },
+    {
+      "benchmark_ordinal": 114,
+      "objective_cost": 484,
+      "predicted_seconds": 1664.4110248813965,
+      "property_id": "deept_table7_stdln3_s009_line2029_tok06",
+      "sentence_ordinal": 9,
+      "sequence_length": 22,
+      "token_position": 6
+    },
+    {
+      "benchmark_ordinal": 122,
+      "objective_cost": 484,
+      "predicted_seconds": 1664.4110248813965,
+      "property_id": "deept_table7_stdln3_s009_line2029_tok14",
+      "sentence_ordinal": 9,
+      "sequence_length": 22,
+      "token_position": 14
+    }
+  ],
+  "schema": "CORET_A40_FRESH_CHUNK_V1",
+  "worker_id": 1
+}

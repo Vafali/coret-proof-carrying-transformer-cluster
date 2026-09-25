@@ -1,6 +1,6 @@
 {
   "bound_entrypoint_calls": 0,
-  "canonical_manifest_sha256": "e6ed72ef462bc9d7f11679962d15e508bb2235a2bc45c66088ba2a0d456221aa",
+  "canonical_manifest_sha256": "6ed850d8917cc4972661e0908e409f57b01c8883877f225132f9b38ffd3a898c",
   "files": [
     {
       "byte_size": 248,
@@ -8,9 +8,9 @@
       "sha256": "328a8a45098f6757bf22ae69f989b88069b017caa06a34d45baea2abdd55359b"
     },
     {
-      "byte_size": 4349,
+      "byte_size": 4982,
       "path": "README.md",
-      "sha256": "ed6028ecd8c73fa46b528903568cb25c7c8e570a6e11ffef2a65766b3c62812f"
+      "sha256": "fbcd5ace6f19ec173ae688f3d5be3a80bf5d96bbac68fe7b62cbbd17b4bacd7a"
     },
     {
       "byte_size": 581,
@@ -26,6 +26,51 @@
       "byte_size": 4914,
       "path": "environment.yml",
       "sha256": "e289ec10f0e7ffc0c3aca0cb8f23cad441416e0d0cef0adda30a8e573b6ae41a"
+    },
+    {
+      "byte_size": 4409,
+      "path": "frozen/a40_chunks/worker_0_chunk_0.json",
+      "sha256": "1fb3aa05636684880c8548b37b549141c45527dbcdb2416d576d9c0348b546a4"
+    },
+    {
+      "byte_size": 4680,
+      "path": "frozen/a40_chunks/worker_0_chunk_1.json",
+      "sha256": "ff235e1f03c6a88cdc3153a4e2ac3131e0299ec1ec95b16d20df87f3fe0b38f9"
+    },
+    {
+      "byte_size": 4674,
+      "path": "frozen/a40_chunks/worker_0_chunk_2.json",
+      "sha256": "d048caa1f5e36d99506547ef45584a23abceff3ef97e3002358d55be7fecf51b"
+    },
+    {
+      "byte_size": 4677,
+      "path": "frozen/a40_chunks/worker_0_chunk_3.json",
+      "sha256": "3bdcee45b759a2fe433330824e2fb1fe696e48389665b5e1363015236f1c8117"
+    },
+    {
+      "byte_size": 4679,
+      "path": "frozen/a40_chunks/worker_1_chunk_0.json",
+      "sha256": "2f97d80476ed5ae759edd4610b06aef5024c2ebc4e49a29a6034cc7617f53307"
+    },
+    {
+      "byte_size": 4948,
+      "path": "frozen/a40_chunks/worker_1_chunk_1.json",
+      "sha256": "3f07ebb6f61d2ddaece0d63ce387c7f09c7192b85883f7800525b1c58319cf06"
+    },
+    {
+      "byte_size": 4674,
+      "path": "frozen/a40_chunks/worker_1_chunk_2.json",
+      "sha256": "0884b0e8778e2354fb459beeddd0312d97e05470362de245f02511a5c81cc3f3"
+    },
+    {
+      "byte_size": 4408,
+      "path": "frozen/a40_chunks/worker_1_chunk_3.json",
+      "sha256": "f04bb264ddddaf6bb956b77fa28dd4f349185a3a6c1099c90ad013dff718c59c"
+    },
+    {
+      "byte_size": 46243,
+      "path": "frozen/a40_fresh_127_plan.json",
+      "sha256": "0e604a3b68e54f3dcd5bfe7e40dffa2d2ac15dd0e3141e2479cf93bdd56499a7"
     },
     {
       "byte_size": 1164,
@@ -128,6 +173,16 @@
       "sha256": "12f3cc96250e21813010bc8f3f723df86cdb01d1910ff29e69a93e035599a0fa"
     },
     {
+      "byte_size": 4234,
+      "path": "scripts/a40_fresh_common.py",
+      "sha256": "e67aa7b3b52a13ed45030ca044dd2239541e1dc3516252ad7f3157ff0cd7fc31"
+    },
+    {
+      "byte_size": 5901,
+      "path": "scripts/build_a40_fresh_plan.py",
+      "sha256": "0fa8d792fbe7c8daad6f6f69ef79a3ec771cbfeec0d0f4c77034858d8c6cdf02"
+    },
+    {
       "byte_size": 2846,
       "path": "scripts/build_manifests.py",
       "sha256": "6bd4b68e25ef359d335830d02d1629ad32e67fa8f89d071cf122b96cc1eed795"
@@ -158,9 +213,14 @@
       "sha256": "bd333765b6b600683a94daf561109f5a8eb02bb18a88f193b5d4448c6f52f421"
     },
     {
-      "byte_size": 6788,
+      "byte_size": 7181,
+      "path": "scripts/merge_a40_fresh_results.py",
+      "sha256": "f66c58acc6078ebf3f37511251c87b012982224c1a25c625d15444e1202ff513"
+    },
+    {
+      "byte_size": 8271,
       "path": "scripts/merge_worker_results.py",
-      "sha256": "2d0d8966df82c5ec7a642473184662dbba6060051345710ba5b42f7af8b70004"
+      "sha256": "9ec2cb9f6ad40f2645cd0db6d019d8c94ccaa3bbdb1fdc35e00532d418dba269"
     },
     {
       "byte_size": 2407,
@@ -171,6 +231,16 @@
       "byte_size": 3655,
       "path": "scripts/preflight_environment.py",
       "sha256": "f2f3f36ab3ef14adf44fc087505cbdc26b15049d993b2d85a39f3423790bd005"
+    },
+    {
+      "byte_size": 1703,
+      "path": "scripts/prepare_a40_fresh_root.py",
+      "sha256": "f3e75b585c246db542ab5930ed591ade44bf8917b0931f0bd5b3d6fe60291fd2"
+    },
+    {
+      "byte_size": 4900,
+      "path": "scripts/run_a40_fresh_chunk.py",
+      "sha256": "43195941672b1c996c0cafa7ee7915a07a434b0feed4acaaddf8ac1bba243b20"
     },
     {
       "byte_size": 1707,
@@ -196,6 +266,21 @@
       "byte_size": 2773,
       "path": "scripts/verify_worker_results.py",
       "sha256": "753a6932cc8e8b981c52b39c080a57eebb1b3778819e9e55c5a641efd9086b03"
+    },
+    {
+      "byte_size": 1389,
+      "path": "slurm/a40_worker0_chunk.sbatch",
+      "sha256": "d3ece6e8341e8766455570e3f440a434467abf41e206ca3b6c7d04d71766811a"
+    },
+    {
+      "byte_size": 1389,
+      "path": "slurm/a40_worker1_chunk.sbatch",
+      "sha256": "56a479c476471a6bb64d628537ab4f078d935a384dc1cf97d6425e96b4ecd4bb"
+    },
+    {
+      "byte_size": 3896,
+      "path": "tests/test_a40_fresh_offline.py",
+      "sha256": "b41524b5a38f033221047dcd39540b2dcecb549bfc6be9a755dfdee924a358bb"
     },
     {
       "byte_size": 6114,

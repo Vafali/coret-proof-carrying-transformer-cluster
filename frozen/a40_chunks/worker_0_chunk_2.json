@@ -1,0 +1,156 @@
+{
+  "canonical_manifest_sha256": "45d8d8a863157c120ef442847e7adeb80ccaf8e1a391a4d8e4e17b6897c8a628",
+  "chunk_index": 2,
+  "objective_cost": 6381,
+  "parent_plan_sha256": "71a653cb038cb5ab786183634e94267fd2fc91cc0bbae28e0fcc8c9cdc66685d",
+  "physical_gpu": "gpu0",
+  "predicted_seconds": 21943.402375554117,
+  "properties": [
+    {
+      "benchmark_ordinal": 0,
+      "objective_cost": 400,
+      "predicted_seconds": 1375.5463015548733,
+      "property_id": "deept_table7_stdln3_s000_line504_tok01",
+      "sentence_ordinal": 0,
+      "sequence_length": 20,
+      "token_position": 1
+    },
+    {
+      "benchmark_ordinal": 6,
+      "objective_cost": 400,
+      "predicted_seconds": 1375.5463015548733,
+      "property_id": "deept_table7_stdln3_s000_line504_tok07",
+      "sentence_ordinal": 0,
+      "sequence_length": 20,
+      "token_position": 7
+    },
+    {
+      "benchmark_ordinal": 14,
+      "objective_cost": 400,
+      "predicted_seconds": 1375.5463015548733,
+      "property_id": "deept_table7_stdln3_s000_line504_tok15",
+      "sentence_ordinal": 0,
+      "sequence_length": 20,
+      "token_position": 15
+    },
+    {
+      "benchmark_ordinal": 22,
+      "objective_cost": 729,
+      "predicted_seconds": 2506.9331345837563,
+      "property_id": "deept_table7_stdln3_s001_line1794_tok05",
+      "sentence_ordinal": 1,
+      "sequence_length": 27,
+      "token_position": 5
+    },
+    {
+      "benchmark_ordinal": 30,
+      "objective_cost": 729,
+      "predicted_seconds": 2506.9331345837563,
+      "property_id": "deept_table7_stdln3_s001_line1794_tok13",
+      "sentence_ordinal": 1,
+      "sequence_length": 27,
+      "token_position": 13
+    },
+    {
+      "benchmark_ordinal": 38,
+      "objective_cost": 729,
+      "predicted_seconds": 2506.9331345837563,
+      "property_id": "deept_table7_stdln3_s001_line1794_tok21",
+      "sentence_ordinal": 1,
+      "sequence_length": 27,
+      "token_position": 21
+    },
+    {
+      "benchmark_ordinal": 49,
+      "objective_cost": 289,
+      "predicted_seconds": 993.8322028733959,
+      "property_id": "deept_table7_stdln3_s003_line2031_tok01",
+      "sentence_ordinal": 3,
+      "sequence_length": 17,
+      "token_position": 1
+    },
+    {
+      "benchmark_ordinal": 57,
+      "objective_cost": 289,
+      "predicted_seconds": 993.8322028733959,
+      "property_id": "deept_table7_stdln3_s003_line2031_tok09",
+      "sentence_ordinal": 3,
+      "sequence_length": 17,
+      "token_position": 9
+    },
+    {
+      "benchmark_ordinal": 64,
+      "objective_cost": 144,
+      "predicted_seconds": 495.19666855975436,
+      "property_id": "deept_table7_stdln3_s004_line216_tok01",
+      "sentence_ordinal": 4,
+      "sequence_length": 12,
+      "token_position": 1
+    },
+    {
+      "benchmark_ordinal": 69,
+      "objective_cost": 144,
+      "predicted_seconds": 495.19666855975436,
+      "property_id": "deept_table7_stdln3_s004_line216_tok08",
+      "sentence_ordinal": 4,
+      "sequence_length": 12,
+      "token_position": 8
+    },
+    {
+      "benchmark_ordinal": 73,
+      "objective_cost": 256,
+      "predicted_seconds": 880.3496329951189,
+      "property_id": "deept_table7_stdln3_s005_line1931_tok02",
+      "sentence_ordinal": 5,
+      "sequence_length": 16,
+      "token_position": 2
+    },
+    {
+      "benchmark_ordinal": 81,
+      "objective_cost": 256,
+      "predicted_seconds": 880.3496329951189,
+      "property_id": "deept_table7_stdln3_s005_line1931_tok12",
+      "sentence_ordinal": 5,
+      "sequence_length": 16,
+      "token_position": 12
+    },
+    {
+      "benchmark_ordinal": 93,
+      "objective_cost": 324,
+      "predicted_seconds": 1114.1925042594473,
+      "property_id": "deept_table7_stdln3_s007_line1172_tok09",
+      "sentence_ordinal": 7,
+      "sequence_length": 18,
+      "token_position": 9
+    },
+    {
+      "benchmark_ordinal": 101,
+      "objective_cost": 324,
+      "predicted_seconds": 1114.1925042594473,
+      "property_id": "deept_table7_stdln3_s008_line1172_tok07",
+      "sentence_ordinal": 8,
+      "sequence_length": 18,
+      "token_position": 7
+    },
+    {
+      "benchmark_ordinal": 113,
+      "objective_cost": 484,
+      "predicted_seconds": 1664.4110248813965,
+      "property_id": "deept_table7_stdln3_s009_line2029_tok05",
+      "sentence_ordinal": 9,
+      "sequence_length": 22,
+      "token_position": 5
+    },
+    {
+      "benchmark_ordinal": 119,
+      "objective_cost": 484,
+      "predicted_seconds": 1664.4110248813965,
+      "property_id": "deept_table7_stdln3_s009_line2029_tok11",
+      "sentence_ordinal": 9,
+      "sequence_length": 22,
+      "token_position": 11
+    }
+  ],
+  "schema": "CORET_A40_FRESH_CHUNK_V1",
+  "worker_id": 0
+}
