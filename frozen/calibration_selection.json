@@ -1,0 +1,29 @@
+{
+  "bound_entrypoint_calls": 0,
+  "canonical_manifest_sha256": "da3bf7ec9b5c98571226220053083790403c9115798eec4ea7e1918e159455db",
+  "cases": [
+    {
+      "name": "short",
+      "property_id": "deept_table7_stdln3_s000_line504_tok03",
+      "query_ordinal": 2,
+      "reference_certificate_file_sha256": "2915f2429c0e0bf860b363e00e1f3978dab70986631d7b136ff834ba3b524fdc",
+      "reference_result_file_sha256": "cdf1d39dea19affee8450dc1335176fa21eb90e0030af2e6a30a04067604a166",
+      "rho": 0.0009375,
+      "rho_binary64_hex": "0x1.eb851eb851eb8p-11",
+      "sequence_length": 20
+    },
+    {
+      "name": "long",
+      "property_id": "deept_table7_stdln3_s001_line1794_tok05",
+      "query_ordinal": 2,
+      "reference_certificate_file_sha256": "ed90c6223eb88d13465b9bbed98facc13302374b921ed0246170d8e31fc767f1",
+      "reference_result_file_sha256": "2b902cf3662c5a304f8d9981322c964d6e756c21c37366d6eff6e199d88965c4",
+      "rho": 0.0009375,
+      "rho_binary64_hex": "0x1.eb851eb851eb8p-11",
+      "sequence_length": 27
+    }
+  ],
+  "frozen_before_cluster_execution": true,
+  "schema": "CORET_CLUSTER_CALIBRATION_SELECTION_V1",
+  "scientific_queries": 0
+}

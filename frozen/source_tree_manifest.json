@@ -1,0 +1,208 @@
+{
+  "bound_entrypoint_calls": 0,
+  "canonical_manifest_sha256": "e6ed72ef462bc9d7f11679962d15e508bb2235a2bc45c66088ba2a0d456221aa",
+  "files": [
+    {
+      "byte_size": 248,
+      "path": ".gitignore",
+      "sha256": "328a8a45098f6757bf22ae69f989b88069b017caa06a34d45baea2abdd55359b"
+    },
+    {
+      "byte_size": 4349,
+      "path": "README.md",
+      "sha256": "ed6028ecd8c73fa46b528903568cb25c7c8e570a6e11ffef2a65766b3c62812f"
+    },
+    {
+      "byte_size": 581,
+      "path": "SECURITY_ALLOWLIST.md",
+      "sha256": "ec334bed35a9b17048e11ce88fbc3acb92699142c80df2d6d4a4348c578f0329"
+    },
+    {
+      "byte_size": 13059,
+      "path": "conda-explicit-linux-64.txt",
+      "sha256": "2ad5a41d393c9b27c04b60c4b9d97baf87e067cfdb07b8d3bab920c980d458fd"
+    },
+    {
+      "byte_size": 4914,
+      "path": "environment.yml",
+      "sha256": "e289ec10f0e7ffc0c3aca0cb8f23cad441416e0d0cef0adda30a8e573b6ae41a"
+    },
+    {
+      "byte_size": 1164,
+      "path": "frozen/calibration_selection.json",
+      "sha256": "e97d9f1f23bb50ba7e5f5ec0bc2fcdf3eafb558db0d89ac818a24b29d0154da6"
+    },
+    {
+      "byte_size": 965,
+      "path": "frozen/cluster_baseline_state.json",
+      "sha256": "875b0442985a3e96ba99afcb4c673df8b19b3b7013b5ad7ceb18a3c4b6b33f36"
+    },
+    {
+      "byte_size": 7159,
+      "path": "requirements-freeze.txt",
+      "sha256": "330e10f0e627f4ad5ed9f929555c635a4c676f4c959d0c28f7468b664575ca92"
+    },
+    {
+      "byte_size": 12248,
+      "path": "research_hab/coret_bounded_native_execution_v1.py",
+      "sha256": "838f21a5e4015ec8ccd09f904ef86ba847a25dcb9424a874dbf33aa7d8c70595"
+    },
+    {
+      "byte_size": 3706,
+      "path": "research_hab/coret_bounded_native_production_graph_v1.py",
+      "sha256": "fd1ee8b1e4c4a633fc0860744d9a956af0b7a9c2efb57c5cec9deb9c5f1002b0"
+    },
+    {
+      "byte_size": 20045,
+      "path": "research_hab/coret_deept_exact_standard_ln_adapter.py",
+      "sha256": "91414ab6b17b3663b4135ee27e0c5d4cc753e942bd0dfba66392ee0f3357b2fd"
+    },
+    {
+      "byte_size": 10283,
+      "path": "research_hab/coret_native_semantics_checker_v1.py",
+      "sha256": "516e67a9574b63229f03cb563960a502d85a22c41dbc840bd9253c9c265729f8"
+    },
+    {
+      "byte_size": 7722,
+      "path": "research_hab/coret_native_semantics_production_graph_v1.py",
+      "sha256": "e9be8e0243cb3de0132d01363f96a13ded68ee07f6391a9830ec970947340b6b"
+    },
+    {
+      "byte_size": 7101,
+      "path": "research_hab/coret_native_semantics_proof_v1.py",
+      "sha256": "496b4b9347014ab9a509a3206d4fece6d626261dcc400df147cb04a823417e7e"
+    },
+    {
+      "byte_size": 53267,
+      "path": "research_hab/coret_optimized_historical_127_v1.py",
+      "sha256": "8d3e2216b7174f853968c71eebc78318c86dff061875e194aee3d34c8a85d6cb"
+    },
+    {
+      "byte_size": 45820,
+      "path": "research_hab/coret_optimized_three_property_smoke_v1.py",
+      "sha256": "1471ec5203e88f548d11217e0a9eaaa565469e620d36c90fe2428319e59e26c7"
+    },
+    {
+      "byte_size": 42367,
+      "path": "research_hab/coret_proof_carrying_historical_127_v1.py",
+      "sha256": "eb79a2a790e0dbbbfbd26a0f487b0dce789db0c3f45192bc76fdfc342ac192c1"
+    },
+    {
+      "byte_size": 44534,
+      "path": "research_hab/coret_proof_carrying_historical_smoke_v1.py",
+      "sha256": "32a337077a691f353828e95ef5133eff36dae31bc94aaff3da2196ad2db81932"
+    },
+    {
+      "byte_size": 8798,
+      "path": "research_hab/coret_sound_reference_v1.py",
+      "sha256": "d737a8478af54642aecf4058a4da66c37263e3c7d7ea521879d8e83a792cf54b"
+    },
+    {
+      "byte_size": 4881,
+      "path": "research_hab/coret_structural_support_lifetime_v1.py",
+      "sha256": "f26a0f5453409407a06a6491966bd8f13965365669ca9e7bd68229013a065f6e"
+    },
+    {
+      "byte_size": 33711,
+      "path": "research_hab/coret_structural_support_precise_dot_v1.py",
+      "sha256": "86ba56410c713283251264c618d7652f1f741531bda4bfdc0dcdf38df7a2a0c6"
+    },
+    {
+      "byte_size": 23180,
+      "path": "research_hab/coret_structural_support_tok10_lifetime_v1.py",
+      "sha256": "56fadef6ce114db877a96e73b742bfa704ef32d4c86031d7b16778038c1c04cc"
+    },
+    {
+      "byte_size": 24540,
+      "path": "research_hab/coret_structural_support_tok10_real_gate_v1.py",
+      "sha256": "cc60c60e075aa1f192dd745f89109926350be14f9e6960e68614eb24c5e16171"
+    },
+    {
+      "byte_size": 21978,
+      "path": "research_hab/deept_stagea_model.py",
+      "sha256": "51cd52ed2afdbc889e4c4580ff7be7e71d80252c9994a7129b07dd3cff708742"
+    },
+    {
+      "byte_size": 439,
+      "path": "research_hab/run_coret_optimized_historical_127_v1.sh",
+      "sha256": "12f3cc96250e21813010bc8f3f723df86cdb01d1910ff29e69a93e035599a0fa"
+    },
+    {
+      "byte_size": 2846,
+      "path": "scripts/build_manifests.py",
+      "sha256": "6bd4b68e25ef359d335830d02d1629ad32e67fa8f89d071cf122b96cc1eed795"
+    },
+    {
+      "byte_size": 6704,
+      "path": "scripts/cluster_common.py",
+      "sha256": "ec7fa68cbff90bafef9967190ed0f764c30f2c70ceafaa5a7fffc98c2f9b31ad"
+    },
+    {
+      "byte_size": 4299,
+      "path": "scripts/compare_calibration.py",
+      "sha256": "f6fb74d85bfec62d490714909075c54c86706d48e017eeb60db8a6339d795f05"
+    },
+    {
+      "byte_size": 583,
+      "path": "scripts/fetch_deept.sh",
+      "sha256": "35deb2d1ab0bdddda8e0bac70b27930a6dd082fc60bfbd6a0f9066952d752cc0"
+    },
+    {
+      "byte_size": 790,
+      "path": "scripts/import_artifacts.py",
+      "sha256": "de0556f5f86f36159bd8c9e756ff86b593f49ce38daeb382177e3e91d51ce293"
+    },
+    {
+      "byte_size": 4735,
+      "path": "scripts/make_property_shards.py",
+      "sha256": "bd333765b6b600683a94daf561109f5a8eb02bb18a88f193b5d4448c6f52f421"
+    },
+    {
+      "byte_size": 6788,
+      "path": "scripts/merge_worker_results.py",
+      "sha256": "2d0d8966df82c5ec7a642473184662dbba6060051345710ba5b42f7af8b70004"
+    },
+    {
+      "byte_size": 2407,
+      "path": "scripts/portable_runner.py",
+      "sha256": "d0bf9cac6fce98e245f6f33bb1dd3848aa3813264733d83c3e09b5e3eff58295"
+    },
+    {
+      "byte_size": 3655,
+      "path": "scripts/preflight_environment.py",
+      "sha256": "f2f3f36ab3ef14adf44fc087505cbdc26b15049d993b2d85a39f3423790bd005"
+    },
+    {
+      "byte_size": 1707,
+      "path": "scripts/run_calibration.py",
+      "sha256": "6b7884629bb513521c09021b45ba8180e42fd5f5b763d835db92b5ba2661cee1"
+    },
+    {
+      "byte_size": 603,
+      "path": "scripts/run_calibration.sh",
+      "sha256": "ea45fc8fe785afd9dc4b028fef9eab737a424d058178b67d02f5de420ea55c82"
+    },
+    {
+      "byte_size": 508,
+      "path": "scripts/run_property_shard.sh",
+      "sha256": "68a9d5393e9354505e1f62765764d439383656d8af72408f8a2cfa01278271de"
+    },
+    {
+      "byte_size": 1811,
+      "path": "scripts/run_worker.py",
+      "sha256": "b18f4249066dc854d4a9a424c8b7c11322293ce22450b589ee1ec04888f00ecd"
+    },
+    {
+      "byte_size": 2773,
+      "path": "scripts/verify_worker_results.py",
+      "sha256": "753a6932cc8e8b981c52b39c080a57eebb1b3778819e9e55c5a641efd9086b03"
+    },
+    {
+      "byte_size": 6114,
+      "path": "tests/test_cluster_offline.py",
+      "sha256": "dc6e5505199f134e17a7ea2ad1fc8d28cbf529927c1635b89d2bdf472e613e83"
+    }
+  ],
+  "schema": "CORET_CLUSTER_SOURCE_TREE_MANIFEST_V1",
+  "scientific_queries": 0
+}

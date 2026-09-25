@@ -1,0 +1,21 @@
+{
+  "audited_boundary_and_later_query_count": 74,
+  "canonical_manifest_sha256": "38af1a3de635506c61a127230efc6c5683ce27620b7c806f4377627e68f63868",
+  "completed_property_count": 49,
+  "newly_persisted_journals_since_old_snapshot": 64,
+  "newly_persisted_queries_since_old_snapshot": 64,
+  "next_property": "deept_table7_stdln3_s003_line2031_tok01",
+  "next_query_ordinal": 0,
+  "next_rho": 0.000625,
+  "next_rho_binary64_hex": "0x1.47ae147ae147bp-11",
+  "partial_property": null,
+  "persisted_query_count": 595,
+  "old_snapshot_completed_property_count": 42,
+  "old_snapshot_persisted_query_count": 531,
+  "production_manifest_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+  "schema": "CORET_CLUSTER_BASELINE_STATE_V1",
+  "scientific_manifest_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+  "properties_completed_since_old_snapshot": 7,
+  "unstarted_property_count": 78,
+  "valid_journal_count": 595
+}
