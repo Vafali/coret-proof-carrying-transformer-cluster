@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+import sys
+from types import SimpleNamespace
 from pathlib import Path
+
+import pytest
 
 import a40_fresh_common as fresh
 import cluster_common as common
+import portable_runner
+import run_a40_fresh_chunk
 from build_a40_fresh_plan import build
 
 
@@ -91,3 +97,119 @@ def test_fresh_runner_disables_prior_smoke_reuse_only_in_orchestration():
     scientific = (common.RESEARCH
                   / "coret_optimized_historical_127_v1.py").read_text()
     assert "def _reuse_record" in scientific
+
+
+def test_portable_configure_is_idempotent_and_workers_are_isolated(tmp_path):
+    import coret_optimized_historical_127_v1 as runner
+
+    mutable = ("OUT", "SUMMARY", "HISTORICAL_MANIFEST", "DEEPT_POSITIONS",
+               "DEEPT_RESULT", "validate_manifest")
+    original = {name: getattr(runner, name) for name in mutable}
+    try:
+        worker0 = tmp_path / "worker_0"
+        worker1 = tmp_path / "worker_1"
+        roots = []
+        for _ in range(4):
+            configured, _, root = portable_runner.configure(worker0, artifact())
+            assert configured is runner
+            roots.append(root)
+            assert root.is_relative_to(worker0.resolve())
+            assert runner.OUT == root
+        assert roots == [worker0.resolve() / common.BASELINE_REL] * 4
+
+        _, _, other = portable_runner.configure(worker1, artifact())
+        assert other == worker1.resolve() / common.BASELINE_REL
+        assert other.is_relative_to(worker1.resolve())
+        assert other != roots[0]
+    finally:
+        for name, value in original.items():
+            setattr(runner, name, value)
+
+
+def test_synthetic_two_property_chunk_reconfigures_without_bound_call(
+        tmp_path, monkeypatch):
+    worktree = tmp_path / "repository"
+    fake = SimpleNamespace(
+        WORKTREE=worktree,
+        OUT=worktree / common.BASELINE_REL,
+    )
+    manifest = {"identity": "offline-only"}
+    patched = []
+
+    def fake_patch(runner, artifact, result_root, loaded_manifest):
+        assert loaded_manifest is manifest
+        runner.OUT = result_root
+        patched.append((artifact, result_root))
+
+    monkeypatch.setitem(sys.modules,
+                        "coret_optimized_historical_127_v1", fake)
+    monkeypatch.setattr(portable_runner, "load_production_manifest",
+                        lambda artifact: manifest)
+    monkeypatch.setattr(portable_runner, "patch_runner", fake_patch)
+
+    worker = tmp_path / "worker_0"
+    artifact_root = tmp_path / "artifact"
+    resolved = []
+    for property_id in ("fake_property_0", "fake_property_1"):
+        configured, loaded, result_root = portable_runner.configure(
+            worker, artifact_root)
+        assert property_id.startswith("fake_property_")
+        assert configured is fake and loaded is manifest
+        assert result_root.is_relative_to(worker.resolve())
+        resolved.append(result_root)
+
+    assert resolved == [worker.resolve() / common.BASELINE_REL] * 2
+    assert len(patched) == 2
+    assert not hasattr(fake, "generate_query")
+    assert not hasattr(fake, "run_property")
+
+
+@pytest.mark.parametrize(("worker_id", "property_id"), [
+    (0, "deept_table7_stdln3_s000_line504_tok05"),
+    (1, "deept_table7_stdln3_s000_line504_tok10"),
+])
+def test_chunk_zero_resume_validates_and_skips_completed_property(
+        tmp_path, monkeypatch, worker_id, property_id):
+    worker = tmp_path / f"worker_{worker_id}"
+    for name in ("runtime", "tmpdir", "cache", "cuda_cache",
+                 "torch_extensions", "pycache", "chunk_records"):
+        (worker / name).mkdir(parents=True)
+    root = fresh.result_root(worker)
+    result = root / "properties" / property_id / "result_v1.json"
+    result.parent.mkdir(parents=True)
+    result.write_text("offline resume sentinel\n")
+
+    monkeypatch.chdir(worker / "runtime")
+    for name, directory in zip(run_a40_fresh_chunk.ISOLATION_VARIABLES,
+            ("tmpdir", "cache", "cuda_cache", "torch_extensions", "pycache")):
+        monkeypatch.setenv(name, str(worker / directory))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", str(worker_id))
+    monkeypatch.setattr(sys, "argv", ["run_a40_fresh_chunk.py",
+        "--worker-id", str(worker_id), "--chunk-index", "0",
+        "--worker-dir", str(worker), "--artifact-root", str(tmp_path / "artifact")])
+    monkeypatch.setattr(run_a40_fresh_chunk, "artifact_root",
+                        lambda value: tmp_path / "artifact")
+    monkeypatch.setattr(run_a40_fresh_chunk, "initialize_fresh_worker",
+                        lambda artifact, directory, identity: root)
+    monkeypatch.setattr(run_a40_fresh_chunk, "load_plan", lambda: {
+        "canonical_manifest_sha256": "offline_plan",
+    })
+    monkeypatch.setattr(run_a40_fresh_chunk, "assigned_properties",
+                        lambda plan, identity: {property_id})
+    monkeypatch.setattr(run_a40_fresh_chunk, "load_chunk", lambda identity, index: {
+        "canonical_manifest_sha256": "offline_chunk",
+        "properties": [{"property_id": property_id}],
+    })
+    monkeypatch.setattr(run_a40_fresh_chunk, "result_root",
+                        lambda directory: root)
+    validated = []
+    monkeypatch.setattr(run_a40_fresh_chunk, "validate_property",
+                        lambda directory, identity: validated.append(
+                            (directory, identity)))
+
+    def forbidden_run(*args, **kwargs):
+        raise AssertionError("completed property was recomputed")
+
+    monkeypatch.setattr(run_a40_fresh_chunk, "run_property", forbidden_run)
+    run_a40_fresh_chunk.main()
+    assert validated == [(root, property_id)]

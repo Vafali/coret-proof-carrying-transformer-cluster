@@ -1,6 +1,6 @@
 {
   "bound_entrypoint_calls": 0,
-  "canonical_manifest_sha256": "6ed850d8917cc4972661e0908e409f57b01c8883877f225132f9b38ffd3a898c",
+  "canonical_manifest_sha256": "aefb485d29acca6e0591971696d964fbd96d0ed597f624d31f5f01fbd4a76657",
   "files": [
     {
       "byte_size": 248,
@@ -223,9 +223,9 @@
       "sha256": "9ec2cb9f6ad40f2645cd0db6d019d8c94ccaa3bbdb1fdc35e00532d418dba269"
     },
     {
-      "byte_size": 2407,
+      "byte_size": 3157,
       "path": "scripts/portable_runner.py",
-      "sha256": "d0bf9cac6fce98e245f6f33bb1dd3848aa3813264733d83c3e09b5e3eff58295"
+      "sha256": "07784b1ca9a0646aaf57016637d6d771bba57e086dfbf4fcf0fd082960e82e28"
     },
     {
       "byte_size": 3655,
@@ -278,9 +278,9 @@
       "sha256": "56a479c476471a6bb64d628537ab4f078d935a384dc1cf97d6425e96b4ecd4bb"
     },
     {
-      "byte_size": 3896,
+      "byte_size": 9086,
       "path": "tests/test_a40_fresh_offline.py",
-      "sha256": "b41524b5a38f033221047dcd39540b2dcecb549bfc6be9a755dfdee924a358bb"
+      "sha256": "033f79f10ad9c8a17f5782e5aa3c39e115ea1d1b4d57d1b8d92d7ff4e12b233b"
     },
     {
       "byte_size": 6114,

@@ -8,13 +8,32 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cluster_common import artifact_root, initialize_worker, load_production_manifest, patch_runner
+from cluster_common import (BASELINE_REL, artifact_root, initialize_worker,
+    load_production_manifest, patch_runner)
+
+
+# This path is immutable packaging metadata.  In particular, it must not be
+# reconstructed from runner.OUT: patch_runner() intentionally rebinds OUT to a
+# worker-local path, and configure() is called once for every property in an
+# A40 chunk process.
+FROZEN_RESULT_RELATIVE = BASELINE_REL
+
+
+def worker_result_root(worker_dir: Path) -> Path:
+    worker_dir = worker_dir.resolve()
+    if (FROZEN_RESULT_RELATIVE.is_absolute()
+            or ".." in FROZEN_RESULT_RELATIVE.parts):
+        raise RuntimeError("frozen result path is not repository-relative")
+    result = (worker_dir / FROZEN_RESULT_RELATIVE).resolve()
+    if not result.is_relative_to(worker_dir):
+        raise RuntimeError("worker result path escapes worker root")
+    return result
 
 
 def configure(worker_dir: Path, artifact: Path):
     import coret_optimized_historical_127_v1 as runner
     manifest = load_production_manifest(artifact)
-    result_root = worker_dir / runner.OUT.relative_to(runner.WORKTREE)
+    result_root = worker_result_root(worker_dir)
     patch_runner(runner, artifact, result_root, manifest)
     return runner, manifest, result_root
 
