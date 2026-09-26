@@ -1,6 +1,6 @@
 {
   "bound_entrypoint_calls": 0,
-  "canonical_manifest_sha256": "aefb485d29acca6e0591971696d964fbd96d0ed597f624d31f5f01fbd4a76657",
+  "canonical_manifest_sha256": "16ba3ccf0c40f803a8ec9a988427f8ef62ac33d2473ff1e5225d292c02ae2fd2",
   "files": [
     {
       "byte_size": 248,
@@ -178,6 +178,11 @@
       "sha256": "e67aa7b3b52a13ed45030ca044dd2239541e1dc3516252ad7f3157ff0cd7fc31"
     },
     {
+      "byte_size": 18623,
+      "path": "scripts/analyze_a40_interim.py",
+      "sha256": "24e5683a1f46d17f7945ddcc2ff2774547f7d8df7adc63be7f85775f95537033"
+    },
+    {
       "byte_size": 5901,
       "path": "scripts/build_a40_fresh_plan.py",
       "sha256": "0fa8d792fbe7c8daad6f6f69ef79a3ec771cbfeec0d0f4c77034858d8c6cdf02"
@@ -281,6 +286,11 @@
       "byte_size": 9086,
       "path": "tests/test_a40_fresh_offline.py",
       "sha256": "033f79f10ad9c8a17f5782e5aa3c39e115ea1d1b4d57d1b8d92d7ff4e12b233b"
+    },
+    {
+      "byte_size": 3766,
+      "path": "tests/test_analyze_a40_interim.py",
+      "sha256": "b53ba194811f621bc090c4cebf6fa9057ceda4d522fcafe7a892998dc9beda81"
     },
     {
       "byte_size": 6114,
