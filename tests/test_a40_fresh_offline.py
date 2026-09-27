@@ -85,7 +85,7 @@ def test_slurm_is_a40_only_and_worker_specific():
 def test_production_path_remains_prefused():
     assert common.sha256(
         common.RESEARCH / "coret_structural_support_precise_dot_v1.py") == (
-        "86ba56410c713283251264c618d7652f1f741531bda4bfdc0dcdf38df7a2a0c6")
+        "acdf3751b25ca3d2dc79f4d6dd2cbac0990b192cc28c982bd499ddc2159715ca")
     scientific = list(common.RESEARCH.glob("*.py"))
     assert not any("fused_av" in path.read_text(errors="ignore")
                    for path in scientific)

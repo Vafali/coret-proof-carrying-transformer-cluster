@@ -7,6 +7,7 @@ consistent with the operand.  No magnitude threshold is used.
 """
 from __future__ import annotations
 
+from array import array
 from dataclasses import dataclass
 from typing import Any, Iterable
 import math
@@ -22,6 +23,7 @@ SCHEMA = "CORET_STRUCTURAL_SUPPORT_PRECISE_DOT_V1"
 DEFAULT_GENERATOR_TILE = 32
 AV_GENERATOR_TILE = 112
 AV_TEMPORARY_CAP_BYTES = 128 * 1024 * 1024
+INDEX_METADATA_ARENA_CAP_BYTES = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,50 @@ class SupportProof:
             raise ValueError("support mask is outside the token universe")
         if len(set(self.ids)) != len(self.ids):
             raise ValueError("support generator IDs are not unique")
+
+
+@dataclass(frozen=True)
+class _IndexRef:
+    start: int
+    length: int
+
+
+@dataclass
+class _PackedIndexArena:
+    """Own one rebuilt host arena and its single device copy for an operator."""
+    storage: array
+    host: torch.Tensor
+    device: torch.Tensor
+
+    def view(self, ref: _IndexRef) -> torch.Tensor:
+        return self.device.narrow(0, ref.start, ref.length)
+
+
+class _IndexArenaBuilder:
+    """Pack exact int64 sequences without retaining boxed Python integers."""
+    def __init__(self, cap_bytes: int = INDEX_METADATA_ARENA_CAP_BYTES):
+        self.storage = array("q")
+        self.cap_bytes = int(cap_bytes)
+        if self.storage.itemsize != torch.iinfo(torch.long).bits // 8:
+            raise RuntimeError("native signed-long storage is not int64")
+
+    def add(self, values: Iterable[int]) -> _IndexRef:
+        start = len(self.storage)
+        self.storage.extend(values)
+        size = len(self.storage) * self.storage.itemsize
+        if size > self.cap_bytes:
+            raise RuntimeError(
+                f"packed index metadata exceeds cap: {size} > {self.cap_bytes}")
+        return _IndexRef(start, len(self.storage) - start)
+
+    def finish(self, device: torch.device) -> _PackedIndexArena:
+        if self.storage:
+            host = torch.frombuffer(self.storage, dtype=torch.long)
+        else:
+            host = torch.empty(0, dtype=torch.long)
+        packed = host if device.type == "cpu" else host.to(
+            device=device, non_blocking=False)
+        return _PackedIndexArena(self.storage, host, packed)
 
 
 def local_mask(token: int) -> int:
@@ -127,6 +173,8 @@ def _ordered_qk_radius(a: torch.Tensor, b: torch.Tensor,
     radius = torch.zeros(heads, na, nb, device=a.device, dtype=a.dtype)
     macs = 0
     launches = 0
+    builder = _IndexArenaBuilder()
+    tasks: list[tuple[int, int, _IndexRef]] = []
     for query in range(na):
         lbit = local_mask(query)
         for key in range(nb):
@@ -141,17 +189,20 @@ def _ordered_qk_radius(a: torch.Tensor, b: torch.Tensor,
                 index for index in range(gmin)
                 if (left.masks[index] & lbit) or (right.masks[index] & rbit)
             ]
-            indices = torch.tensor(active, device=a.device, dtype=torch.long)
-            av = a[:, 1 + indices, query, :]
-            bv = b[:, 1 + indices, key, :]
-            first = torch.bmm(av, bv.transpose(1, 2))
-            launches += 1
-            symmetric = first + first.transpose(1, 2)
-            diagonal = torch.diagonal(symmetric, dim1=1, dim2=2)
-            radius[:, query, key] = (
-                0.5 * symmetric.abs().sum(dim=(1, 2))
-                - 0.25 * diagonal.abs().sum(dim=1))
-            macs += heads * len(active) * len(active) * dimension
+            tasks.append((query, key, builder.add(active)))
+    arena = builder.finish(a.device)
+    for query, key, index_ref in tasks:
+        indices = arena.view(index_ref)
+        av = a[:, 1 + indices, query, :]
+        bv = b[:, 1 + indices, key, :]
+        first = torch.bmm(av, bv.transpose(1, 2))
+        launches += 1
+        symmetric = first + first.transpose(1, 2)
+        diagonal = torch.diagonal(symmetric, dim1=1, dim2=2)
+        radius[:, query, key] = (
+            0.5 * symmetric.abs().sum(dim=(1, 2))
+            - 0.25 * diagonal.abs().sum(dim=1))
+        macs += (heads * index_ref.length * index_ref.length * dimension)
     return radius, macs, launches
 
 
@@ -187,13 +238,14 @@ def _av_radius(a: torch.Tensor, b: torch.Tensor,
         bg = torch.cat([bg, torch.zeros(
             heads, gmax-gb, features, keys, device=b.device, dtype=b.dtype)], 1)
     class_items = sorted(groups.items())
-    macs = 0
-    launches = 0
-    peak_temporary = 0
+    builder = _IndexArenaBuilder()
+    tasks: list[tuple[_IndexRef, _IndexRef, _IndexRef, _IndexRef, bool]] = []
     for class_pos, ((left_i, right_i), members_i) in enumerate(class_items):
-        keys_i = [key for key in range(keys) if right_i & local_mask(key)]
+        keys_i = tuple(key for key in range(keys)
+                       if right_i & local_mask(key))
         for (left_j, right_j), members_j in class_items[class_pos:]:
-            keys_j = [key for key in range(keys) if right_j & local_mask(key)]
+            keys_j = tuple(key for key in range(keys)
+                           if right_j & local_mask(key))
             same_class = (left_i, right_i) == (left_j, right_j)
             for ii in range(0, len(members_i), tile):
                 inds_i = members_i[ii:ii + tile]
@@ -202,38 +254,50 @@ def _av_radius(a: torch.Tensor, b: torch.Tensor,
                     inds_j = members_j[jj:jj + tile]
                     if same_class and jj < ii:
                         continue
-                    ti = torch.tensor(inds_i, device=a.device, dtype=torch.long)
-                    tj = torch.tensor(inds_j, device=a.device, dtype=torch.long)
-                    term = None
-                    if keys_j:
-                        kj = torch.tensor(keys_j, device=a.device, dtype=torch.long)
-                        term = torch.einsum(
-                            "hiqk,hjfk->hijqf",
-                            ag[:, ti, :, :].index_select(3, kj),
-                            bg[:, tj, :, :].index_select(3, kj))
-                        macs += (heads * len(inds_i) * len(inds_j)
-                                 * queries * features * len(keys_j))
-                    if keys_i:
-                        ki = torch.tensor(keys_i, device=a.device, dtype=torch.long)
-                        other = torch.einsum(
-                            "hifk,hjqk->hijqf",
-                            bg[:, ti, :, :].index_select(3, ki),
-                            ag[:, tj, :, :].index_select(3, ki))
-                        macs += (heads * len(inds_i) * len(inds_j)
-                                 * queries * features * len(keys_i))
-                        term = other if term is None else term.add_(other)
-                    if term is None:
-                        continue
-                    launches += 1
-                    peak_temporary = max(
-                        peak_temporary, term.numel() * term.element_size())
-                    if same_class and ii == jj:
-                        diagonal = torch.diagonal(term, dim1=1, dim2=2)
-                        radius.add_(0.5 * term.abs().sum(dim=(1, 2)))
-                        radius.sub_(0.25 * diagonal.abs().sum(dim=-1))
-                    else:
-                        radius.add_(term.abs().sum(dim=(1, 2)))
-                    del term
+                    if keys_i or keys_j:
+                        tasks.append((
+                            builder.add(inds_i), builder.add(inds_j),
+                            builder.add(keys_i), builder.add(keys_j),
+                            same_class and ii == jj))
+    arena = builder.finish(a.device)
+    macs = 0
+    launches = 0
+    peak_temporary = 0
+    for inds_i_ref, inds_j_ref, keys_i_ref, keys_j_ref, diagonal_task in tasks:
+        ti = arena.view(inds_i_ref)
+        tj = arena.view(inds_j_ref)
+        keys_i_length = keys_i_ref.length
+        keys_j_length = keys_j_ref.length
+        term = None
+        if keys_j_length:
+            kj = arena.view(keys_j_ref)
+            term = torch.einsum(
+                "hiqk,hjfk->hijqf",
+                ag[:, ti, :, :].index_select(3, kj),
+                bg[:, tj, :, :].index_select(3, kj))
+            macs += (heads * inds_i_ref.length * inds_j_ref.length
+                     * queries * features * keys_j_length)
+        if keys_i_length:
+            ki = arena.view(keys_i_ref)
+            other = torch.einsum(
+                "hifk,hjqk->hijqf",
+                bg[:, ti, :, :].index_select(3, ki),
+                ag[:, tj, :, :].index_select(3, ki))
+            macs += (heads * inds_i_ref.length * inds_j_ref.length
+                     * queries * features * keys_i_length)
+            term = other if term is None else term.add_(other)
+        if term is None:
+            continue
+        launches += 1
+        peak_temporary = max(
+            peak_temporary, term.numel() * term.element_size())
+        if diagonal_task:
+            diagonal = torch.diagonal(term, dim1=1, dim2=2)
+            radius.add_(0.5 * term.abs().sum(dim=(1, 2)))
+            radius.sub_(0.25 * diagonal.abs().sum(dim=-1))
+        else:
+            radius.add_(term.abs().sum(dim=(1, 2)))
+        del term
     return radius, macs, launches, peak_temporary
 
 

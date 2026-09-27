@@ -28,7 +28,7 @@ def test_frozen_source_hashes_and_fused_unreachable():
     assert common.sha256(common.RESEARCH / "coret_optimized_historical_127_v1.py") == \
         "8d3e2216b7174f853968c71eebc78318c86dff061875e194aee3d34c8a85d6cb"
     assert common.sha256(common.RESEARCH / "coret_structural_support_precise_dot_v1.py") == \
-        "86ba56410c713283251264c618d7652f1f741531bda4bfdc0dcdf38df7a2a0c6"
+        "acdf3751b25ca3d2dc79f4d6dd2cbac0990b192cc28c982bd499ddc2159715ca"
 
 
 def test_artifact_manifest_and_result_import():

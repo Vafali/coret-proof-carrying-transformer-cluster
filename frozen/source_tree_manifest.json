@@ -1,6 +1,6 @@
 {
   "bound_entrypoint_calls": 0,
-  "canonical_manifest_sha256": "16ba3ccf0c40f803a8ec9a988427f8ef62ac33d2473ff1e5225d292c02ae2fd2",
+  "canonical_manifest_sha256": "217eb8d1b3592d6f6a7c2ef6b5ddd4103c36451d105675359b2545ed08d29b4c",
   "files": [
     {
       "byte_size": 248,
@@ -148,9 +148,9 @@
       "sha256": "f26a0f5453409407a06a6491966bd8f13965365669ca9e7bd68229013a065f6e"
     },
     {
-      "byte_size": 33711,
+      "byte_size": 35658,
       "path": "research_hab/coret_structural_support_precise_dot_v1.py",
-      "sha256": "86ba56410c713283251264c618d7652f1f741531bda4bfdc0dcdf38df7a2a0c6"
+      "sha256": "acdf3751b25ca3d2dc79f4d6dd2cbac0990b192cc28c982bd499ddc2159715ca"
     },
     {
       "byte_size": 23180,
@@ -183,6 +183,11 @@
       "sha256": "24e5683a1f46d17f7945ddcc2ff2774547f7d8df7adc63be7f85775f95537033"
     },
     {
+      "byte_size": 13110,
+      "path": "scripts/audit_depth6_workspace_v1.py",
+      "sha256": "c51f0c745ad7f2c937e3f345695dceafe1d3e722173d868c882d543eb2bf98b4"
+    },
+    {
       "byte_size": 5901,
       "path": "scripts/build_a40_fresh_plan.py",
       "sha256": "0fa8d792fbe7c8daad6f6f69ef79a3ec771cbfeec0d0f4c77034858d8c6cdf02"
@@ -206,6 +211,11 @@
       "byte_size": 583,
       "path": "scripts/fetch_deept.sh",
       "sha256": "35deb2d1ab0bdddda8e0bac70b27930a6dd082fc60bfbd6a0f9066952d752cc0"
+    },
+    {
+      "byte_size": 10436,
+      "path": "scripts/gate_packed_metadata_workspace_v1.py",
+      "sha256": "d8087d5dba6e89085c84b9f63686e283b206e06fa5169043a5aca3f04ceb5449"
     },
     {
       "byte_size": 790,
@@ -285,7 +295,7 @@
     {
       "byte_size": 9086,
       "path": "tests/test_a40_fresh_offline.py",
-      "sha256": "033f79f10ad9c8a17f5782e5aa3c39e115ea1d1b4d57d1b8d92d7ff4e12b233b"
+      "sha256": "5be8aa8d15b399b3a84733362f4110c211b42992e2af87303ecf370688e7039e"
     },
     {
       "byte_size": 3766,
@@ -295,7 +305,12 @@
     {
       "byte_size": 6114,
       "path": "tests/test_cluster_offline.py",
-      "sha256": "dc6e5505199f134e17a7ea2ad1fc8d28cbf529927c1635b89d2bdf472e613e83"
+      "sha256": "67ebba133cb9e56d6a7f8fdd88ed11e0a590e3c941c8d331c83db7c4348341d6"
+    },
+    {
+      "byte_size": 10420,
+      "path": "tests/test_packed_metadata_workspace.py",
+      "sha256": "5f6c272c5c428ee5f8def36a2490775d03857c20e3bdfb997f792aaea334390b"
     }
   ],
   "schema": "CORET_CLUSTER_SOURCE_TREE_MANIFEST_V1",
