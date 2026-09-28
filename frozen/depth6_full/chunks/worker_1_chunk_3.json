@@ -1,0 +1,152 @@
+{
+  "canonical_manifest_sha256": "25fbf084f997291a18a75a5aa41b25ae6d6ccd06c987ba7e39d2ef8354bacaea",
+  "chunk_index": 3,
+  "objective_cost": 6983,
+  "parent_plan_sha256": "18f958b4992f53bf019d7361d026251f018f0c8153844d81d5be27a8d2f61da3",
+  "physical_gpu": "gpu1",
+  "predicted_hours_lower": 10.016401753591401,
+  "predicted_hours_upper": 10.38737959631701,
+  "predicted_seconds_central": 36682.37936829835,
+  "production_manifest_sha256": "1369ea96102e3aeb5aaabc752ebf37385742d377e88934ef5a98f3f8570222f7",
+  "properties": [
+    {
+      "benchmark_ordinal": 3,
+      "objective_cost": 400,
+      "property_id": "deept_table7_stdln6_s000_line504_tok04",
+      "sentence_ordinal": 0,
+      "sequence_length": 20,
+      "token_position": 4
+    },
+    {
+      "benchmark_ordinal": 11,
+      "objective_cost": 400,
+      "property_id": "deept_table7_stdln6_s000_line504_tok12",
+      "sentence_ordinal": 0,
+      "sequence_length": 20,
+      "token_position": 12
+    },
+    {
+      "benchmark_ordinal": 31,
+      "objective_cost": 289,
+      "property_id": "deept_table7_stdln6_s002_line2031_tok08",
+      "sentence_ordinal": 2,
+      "sequence_length": 17,
+      "token_position": 8
+    },
+    {
+      "benchmark_ordinal": 44,
+      "objective_cost": 144,
+      "property_id": "deept_table7_stdln6_s003_line216_tok08",
+      "sentence_ordinal": 3,
+      "sequence_length": 12,
+      "token_position": 8
+    },
+    {
+      "benchmark_ordinal": 47,
+      "objective_cost": 256,
+      "property_id": "deept_table7_stdln6_s004_line1931_tok01",
+      "sentence_ordinal": 4,
+      "sequence_length": 16,
+      "token_position": 1
+    },
+    {
+      "benchmark_ordinal": 53,
+      "objective_cost": 256,
+      "property_id": "deept_table7_stdln6_s004_line1931_tok09",
+      "sentence_ordinal": 4,
+      "sequence_length": 16,
+      "token_position": 9
+    },
+    {
+      "benchmark_ordinal": 61,
+      "objective_cost": 256,
+      "property_id": "deept_table7_stdln6_s005_line882_tok12",
+      "sentence_ordinal": 5,
+      "sequence_length": 16,
+      "token_position": 12
+    },
+    {
+      "benchmark_ordinal": 65,
+      "objective_cost": 484,
+      "property_id": "deept_table7_stdln6_s006_line2029_tok02",
+      "sentence_ordinal": 6,
+      "sequence_length": 22,
+      "token_position": 2
+    },
+    {
+      "benchmark_ordinal": 69,
+      "objective_cost": 484,
+      "property_id": "deept_table7_stdln6_s006_line2029_tok06",
+      "sentence_ordinal": 6,
+      "sequence_length": 22,
+      "token_position": 6
+    },
+    {
+      "benchmark_ordinal": 77,
+      "objective_cost": 484,
+      "property_id": "deept_table7_stdln6_s006_line2029_tok14",
+      "sentence_ordinal": 6,
+      "sequence_length": 22,
+      "token_position": 14
+    },
+    {
+      "benchmark_ordinal": 89,
+      "objective_cost": 841,
+      "property_id": "deept_table7_stdln6_s007_line1283_tok14",
+      "sentence_ordinal": 7,
+      "sequence_length": 29,
+      "token_position": 14
+    },
+    {
+      "benchmark_ordinal": 97,
+      "objective_cost": 841,
+      "property_id": "deept_table7_stdln6_s007_line1283_tok22",
+      "sentence_ordinal": 7,
+      "sequence_length": 29,
+      "token_position": 22
+    },
+    {
+      "benchmark_ordinal": 110,
+      "objective_cost": 324,
+      "property_id": "deept_table7_stdln6_s008_line985_tok08",
+      "sentence_ordinal": 8,
+      "sequence_length": 18,
+      "token_position": 8
+    },
+    {
+      "benchmark_ordinal": 118,
+      "objective_cost": 324,
+      "property_id": "deept_table7_stdln6_s008_line985_tok16",
+      "sentence_ordinal": 8,
+      "sequence_length": 18,
+      "token_position": 16
+    },
+    {
+      "benchmark_ordinal": 120,
+      "objective_cost": 400,
+      "property_id": "deept_table7_stdln6_s009_line504_tok02",
+      "sentence_ordinal": 9,
+      "sequence_length": 20,
+      "token_position": 2
+    },
+    {
+      "benchmark_ordinal": 128,
+      "objective_cost": 400,
+      "property_id": "deept_table7_stdln6_s009_line504_tok10",
+      "sentence_ordinal": 9,
+      "sequence_length": 20,
+      "token_position": 10
+    },
+    {
+      "benchmark_ordinal": 136,
+      "objective_cost": 400,
+      "property_id": "deept_table7_stdln6_s009_line504_tok18",
+      "sentence_ordinal": 9,
+      "sequence_length": 20,
+      "token_position": 18
+    }
+  ],
+  "property_count": 17,
+  "schema": "CORET_DEPTH6_FULL_A40_CHUNK_V1",
+  "worker_id": 1
+}

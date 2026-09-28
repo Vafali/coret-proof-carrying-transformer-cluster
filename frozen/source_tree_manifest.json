@@ -1,6 +1,6 @@
 {
   "bound_entrypoint_calls": 0,
-  "canonical_manifest_sha256": "716378ad9d817d57442d2483f6430c45940193f94a95c72d57d31bc915fc1192",
+  "canonical_manifest_sha256": "0b5b186724f984f57b08802ab94d4be97341822cefd5b7fec3f209912d4a880e",
   "files": [
     {
       "byte_size": 248,
@@ -81,6 +81,56 @@
       "byte_size": 965,
       "path": "frozen/cluster_baseline_state.json",
       "sha256": "875b0442985a3e96ba99afcb4c673df8b19b3b7013b5ad7ceb18a3c4b6b33f36"
+    },
+    {
+      "byte_size": 4379,
+      "path": "frozen/depth6_full/chunks/worker_0_chunk_0.json",
+      "sha256": "610f41b62f86786dfbb73e282e01a17150b79437dfb79ee5083514abfb3a45e9"
+    },
+    {
+      "byte_size": 4379,
+      "path": "frozen/depth6_full/chunks/worker_0_chunk_1.json",
+      "sha256": "ca902a56213403ed456510c7cd17230fb83646d8764b9f6493cbf96a3c95c8ef"
+    },
+    {
+      "byte_size": 4594,
+      "path": "frozen/depth6_full/chunks/worker_0_chunk_2.json",
+      "sha256": "0c2ea22faffb733bc83dc61e0769968de96fe8920c53f0196ae354e82048b6dd"
+    },
+    {
+      "byte_size": 4381,
+      "path": "frozen/depth6_full/chunks/worker_0_chunk_3.json",
+      "sha256": "bf750fc9d9260a8678f6297ac5b6b6b329e11b833a6d9809b7de923c07aede06"
+    },
+    {
+      "byte_size": 4380,
+      "path": "frozen/depth6_full/chunks/worker_1_chunk_0.json",
+      "sha256": "2fd2b8f42d8f1eb429ba337467f1fb3947b6fa822a4809f44067248157683619"
+    },
+    {
+      "byte_size": 4380,
+      "path": "frozen/depth6_full/chunks/worker_1_chunk_1.json",
+      "sha256": "a4ee5a4ed87175594c5f39c428d05b916eabfd092ba456649d5c9845bc725d8d"
+    },
+    {
+      "byte_size": 4380,
+      "path": "frozen/depth6_full/chunks/worker_1_chunk_2.json",
+      "sha256": "9bf95b2a9447a40be2dfb176ea181dd86fcf51d89feef55e0bdffbfde15669ae"
+    },
+    {
+      "byte_size": 4379,
+      "path": "frozen/depth6_full/chunks/worker_1_chunk_3.json",
+      "sha256": "ef1ab0d0e76ca0b4ecdb0a724ebda99aa276e63f7c53ad340a8c013473bf40e8"
+    },
+    {
+      "byte_size": 43498,
+      "path": "frozen/depth6_full/depth6_full_a40_plan_v1.json",
+      "sha256": "f339059c4d63e937c518c35bd2bb6211af5b425bc69cc379a15cee44124dfd32"
+    },
+    {
+      "byte_size": 178370,
+      "path": "frozen/depth6_full/depth6_full_production_manifest_v1.json",
+      "sha256": "e50c1e7a82521527ae4c307f889dfc03c020ff1b5e0ee0b7bdf169bd240f9c1c"
     },
     {
       "byte_size": 7159,
@@ -183,6 +233,11 @@
       "sha256": "24e5683a1f46d17f7945ddcc2ff2774547f7d8df7adc63be7f85775f95537033"
     },
     {
+      "byte_size": 8619,
+      "path": "scripts/analyze_depth6_full.py",
+      "sha256": "d57c92bfaab45e02dc54ff9cdee425e5c49e2f6914aa749733dd958b167924a0"
+    },
+    {
       "byte_size": 13110,
       "path": "scripts/audit_depth6_workspace_v1.py",
       "sha256": "c51f0c745ad7f2c937e3f345695dceafe1d3e722173d868c882d543eb2bf98b4"
@@ -191,6 +246,11 @@
       "byte_size": 5901,
       "path": "scripts/build_a40_fresh_plan.py",
       "sha256": "0fa8d792fbe7c8daad6f6f69ef79a3ec771cbfeec0d0f4c77034858d8c6cdf02"
+    },
+    {
+      "byte_size": 6591,
+      "path": "scripts/build_depth6_full_plan.py",
+      "sha256": "672c09fbce200f1ecd7ba84e26916ea34eee9e6338f374c21e8656d2a3934dbf"
     },
     {
       "byte_size": 2846,
@@ -206,6 +266,11 @@
       "byte_size": 4299,
       "path": "scripts/compare_calibration.py",
       "sha256": "f6fb74d85bfec62d490714909075c54c86706d48e017eeb60db8a6339d795f05"
+    },
+    {
+      "byte_size": 9986,
+      "path": "scripts/depth6_full_common.py",
+      "sha256": "e4e1df2a9e5d095be795e43e1f4346c94d1601ae0d33b30b1a5b887787851474"
     },
     {
       "byte_size": 583,
@@ -268,6 +333,11 @@
       "sha256": "ea45fc8fe785afd9dc4b028fef9eab737a424d058178b67d02f5de420ea55c82"
     },
     {
+      "byte_size": 12355,
+      "path": "scripts/run_depth6_full_chunk.py",
+      "sha256": "d459f61124ae87d704ec33b9e0c0803453be3507124ef8a3e753aaf78315d247"
+    },
+    {
       "byte_size": 508,
       "path": "scripts/run_property_shard.sh",
       "sha256": "68a9d5393e9354505e1f62765764d439383656d8af72408f8a2cfa01278271de"
@@ -293,6 +363,16 @@
       "sha256": "56a479c476471a6bb64d628537ab4f078d935a384dc1cf97d6425e96b4ecd4bb"
     },
     {
+      "byte_size": 1379,
+      "path": "slurm/depth6_full_worker0.sbatch",
+      "sha256": "f3627b534ab0a2c22d3743895382e4e428c7166a4ded6733a228ae71f6aec520"
+    },
+    {
+      "byte_size": 1379,
+      "path": "slurm/depth6_full_worker1.sbatch",
+      "sha256": "7246ffab796f8cce408c94c4982f625c6344cd3df4ba52898e69d998450c501e"
+    },
+    {
       "byte_size": 9086,
       "path": "tests/test_a40_fresh_offline.py",
       "sha256": "5be8aa8d15b399b3a84733362f4110c211b42992e2af87303ecf370688e7039e"
@@ -306,6 +386,11 @@
       "byte_size": 6114,
       "path": "tests/test_cluster_offline.py",
       "sha256": "31d8538fa35282e9842ac156b4ee10b4e7675c80b867044bc1e62af8c88753dd"
+    },
+    {
+      "byte_size": 8722,
+      "path": "tests/test_depth6_full_offline.py",
+      "sha256": "e0517ca7dddb0fd64fa3bbaae3bef7537874f139e97a71b1e90927d7e344f7a5"
     },
     {
       "byte_size": 8917,
