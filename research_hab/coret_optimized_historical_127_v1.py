@@ -72,23 +72,54 @@ PRIOR_MANIFEST_CANONICAL_SHA = (
     "7237f1e6d642bf0d4d10e5a4d0739a4a350223277a05f14f584207f084093399")
 RECIPROCAL_NAN_NATIVE_ASSERTION = (
     "Reciprocal: there are NaNs in the new COEFFS, pre-condition not met")
+ZONOTOPE_NAN_NATIVE_ASSERTION = (
+    "Zonotope creation: Some values in zonotope_w are NaNs")
+ZONOTOPE_NAN_DOMAIN_DIAGNOSTIC = (
+    "PINNED_DEEPT_ZONOTOPE_NAN_DOMAIN_FAILURE")
 PINNED_ZONOTOPE_BLOB_SHA256 = (
     "08b502ea409170e184f6dbeaad3318d3decfb58cabb6417f3c27d62308d57ad9")
 PINNED_VERIFIER_BLOB_SHA256 = (
     "64ea76bdf7322c526290cd973525dbe49debcd0bdbe8450d9615ed36ecd45fe2")
 
 
-def _is_native_domain_failure(error: BaseException) -> bool:
+def _native_domain_failure_diagnostic(error: BaseException) -> str | None:
     """Mirror native DeepT's fail-closed handling, without broadening it.
 
     The historical predicates retain their exact existing type/prefix checks.
-    This adds only the one pinned reciprocal assertion, by exact type and exact
-    message equality.  Near matches and every other AssertionError stay fatal.
+    Additions use exact type and exact message equality.  Near matches and
+    every other AssertionError stay fatal.
     """
-    return historical_smoke.is_native_domain_failure(error) or (
-        type(error) is AssertionError
-        and str(error) == RECIPROCAL_NAN_NATIVE_ASSERTION
-    )
+    if historical_smoke.is_native_domain_failure(error):
+        return "PINNED_DEEPT_POSITIVITY_DOMAIN_FAILURE"
+    if type(error) is not AssertionError:
+        return None
+    if str(error) == RECIPROCAL_NAN_NATIVE_ASSERTION:
+        return "PINNED_DEEPT_RECIPROCAL_NAN_DOMAIN_FAILURE"
+    if str(error) == ZONOTOPE_NAN_NATIVE_ASSERTION:
+        return ZONOTOPE_NAN_DOMAIN_DIAGNOSTIC
+    return None
+
+
+def _is_native_domain_failure(error: BaseException) -> bool:
+    return _native_domain_failure_diagnostic(error) is not None
+
+
+def _native_domain_failure_fields(error: BaseException) -> dict:
+    """Return the fail-closed query fields, or re-raise an unknown assertion."""
+    diagnostic = _native_domain_failure_diagnostic(error)
+    if diagnostic is None:
+        raise error
+    return {
+        "terminal_status": "UNCERTIFIED_DOMAIN_FAILURE",
+        "reason_code": "UNCERTIFIED_DOMAIN_FAILURE",
+        "domain_failure_diagnostic": diagnostic,
+        "direct_margin_interval": None,
+        "certified": False,
+        "authoritative_bound_returned": False,
+        "complete_certificate": False,
+        "exception_type": type(error).__name__,
+        "exception_message": str(error),
+    }
 
 
 def _canonical(value) -> str:
@@ -576,26 +607,18 @@ def generate_query(property_id: str, rho: float, ordinal: int,
                 dead_holder["input_zonotope"], model, args,
                 clean_label=label, dispatch=dispatch)
     except AssertionError as error:
-        if not _is_native_domain_failure(error):
-            raise
+        failure = _native_domain_failure_fields(error)
         torch.cuda.synchronize()
         telemetry = _query_telemetry(dispatch, delegate)
         saved = _write(result_path, {
             "schema": "CORET_OPTIMIZED_HISTORICAL_127_QUERY_RESULT_V1",
-            "terminal_status": "UNCERTIFIED_DOMAIN_FAILURE",
-            "reason_code": "UNCERTIFIED_DOMAIN_FAILURE",
             "canonical_manifest_sha256": manifest["canonical_manifest_sha256"],
             "property_id": property_id,
             "query_ordinal": ordinal,
             "rho": float(rho),
             "rho_binary64_hex": float(rho).hex(),
-            "direct_margin_interval": None,
             "nominal_margin": nominal,
-            "certified": False,
-            "authoritative_bound_returned": False,
-            "complete_certificate": False,
-            "exception_type": "AssertionError",
-            "exception_message": str(error),
+            **failure,
             "independent_checker_accepted": True,
             "all_support_claims_validated": True,
             "generic_fallback_count": 0,

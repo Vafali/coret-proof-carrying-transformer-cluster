@@ -136,6 +136,61 @@ class DepthSanityA40Tests(unittest.TestCase):
             self.assertEqual(search["midpoint_iterations"], 10)
             self.assertTrue(search["factor_two_bracketing"])
 
+    def test_known_zonotope_nan_assertion_is_fail_closed(self):
+        import coret_optimized_historical_127_v1 as scientific_runner
+
+        error = AssertionError(scientific_runner.ZONOTOPE_NAN_NATIVE_ASSERTION)
+        fields = scientific_runner._native_domain_failure_fields(error)
+        self.assertEqual(fields["terminal_status"],
+                         "UNCERTIFIED_DOMAIN_FAILURE")
+        self.assertEqual(fields["reason_code"],
+                         "UNCERTIFIED_DOMAIN_FAILURE")
+        self.assertEqual(fields["domain_failure_diagnostic"],
+                         scientific_runner.ZONOTOPE_NAN_DOMAIN_DIAGNOSTIC)
+        self.assertIs(fields["certified"], False)
+        self.assertIs(fields["authoritative_bound_returned"], False)
+        self.assertIs(fields["complete_certificate"], False)
+        self.assertEqual(fields["exception_message"], str(error))
+
+    def test_nearby_or_unrelated_assertions_remain_fatal(self):
+        import coret_optimized_historical_127_v1 as scientific_runner
+
+        errors = (
+            AssertionError("unrelated programming invariant"),
+            AssertionError(scientific_runner.ZONOTOPE_NAN_NATIVE_ASSERTION + "."),
+        )
+        for error in errors:
+            with self.assertRaisesRegex(AssertionError, str(error)):
+                scientific_runner._native_domain_failure_fields(error)
+
+    def test_existing_domain_failures_remain_fail_closed(self):
+        import coret_optimized_historical_127_v1 as scientific_runner
+
+        messages = (
+            "sqrt: Bounds must be positive",
+            "reciprocal: Bounds must be positive but one element failed",
+            scientific_runner.RECIPROCAL_NAN_NATIVE_ASSERTION,
+        )
+        for message in messages:
+            fields = scientific_runner._native_domain_failure_fields(
+                AssertionError(message))
+            self.assertEqual(fields["terminal_status"],
+                             "UNCERTIFIED_DOMAIN_FAILURE")
+            self.assertIs(fields["certified"], False)
+
+    def test_successful_query_return_is_not_transformed(self):
+        import coret_optimized_historical_127_v1 as scientific_runner
+
+        sentinel = object()
+
+        def query_boundary(callback):
+            try:
+                return callback()
+            except AssertionError as error:
+                return scientific_runner._native_domain_failure_fields(error)
+
+        self.assertIs(query_boundary(lambda: sentinel), sentinel)
+
     def test_preflight_is_zero_solve(self):
         for depth in (6, 12):
             row = runner.preflight(depth)
