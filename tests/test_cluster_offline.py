@@ -26,7 +26,7 @@ def test_frozen_source_hashes_and_fused_unreachable():
     scientific = list((common.REPO / "research_hab").glob("*.py"))
     assert not any("fused_av" in path.read_text(errors="ignore") for path in scientific)
     assert common.sha256(common.RESEARCH / "coret_optimized_historical_127_v1.py") == \
-        "12d8ab94b1a932bfb9d5799123f30379cf8ab3e41a5e3aaa2e8a49bf135c744c"
+        "b62494ba6230773a227f1599684faac5832442189ca555339cdb893d8179fd70"
     assert common.sha256(common.RESEARCH / "coret_structural_support_precise_dot_v1.py") == \
         "effd8af7b0a15a5417f9143a333402b013c70886f6332e8d11b56e4c35502e2e"
 

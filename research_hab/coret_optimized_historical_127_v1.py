@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import resource
 import statistics
 import subprocess
@@ -76,10 +77,54 @@ ZONOTOPE_NAN_NATIVE_ASSERTION = (
     "Zonotope creation: Some values in zonotope_w are NaNs")
 ZONOTOPE_NAN_DOMAIN_DIAGNOSTIC = (
     "PINNED_DEEPT_ZONOTOPE_NAN_DOMAIN_FAILURE")
+EXP_MARK_DOMAIN_DIAGNOSTIC = "PINNED_DEEPT_EXP_MARK_DOMAIN_FAILURE"
 PINNED_ZONOTOPE_BLOB_SHA256 = (
     "08b502ea409170e184f6dbeaad3318d3decfb58cabb6417f3c27d62308d57ad9")
 PINNED_VERIFIER_BLOB_SHA256 = (
     "64ea76bdf7322c526290cd973525dbe49debcd0bdbe8450d9615ed36ecd45fe2")
+_FINITE_FLOAT_PATTERN = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+_EXP_MARK_ASSERTION_PATTERN = re.compile(
+    rf"^exp_mark: diff < 0\. diff min = "
+    rf"(?P<diff>{_FINITE_FLOAT_PATTERN}), const min = "
+    rf"(?P<const>{_FINITE_FLOAT_PATTERN}),  intercept\.max = "
+    rf"(?P<intercept>{_FINITE_FLOAT_PATTERN})$")
+_PINNED_EXP_MARK_ASSERTION_LINE = 1363
+
+
+def _has_pinned_exp_mark_origin(error: BaseException) -> bool:
+    """Require the exact hash-pinned native assertion frame.
+
+    Text alone is insufficient: proof/checker assertions cannot be translated
+    unless the traceback contains pinned Zonotope.exp_minimal_area line 1363.
+    """
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        path = Path(frame.f_code.co_filename)
+        if (frame.f_code.co_name == "exp_minimal_area"
+                and traceback.tb_lineno == _PINNED_EXP_MARK_ASSERTION_LINE
+                and path.name == "Zonotope.py"):
+            try:
+                if hashlib.sha256(path.read_bytes()).hexdigest() \
+                        == PINNED_ZONOTOPE_BLOB_SHA256:
+                    return True
+            except OSError:
+                return False
+        traceback = traceback.tb_next
+    return False
+
+
+def _is_pinned_exp_mark_domain_failure(error: BaseException) -> bool:
+    if type(error) is not AssertionError:
+        return False
+    match = _EXP_MARK_ASSERTION_PATTERN.fullmatch(str(error))
+    if match is None:
+        return False
+    # This is the exact failed native guard.  Do not classify messages whose
+    # reported minimum would satisfy the pinned >= -1e-4 assertion.
+    if not float(match.group("diff")) < -1e-4:
+        return False
+    return _has_pinned_exp_mark_origin(error)
 
 
 def _native_domain_failure_diagnostic(error: BaseException) -> str | None:
@@ -97,6 +142,8 @@ def _native_domain_failure_diagnostic(error: BaseException) -> str | None:
         return "PINNED_DEEPT_RECIPROCAL_NAN_DOMAIN_FAILURE"
     if str(error) == ZONOTOPE_NAN_NATIVE_ASSERTION:
         return ZONOTOPE_NAN_DOMAIN_DIAGNOSTIC
+    if _is_pinned_exp_mark_domain_failure(error):
+        return EXP_MARK_DOMAIN_DIAGNOSTIC
     return None
 
 

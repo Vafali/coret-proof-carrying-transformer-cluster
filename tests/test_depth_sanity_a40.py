@@ -22,6 +22,29 @@ import coret_deept_depth_adapter_v1 as depth_adapter
 
 
 class DepthSanityA40Tests(unittest.TestCase):
+    @staticmethod
+    def _pinned_exp_mark_error(message):
+        """Raise at the exact pinned frame identity without running DeepT."""
+        source_path = (
+            "Robustness-Verification-for-Transformers/Verifiers/Zonotope.py")
+        blob = common.git_blob(source_path)
+        temporary = tempfile.TemporaryDirectory()
+        path = Path(temporary.name) / "Zonotope.py"
+        path.write_bytes(blob)
+        # Function declaration is line 1362; its raise is pinned line 1363.
+        source = ("\n" * 1361) + (
+            "def exp_minimal_area():\n"
+            f"    raise AssertionError({message!r})\n")
+        namespace = {}
+        exec(compile(source, str(path), "exec"), namespace)
+        try:
+            namespace["exp_minimal_area"]()
+        except AssertionError as error:
+            # Keep the temporary pinned source alive while provenance is read.
+            error._pinned_source_temporary = temporary
+            return error
+        raise AssertionError("synthetic pinned assertion did not fire")
+
     def test_frozen_manifest_identities(self):
         for depth in (6, 12):
             full, sanity = common.manifests(depth)
@@ -151,6 +174,53 @@ class DepthSanityA40Tests(unittest.TestCase):
         self.assertIs(fields["authoritative_bound_returned"], False)
         self.assertIs(fields["complete_certificate"], False)
         self.assertEqual(fields["exception_message"], str(error))
+
+    def test_pinned_exp_mark_assertion_is_distinct_fail_closed(self):
+        import coret_optimized_historical_127_v1 as scientific_runner
+
+        message = (
+            "exp_mark: diff < 0. diff min = -0.0001220703125, "
+            "const min = -6178.47509765625,  intercept.max = 1.0")
+        error = self._pinned_exp_mark_error(message)
+        fields = scientific_runner._native_domain_failure_fields(error)
+        self.assertEqual(fields["terminal_status"],
+                         "UNCERTIFIED_DOMAIN_FAILURE")
+        self.assertIs(fields["certified"], False)
+        self.assertIs(fields["authoritative_bound_returned"], False)
+        self.assertIs(fields["complete_certificate"], False)
+        self.assertEqual(fields["domain_failure_diagnostic"],
+                         scientific_runner.EXP_MARK_DOMAIN_DIAGNOSTIC)
+        self.assertNotEqual(fields["domain_failure_diagnostic"],
+                            scientific_runner.ZONOTOPE_NAN_DOMAIN_DIAGNOSTIC)
+
+    def test_exp_mark_text_without_pinned_origin_remains_fatal(self):
+        import coret_optimized_historical_127_v1 as scientific_runner
+
+        message = (
+            "exp_mark: diff < 0. diff min = -0.0001220703125, "
+            "const min = -6178.47509765625,  intercept.max = 1.0")
+        error = AssertionError(message)
+        with self.assertRaises(AssertionError) as caught:
+            scientific_runner._native_domain_failure_fields(error)
+        self.assertIs(caught.exception, error)
+
+    def test_exp_mark_near_matches_at_pinned_origin_remain_fatal(self):
+        import coret_optimized_historical_127_v1 as scientific_runner
+
+        messages = (
+            # Exact numbers, but not the exact assertion format.
+            "exp_mark: diff < 0. diff min = -0.0001220703125, "
+            "const min = -6178.47509765625, intercept.max = 1.0",
+            # Exact format, but this value would satisfy the native guard.
+            "exp_mark: diff < 0. diff min = -0.000099, "
+            "const min = -6178.47509765625,  intercept.max = 1.0",
+            "exp_mark: NEW_COEFFS is negative. min = -0.000122",
+        )
+        for message in messages:
+            error = self._pinned_exp_mark_error(message)
+            with self.assertRaises(AssertionError) as caught:
+                scientific_runner._native_domain_failure_fields(error)
+            self.assertIs(caught.exception, error)
 
     def test_nearby_or_unrelated_assertions_remain_fatal(self):
         import coret_optimized_historical_127_v1 as scientific_runner

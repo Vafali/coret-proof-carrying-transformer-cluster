@@ -1,6 +1,6 @@
 {
   "bound_entrypoint_calls": 0,
-  "canonical_manifest_sha256": "8a994bb6f9d42329e0273b49cdacdecd65eab551b786d3f932d6b76de3ec6f23",
+  "canonical_manifest_sha256": "716378ad9d817d57442d2483f6430c45940193f94a95c72d57d31bc915fc1192",
   "files": [
     {
       "byte_size": 248,
@@ -118,9 +118,9 @@
       "sha256": "496b4b9347014ab9a509a3206d4fece6d626261dcc400df147cb04a823417e7e"
     },
     {
-      "byte_size": 54085,
+      "byte_size": 56022,
       "path": "research_hab/coret_optimized_historical_127_v1.py",
-      "sha256": "12d8ab94b1a932bfb9d5799123f30379cf8ab3e41a5e3aaa2e8a49bf135c744c"
+      "sha256": "b62494ba6230773a227f1599684faac5832442189ca555339cdb893d8179fd70"
     },
     {
       "byte_size": 45820,
@@ -305,7 +305,7 @@
     {
       "byte_size": 6114,
       "path": "tests/test_cluster_offline.py",
-      "sha256": "7abaf367c51e01a0fe16dd89635ebd7080301ed57cab8a529fd376bc2a9cb089"
+      "sha256": "31d8538fa35282e9842ac156b4ee10b4e7675c80b867044bc1e62af8c88753dd"
     },
     {
       "byte_size": 8917,
