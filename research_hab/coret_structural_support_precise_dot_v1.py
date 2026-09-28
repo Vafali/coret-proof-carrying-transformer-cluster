@@ -527,6 +527,160 @@ def _replace_proof_ids(proof: SupportProof, inherited: SupportProof,
         proof.num_tokens)
 
 
+@dataclass(frozen=True)
+class _LayerNormFreshTrace:
+    masks: tuple[int, ...]
+    reasons: tuple[str, ...]
+    square_count: int
+    sqrt_flat_indices: tuple[int, ...]
+    reciprocal_flat_indices: tuple[int, ...]
+    product_count: int
+
+
+def _layer_norm_legacy_fresh_masks(source: SupportProof, n: int,
+                                   d: int) -> tuple[int, ...]:
+    affected = 0
+    for mask in source.masks:
+        affected |= mask
+    masks = [local_mask(t) if affected & local_mask(t) else 0
+             for t in range(n)]
+    active_tokens = [t for t in range(n) if affected & local_mask(t)]
+    for _stage in ("sqrt", "reciprocal"):
+        for token in active_tokens:
+            masks.extend([local_mask(token)] * d)
+    for token in range(n):
+        masks.extend([
+            local_mask(token) if affected & local_mask(token) else 0] * d)
+    return tuple(masks)
+
+
+def _native_boolean_membership(predicate: torch.Tensor, n: int, d: int,
+                               affected: int, stage: str
+                               ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Mirror native boolean indexing order without inspecting coefficients."""
+    if predicate.dtype != torch.bool or tuple(predicate.shape) != (n, d):
+        raise RuntimeError(
+            f"LayerNorm {stage} allocation predicate shape differs")
+    flat = torch.arange(predicate.numel(), device=predicate.device).reshape(
+        predicate.shape)[predicate]
+    flat_indices = tuple(int(value) for value in flat.detach().cpu().tolist())
+    tokens = tuple(index // d for index in flat_indices)
+    if any(not (affected & local_mask(token)) for token in tokens):
+        raise RuntimeError(
+            f"LayerNorm {stage} allocated outside proven token support")
+    return tuple(local_mask(token) for token in tokens), flat_indices
+
+
+def _optional_tensors_bitwise_equal(first, second) -> bool:
+    if first is None or second is None:
+        return first is None and second is None
+    return (first.dtype == second.dtype and first.device == second.device
+            and tuple(first.shape) == tuple(second.shape)
+            and torch.equal(first, second))
+
+
+def _assert_layer_norm_replay_parity(authoritative, replay, label: str) -> None:
+    scalar_fields = (
+        "num_error_terms", "num_words", "word_embedding_size",
+        "num_input_error_terms", "num_input_error_terms_special_norm",
+        "perturbed_word_index", "p", "dual_p", "eps",
+    )
+    for field in scalar_fields:
+        if getattr(authoritative, field) != getattr(replay, field):
+            raise RuntimeError(
+                f"{label}: LayerNorm replay metadata differs at {field}")
+    if (authoritative.zonotope_w.dtype != replay.zonotope_w.dtype
+            or authoritative.zonotope_w.device != replay.zonotope_w.device
+            or tuple(authoritative.zonotope_w.shape)
+            != tuple(replay.zonotope_w.shape)
+            or not torch.equal(authoritative.zonotope_w, replay.zonotope_w)):
+        raise RuntimeError(f"{label}: LayerNorm replay coefficients differ")
+    if not _optional_tensors_bitwise_equal(
+            authoritative.error_term_range_low,
+            replay.error_term_range_low):
+        raise RuntimeError(f"{label}: LayerNorm replay lower ranges differ")
+    if not _optional_tensors_bitwise_equal(
+            authoritative.error_term_range_high,
+            replay.error_term_range_high):
+        raise RuntimeError(f"{label}: LayerNorm replay upper ranges differ")
+
+
+def _replay_layer_norm_with_membership(z, normalizer, mode: str,
+                                       source: SupportProof, label: str):
+    """Replay pinned LayerNorm only to recover its exact allocation predicates.
+
+    The caller retains the separately produced authoritative result.  This
+    replay must match it bit-for-bit before any traced support metadata is used.
+    """
+    if mode != "standard":
+        raise RuntimeError(
+            f"{label}: LayerNorm membership replay requires standard mode")
+    n, d = z.num_words, z.word_embedding_size
+    affected = 0
+    for mask in source.masks:
+        affected |= mask
+
+    w_avg = torch.ones((d, d), device=z.device) / d
+    centered = z.add(z.matmul(w_avg).multiply(-1.0))
+    variance = centered.square_and_sum_and_repeat().multiply(1 / d)
+    square_count = variance.num_error_terms - centered.num_error_terms
+    if square_count != n:
+        raise RuntimeError(
+            f"{label}: native variance fresh count {square_count} != {n}")
+    square_masks = tuple(
+        local_mask(token) if affected & local_mask(token) else 0
+        for token in range(n))
+
+    sqrt_input = variance.add(1e-12)
+    sqrt_lower, sqrt_upper = sqrt_input.concretize()
+    sqrt_predicate = sqrt_lower != sqrt_upper
+    sqrt_masks, sqrt_flat = _native_boolean_membership(
+        sqrt_predicate, n, d, affected, "sqrt")
+    sqrt_state = sqrt_input.sqrt()
+    sqrt_count = sqrt_state.num_error_terms - sqrt_input.num_error_terms
+    if sqrt_count != len(sqrt_flat):
+        raise RuntimeError(
+            f"{label}: native sqrt allocation count differs from predicate")
+
+    reciprocal_lower, reciprocal_upper = sqrt_state.concretize()
+    reciprocal_predicate = reciprocal_lower != reciprocal_upper
+    reciprocal_masks, reciprocal_flat = _native_boolean_membership(
+        reciprocal_predicate, n, d, affected, "reciprocal")
+    reciprocal = sqrt_state.reciprocal(
+        original_implementation=True, y_positive_constraint=False)
+    reciprocal_count = reciprocal.num_error_terms - sqrt_state.num_error_terms
+    if reciprocal_count != len(reciprocal_flat):
+        raise RuntimeError(
+            f"{label}: native reciprocal allocation count differs from predicate")
+
+    expanded = centered.expand_error_terms_to_match_zonotope(reciprocal)
+    product = expanded.multiply(reciprocal)
+    product_count = product.num_error_terms - reciprocal.num_error_terms
+    if product_count != n * d:
+        raise RuntimeError(
+            f"{label}: native final-product fresh count differs")
+    product_masks = tuple(
+        local_mask(token) if affected & local_mask(token) else 0
+        for token in range(n) for _feature in range(d))
+    replay = product.multiply(normalizer.weight).add(normalizer.bias)
+
+    masks = square_masks + sqrt_masks + reciprocal_masks + product_masks
+    reasons = (
+        tuple("native_layernorm_variance_coordinate" for _ in square_masks)
+        + tuple("native_layernorm_sqrt_l_ne_u" for _ in sqrt_masks)
+        + tuple("native_layernorm_reciprocal_l_ne_u"
+                for _ in reciprocal_masks)
+        + tuple("native_layernorm_final_product_coordinate"
+                for _ in product_masks)
+    )
+    trace = _LayerNormFreshTrace(
+        masks=masks, reasons=reasons, square_count=square_count,
+        sqrt_flat_indices=sqrt_flat,
+        reciprocal_flat_indices=reciprocal_flat,
+        product_count=product_count)
+    return replay, trace
+
+
 class StructuralNativeSemanticOperators(frozen.BoundedNativeSemanticOperators):
     """Fixture/production facade carrying exact token-topology provenance."""
     def __init__(self, revision=native_proof.PINNED_REVISION,
@@ -558,34 +712,22 @@ class StructuralNativeSemanticOperators(frozen.BoundedNativeSemanticOperators):
             [local_mask(token)] * z.num_error_terms, n, "input_source",
             "original_perturbed_embedding_coordinate")
 
-    def _layer_norm_output(self, source: SupportProof, output, label):
-        n, d = output.num_words, output.word_embedding_size
-        affected = 0
-        for mask in source.masks:
-            affected |= mask
-        fresh_masks = []
-        # square-and-sum emits one slot per token, including structural zeros.
-        fresh_masks.extend(local_mask(t) if affected & local_mask(t) else 0
-                           for t in range(n))
-        active_tokens = [t for t in range(n) if affected & local_mask(t)]
-        for _stage in ("sqrt", "reciprocal"):
-            for token in active_tokens:
-                fresh_masks.extend([local_mask(token)] * d)
-        # Native final product emits one slot per tensor coordinate.
-        for token in range(n):
-            fresh_masks.extend([
-                local_mask(token) if affected & local_mask(token) else 0] * d)
+    def _layer_norm_output(self, source: SupportProof, output, label,
+                           fresh_masks: tuple[int, ...],
+                           fresh_reasons: tuple[str, ...]):
         needed = output.num_error_terms - len(source.masks)
         if len(fresh_masks) != needed:
             raise RuntimeError(
                 f"{label}: LayerNorm support transition mismatch "
                 f"{len(fresh_masks)} != {needed}")
+        if len(fresh_reasons) != needed:
+            raise RuntimeError(
+                f"{label}: LayerNorm support reason transition mismatch")
         return SupportProof(
-            source.masks + tuple(fresh_masks),
+            source.masks + fresh_masks,
             source.ids + tuple(
                 f"{label}_fresh_{i:06d}" for i in range(len(fresh_masks))),
-            source.reasons + tuple(
-                "native_tokenwise_layernorm_topology" for _ in fresh_masks), n)
+            source.reasons + fresh_reasons, output.num_words)
 
     def layer_norm(self, z, normalizer, mode="standard"):
         index = self._layer_norm_index
@@ -607,9 +749,39 @@ class StructuralNativeSemanticOperators(frozen.BoundedNativeSemanticOperators):
             source = _aligned_union_proof(
                 self._post_attention, self._relu, count,
                 f"residual_ffn_{index}")
+        label = f"layernorm_{index}"
+        if len(source.masks) != z.num_error_terms:
+            raise RuntimeError(
+                f"{label}: LayerNorm input support/generator count mismatch "
+                f"{len(source.masks)} != {z.num_error_terms}")
         result = super().layer_norm(z, normalizer, mode)
-        proof = self._layer_norm_output(source, result.value,
-                                        f"layernorm_{index}")
+        legacy_masks = _layer_norm_legacy_fresh_masks(
+            source, result.value.num_words, result.value.word_embedding_size)
+        needed = result.value.num_error_terms - len(source.masks)
+        if len(legacy_masks) == needed:
+            fresh_masks = legacy_masks
+            fresh_reasons = tuple(
+                "native_tokenwise_layernorm_topology" for _ in fresh_masks)
+        else:
+            replay, trace = _replay_layer_norm_with_membership(
+                z, normalizer, mode, source, label)
+            _assert_layer_norm_replay_parity(result.value, replay, label)
+            fresh_masks = trace.masks
+            fresh_reasons = trace.reasons
+            result.certificate["support_transition_trace"] = {
+                "reason": "legacy_topology_count_differs_from_native",
+                "legacy_fresh_count": len(legacy_masks),
+                "native_fresh_count": needed,
+                "variance_fresh_count": trace.square_count,
+                "sqrt_flat_indices": list(trace.sqrt_flat_indices),
+                "reciprocal_flat_indices": list(
+                    trace.reciprocal_flat_indices),
+                "final_product_fresh_count": trace.product_count,
+                "authoritative_result_retained": True,
+                "replay_bitwise_identical": True,
+            }
+        proof = self._layer_norm_output(
+            source, result.value, label, fresh_masks, fresh_reasons)
         attach_support(result.value, proof)
         result.certificate["support_proof"] = validate_support(result.value, proof)
         if index == 0 or index % 2 == 0:

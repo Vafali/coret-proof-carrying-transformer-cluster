@@ -1,6 +1,6 @@
 {
   "bound_entrypoint_calls": 0,
-  "canonical_manifest_sha256": "4881a036414bfbe63aa282e640b0d4cb02185369c1ba0e822e1181464746ed57",
+  "canonical_manifest_sha256": "8a994bb6f9d42329e0273b49cdacdecd65eab551b786d3f932d6b76de3ec6f23",
   "files": [
     {
       "byte_size": 248,
@@ -148,9 +148,9 @@
       "sha256": "f26a0f5453409407a06a6491966bd8f13965365669ca9e7bd68229013a065f6e"
     },
     {
-      "byte_size": 35658,
+      "byte_size": 43551,
       "path": "research_hab/coret_structural_support_precise_dot_v1.py",
-      "sha256": "acdf3751b25ca3d2dc79f4d6dd2cbac0990b192cc28c982bd499ddc2159715ca"
+      "sha256": "effd8af7b0a15a5417f9143a333402b013c70886f6332e8d11b56e4c35502e2e"
     },
     {
       "byte_size": 23180,
@@ -305,7 +305,12 @@
     {
       "byte_size": 6114,
       "path": "tests/test_cluster_offline.py",
-      "sha256": "ef0abcf61ba0bc205b71f3c9bfb91fb5fc0995ad910c1ec443a246c84606e8a6"
+      "sha256": "7abaf367c51e01a0fe16dd89635ebd7080301ed57cab8a529fd376bc2a9cb089"
+    },
+    {
+      "byte_size": 8917,
+      "path": "tests/test_layernorm_support_transition_v1.py",
+      "sha256": "dd76196addba59947d87026fa65a5cd734358c017b0a3107ebbcde66ff4c5f4e"
     },
     {
       "byte_size": 10420,
