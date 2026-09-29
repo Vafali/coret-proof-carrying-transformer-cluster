@@ -101,6 +101,20 @@ class BlobStore:
         raw = b"".join(struct.pack("<f", item) for row in rows for item in row)
         return self._write(raw, "float32", (len(rows), width), label)
 
+    def f32_tensor(self, value, label):
+        """Store an arbitrary-rank producer float32 tensor by exact bits.
+
+        This producer-side helper is deliberately duck typed so the accepted
+        bounded schema does not gain a Torch dependency.  The independent
+        checker validates the descriptor, byte count, and SHA before decoding.
+        """
+        cpu = value.detach().to(device="cpu").contiguous()
+        if str(cpu.dtype) != "torch.float32":
+            raise ValueError("trace tensor must be float32")
+        raw = cpu.numpy().tobytes(order="C")
+        return self._write(raw, "float32", tuple(int(x) for x in cpu.shape),
+                           label)
+
 
 def _zeros(rows, cols):
     return [[f32(0)] * cols for _ in range(rows)]
