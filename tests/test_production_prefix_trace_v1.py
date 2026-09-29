@@ -95,9 +95,18 @@ def test_real_prefix_valid_and_bitwise_transparent(trace_fixture):
         "PRODUCTION_AFFINE_RESIDUAL_PREFIX_PASS",
         "FIRST_PRODUCTION_LAYERNORM_TRACE_PASS",
         "PRODUCTION_PREFIX_STATE_CONTINUITY_PASS",
-        "PRODUCTION_PREFIX_BITWISE_EQUIVALENCE_PASS"))
+        "PRODUCTION_PREFIX_BITWISE_EQUIVALENCE_PASS",
+        "PRODUCTION_RANGED_SYMBOL_TRACE_PASS",
+        "PRODUCTION_GENERATOR_REDUCTION_TRACE_PASS",
+        "PRODUCTION_REDUCTION_STATE_CONTINUITY_PASS",
+        "PRODUCTION_REDUCTION_BITWISE_EQUIVALENCE_PASS"))
     assert states[0].zonotope_w.shape == (129, 4, 128)
     assert states[1].zonotope_w.shape == (901, 4, 128)
+    assert states[2] is states[1]
+    assert states[3] is states[2]
+    assert result["input_generator_count"] == 900
+    assert result["output_generator_count"] == 900
+    assert result["removed_count"] == result["replacement_count"] == 0
     assert graph["transition_records"][0]["tau_k"][
         "sqrt_active_flat_indices"] == list(range(128, 256))
     assert graph["transition_records"][0]["tau_k"][
@@ -216,5 +225,91 @@ def test_dropped_persistent_state_and_output_bit_mutations_reject(
         "producer_tensor_content_ids"]["weights"]
     path = root / descriptor["relative_path"]
     raw = bytearray(path.read_bytes()); raw[0] ^= 1; path.write_bytes(raw)
+    with pytest.raises(AssertionError, match="blob identity"):
+        checker.check_production_prefix(root)
+
+
+@pytest.mark.parametrize("mutation", ["trace", "state_metadata"])
+def test_ranged_symbol_skip_predicate_mutation_rejects(
+        trace_fixture, tmp_path, mutation):
+    root, graph = _copy(trace_fixture, tmp_path)
+    if mutation == "trace":
+        transition = graph["transition_records"][1]
+        transition["tau_k"]["input_range_low_present"] = True
+        seal(transition)
+        match = "recenter trace"
+    else:
+        state = graph["state_records"][1]
+        state["native_range_metadata"]["kind"] = "explicit"
+        seal(state)
+        match = "ranged-symbol metadata"
+    _write(root, graph)
+    with pytest.raises(AssertionError, match=match):
+        checker.check_production_prefix(root)
+
+
+@pytest.mark.parametrize("mutation", [
+    "score", "retained", "removed", "tie", "replacement",
+])
+def test_reduction_choice_mutations_reject(trace_fixture, tmp_path, mutation):
+    root, graph = _copy(trace_fixture, tmp_path)
+    transition = graph["transition_records"][2]
+    tau = transition["tau_k"]
+    if mutation == "score":
+        tau["ranking_quantities_hex"] = [0.0.hex()]
+    elif mutation == "retained":
+        tau["retained_generator_indices"][-1] = 0
+    elif mutation == "removed":
+        tau["removed_generator_indices"] = [899]
+    elif mutation == "tie":
+        tau["tie_breaking"] = "producer_claimed"
+    else:
+        tau["replacement_generator_ids"] = ["invalid_replacement"]
+        tau["replacement_support_masks"] = [2]
+    seal(transition); _write(root, graph)
+    with pytest.raises(AssertionError, match="generator reduction trace"):
+        checker.check_production_prefix(root)
+
+
+@pytest.mark.parametrize("mutation", ["predecessor", "range"])
+def test_reduction_predecessor_and_output_state_mutations_reject(
+        trace_fixture, tmp_path, mutation):
+    root, graph = _copy(trace_fixture, tmp_path)
+    if mutation == "predecessor":
+        transition = graph["transition_records"][2]
+        transition["predecessor_state_id"] = graph["graph_nodes"][1]
+        seal(transition)
+        match = "generator reduction trace"
+    else:
+        reduced = graph["state_records"][3]
+        reduced["explicit_ranges"][0][1] = 0.5.hex()
+        seal(reduced)
+        match = "no-reduction representation"
+    _write(root, graph)
+    with pytest.raises(AssertionError, match=match):
+        checker.check_production_prefix(root)
+
+
+def test_reduction_persistent_state_and_blob_mutations_reject(
+        trace_fixture, tmp_path):
+    root, graph = _copy(trace_fixture, tmp_path / "ghost")
+    reduced = graph["state_records"][3]
+    reduced["ghost_state_linkage"]["ordered_native_to_ghost"] = []
+    seal(reduced); _write(root, graph)
+    with pytest.raises(AssertionError, match="mapping/order"):
+        checker.check_production_prefix(root)
+
+    root, graph = _copy(trace_fixture, tmp_path / "numerical")
+    reduced = graph["state_records"][3]
+    del reduced["numerical_sidecar_linkage"]
+    seal(reduced); _write(root, graph)
+    with pytest.raises((AssertionError, KeyError)):
+        checker.check_production_prefix(root)
+
+    root, graph = _copy(trace_fixture, tmp_path / "blob")
+    descriptor = graph["state_records"][3][
+        "producer_tensor_content_ids"]["weights"]
+    path = root / descriptor["relative_path"]
+    raw = bytearray(path.read_bytes()); raw[-1] ^= 1; path.write_bytes(raw)
     with pytest.raises(AssertionError, match="blob identity"):
         checker.check_production_prefix(root)

@@ -14,6 +14,7 @@ SCHEMA = "CORET_TRACE_WITNESS_V1"
 BLOB_SCHEMA = "CORET_TRACE_BLOB_V1"
 PINNED_REVISION = "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf"
 CHECKPOINT_SHA256 = "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+PRODUCTION_MAX_ERROR_TERMS = 14000
 FIXTURE_COMPONENT_SHA256 = {
     "word": "03d519c8bb3e9db738e26145cc45b24b7bca074b3ca49d683686845c6b6a3294",
     "position": "99f6c66bb4dc315174155e78ab729b6689a33245f11e11ee7f99f8aae9cc3d23",
@@ -174,6 +175,10 @@ def _state(root, record):
               for a, b in record["explicit_ranges"]]
     if len(weights) != 1 + len(ids) or len(ranges) != len(ids):
         raise AssertionError("state dimensions mismatch")
+    native_range_metadata = record.get("native_range_metadata")
+    if native_range_metadata != {"kind": "absent", "low": None,
+                                 "high": None}:
+        raise AssertionError("unexpected native ranged-symbol metadata")
     mapping = record["ghost_state_linkage"]["ordered_native_to_ghost"]
     if ([item["native_row"] for item in mapping]
             != list(range(1, len(ids) + 1))
@@ -196,7 +201,8 @@ def _state(root, record):
         raise AssertionError("invalid support/provenance state")
     return {"id": record["state_id"], "weights": weights, "ids": ids,
             "ranges": ranges, "numerical": numerical,
-            "masks": list(record["generator_support_masks"])}
+            "masks": list(record["generator_support_masks"]),
+            "native_range_kind": "absent"}
 
 
 def _exact(weights):
@@ -411,7 +417,7 @@ def check_production_prefix(root):
             or manifest.get("scientific_query") is not False
             or manifest.get("bound_entrypoint_called") is not False
             or manifest.get("prefix_stop")
-            != "first_embedding_layernorm_output"
+            != "block0_pre_qk_reduced_state"
             or manifest.get("abstract_affine_residual_transition_count") != 0):
         raise AssertionError("production prefix run identity mismatch")
     if graph.get("content_store") != {"schema": BLOB_SCHEMA, "root": "."}:
@@ -433,14 +439,20 @@ def check_production_prefix(root):
         raise AssertionError("production source domain mismatch")
     states = {record["state_id"]: _state(root, record)
               for record in graph["state_records"]}
-    if graph["graph_nodes"] != list(states) or len(states) != 2:
+    if graph["graph_nodes"] != list(states) or len(states) != 4:
         raise AssertionError("prefix state identity/order mismatch")
     source = states[graph["graph_nodes"][0]]
     output = states[graph["graph_nodes"][1]]
+    recentered = states[graph["graph_nodes"][2]]
+    reduced = states[graph["graph_nodes"][3]]
     transparency = manifest.get("producer_transparency", {})
     source_commitment = graph["state_records"][0][
         "producer_tensor_content_ids"]["weights"]["sha256"]
     output_commitment = graph["state_records"][1][
+        "producer_tensor_content_ids"]["weights"]["sha256"]
+    recentered_commitment = graph["state_records"][2][
+        "producer_tensor_content_ids"]["weights"]["sha256"]
+    reduced_commitment = graph["state_records"][3][
         "producer_tensor_content_ids"]["weights"]["sha256"]
     if (transparency.get("uninstrumented_source_sha256") != source_commitment
             or transparency.get("instrumented_source_sha256") != source_commitment
@@ -448,6 +460,14 @@ def check_production_prefix(root):
             != output_commitment
             or transparency.get("instrumented_layernorm_sha256")
             != output_commitment
+            or transparency.get("uninstrumented_recenter_sha256")
+            != recentered_commitment
+            or transparency.get("instrumented_recenter_sha256")
+            != recentered_commitment
+            or transparency.get("uninstrumented_reduction_sha256")
+            != reduced_commitment
+            or transparency.get("instrumented_reduction_sha256")
+            != reduced_commitment
             or transparency.get("membership_replay_bitwise_identical") is not True):
         raise AssertionError("producer prefix bitwise transparency mismatch")
     expected_source_ids = [f"input_source_{index:06d}"
@@ -482,7 +502,7 @@ def check_production_prefix(root):
                     raise AssertionError("source coefficient construction mismatch")
     exact = _exact(source["weights"])
     _relation(source, exact)
-    if len(graph["transition_records"]) != 1:
+    if len(graph["transition_records"]) != 3:
         raise AssertionError("prefix transition count mismatch")
     transition = graph["transition_records"][0]
     _seal(transition, "LayerNorm transition")
@@ -504,6 +524,95 @@ def check_production_prefix(root):
                             + transition["tau_k"]["fresh_support_masks"]):
         raise AssertionError("LayerNorm support transition mismatch")
     _relation(output, exact)
+    recenter_transition = graph["transition_records"][1]
+    _seal(recenter_transition, "ranged-symbol recenter transition")
+    recenter_tau = recenter_transition.get("tau_k", {})
+    recenter_witness = recenter_transition.get("operator_witness", {})
+    expected_indices = list(range(len(output["ids"])))
+    if (recenter_transition.get("operator_family")
+            != "ranged_symbol_recenter"
+            or recenter_transition.get("input_state_ids") != [output["id"]]
+            or recenter_transition.get("predecessor_state_id") != output["id"]
+            or recenter_transition.get("output_state_ids")
+            != [recentered["id"]]
+            or recenter_tau != {
+                "branch": "skip_no_explicit_ranges",
+                "input_range_low_present": False,
+                "input_range_high_present": False,
+                "native_skip_predicate": "error_term_range_low_is_None",
+                "native_return_identity": True,
+                "generator_transition": "ordered_identity",
+            }
+            or recenter_witness.get("input_weights_sha256")
+            != output_commitment
+            or recenter_witness.get("output_weights_sha256")
+            != recentered_commitment
+            or recenter_witness.get("recenter_map")
+            != "identity_no_explicit_ranges"
+            or recenter_witness.get("retained_generator_indices")
+            != expected_indices
+            or recenter_witness.get("deleted_generator_indices") != []):
+        raise AssertionError("ranged-symbol recenter trace mismatch")
+    if (output["native_range_kind"] != "absent"
+            or recentered["native_range_kind"] != "absent"):
+        raise AssertionError("ranged-symbol skip predicate is not established")
+    if (recentered["weights"] != output["weights"]
+            or recentered["ids"] != output["ids"]
+            or recentered["ranges"] != output["ranges"]
+            or recentered["masks"] != output["masks"]
+            or recentered["numerical"] != output["numerical"]):
+        raise AssertionError("ranged-symbol identity transition mismatch")
+    # Byte/value identity plus the already established output relation proves
+    # the recentered representation relation; do not re-traverse all entries.
+
+    reduction_transition = graph["transition_records"][2]
+    _seal(reduction_transition, "generator reduction transition")
+    reduction_tau = reduction_transition.get("tau_k", {})
+    reduction_witness = reduction_transition.get("operator_witness", {})
+    input_count = len(recentered["ids"])
+    # Reconstruct native control flow.  No producer-selected index list is
+    # trusted: on this branch every ordered input generator must be retained.
+    if input_count > PRODUCTION_MAX_ERROR_TERMS:
+        raise AssertionError("witnessed native reduction branch is inadmissible")
+    if (reduction_transition.get("operator_family") != "generator_reduction"
+            or reduction_transition.get("input_state_ids")
+            != [recentered["id"]]
+            or reduction_transition.get("predecessor_state_id")
+            != recentered["id"]
+            or reduction_transition.get("output_state_ids") != [reduced["id"]]
+            or reduction_tau.get("branch")
+            != "no_reduction_input_count_le_maximum"
+            or reduction_tau.get("maximum_error_terms")
+            != PRODUCTION_MAX_ERROR_TERMS
+            or reduction_tau.get("input_generator_count") != input_count
+            or reduction_tau.get("input_special_prefix_count") != 0
+            or reduction_tau.get("native_return_identity") is not True
+            or reduction_tau.get("metric_policy")
+            != "not_evaluated_on_identity_branch"
+            or reduction_tau.get("ranking_quantities_hex") != []
+            or reduction_tau.get("tie_breaking") != "not_applicable"
+            or reduction_tau.get("retained_generator_indices")
+            != list(range(input_count))
+            or reduction_tau.get("removed_generator_indices") != []
+            or reduction_tau.get("replacement_coordinate_flat_indices") != []
+            or reduction_tau.get("replacement_generator_ids") != []
+            or reduction_tau.get("replacement_support_masks") != []
+            or reduction_tau.get("output_generator_count") != input_count
+            or reduction_witness.get("metric_input_weights_sha256")
+            != recentered_commitment
+            or reduction_witness.get("output_weights_sha256")
+            != reduced_commitment
+            or reduction_witness.get("replacement_construction")
+            != "none_identity_branch"):
+        raise AssertionError("native generator reduction trace mismatch")
+    if (reduced["weights"] != recentered["weights"]
+            or reduced["ids"] != recentered["ids"]
+            or reduced["ranges"] != recentered["ranges"]
+            or reduced["masks"] != recentered["masks"]
+            or reduced["numerical"] != recentered["numerical"]):
+        raise AssertionError("native no-reduction representation mismatch")
+    # The native no-reduction output is identical to the accepted predecessor,
+    # so its simulation relation follows without duplicating the full scan.
     if graph.get("final_property_record") is not None:
         raise AssertionError("prefix trace must not claim a property")
     return {
@@ -513,5 +622,14 @@ def check_production_prefix(root):
         "FIRST_PRODUCTION_LAYERNORM_TRACE_PASS": True,
         "PRODUCTION_PREFIX_STATE_CONTINUITY_PASS": True,
         "PRODUCTION_PREFIX_BITWISE_EQUIVALENCE_PASS": True,
-        "states": 2, "transitions": 1,
+        "PRODUCTION_RANGED_SYMBOL_TRACE_PASS": True,
+        "PRODUCTION_GENERATOR_REDUCTION_TRACE_PASS": True,
+        "PRODUCTION_REDUCTION_STATE_CONTINUITY_PASS": True,
+        "PRODUCTION_REDUCTION_BITWISE_EQUIVALENCE_PASS": True,
+        "input_generator_count": input_count,
+        "output_generator_count": len(reduced["ids"]),
+        "retained_count": input_count,
+        "removed_count": 0,
+        "replacement_count": 0,
+        "states": 4, "transitions": 3,
     }
