@@ -685,9 +685,13 @@ class StructuralNativeSemanticOperators(frozen.BoundedNativeSemanticOperators):
     """Fixture/production facade carrying exact token-topology provenance."""
     def __init__(self, revision=native_proof.PINNED_REVISION,
                  pair_block=frozen.DEFAULT_PAIR_BLOCK,
-                 generator_tile=AV_GENERATOR_TILE):
+                 generator_tile=AV_GENERATOR_TILE,
+                 numerical_witness_store=None):
         super().__init__(revision=revision, pair_block=pair_block)
         self.generator_tile = int(generator_tile)
+        # Optional proof serialization only.  It is deliberately absent from
+        # every numerical path and may not replace the authoritative output.
+        self.numerical_witness_store = numerical_witness_store
         self._hidden: SupportProof | None = None
         self._post_attention: SupportProof | None = None
         self._relu: SupportProof | None = None
@@ -852,6 +856,12 @@ class StructuralNativeSemanticOperators(frozen.BoundedNativeSemanticOperators):
         attach_support(output, proof)
         result.certificate["support_diagnostics"] = diagnostics
         result.certificate["support_proof"] = validate_support(output, proof)
+        if self.numerical_witness_store is not None:
+            result.certificate["independent_numerical_witness"] = (
+                self.numerical_witness_store.precise_dot(
+                    mode="QK", left=q, right=k, output=output,
+                    left_support=self._hidden, right_support=self._hidden,
+                    output_support=proof, call_index=qk_index))
         self._value = self._hidden
         self._score = proof
         return result
@@ -932,6 +942,13 @@ class StructuralNativeSemanticOperators(frozen.BoundedNativeSemanticOperators):
         attach_support(output, proof)
         result.certificate["support_diagnostics"] = diagnostics
         result.certificate["support_proof"] = validate_support(output, proof)
+        if self.numerical_witness_store is not None:
+            result.certificate["independent_numerical_witness"] = (
+                self.numerical_witness_store.precise_dot(
+                    mode="A.V", left=probability, right=transposed,
+                    output=output, left_support=self._probability,
+                    right_support=self._value, output_support=proof,
+                    call_index=av_index))
         self._attention_output = proof
         return result
 
