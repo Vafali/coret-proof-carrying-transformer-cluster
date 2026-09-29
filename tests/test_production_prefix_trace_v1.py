@@ -27,8 +27,19 @@ import coret_production_prefix_trace_v1 as producer
 from coret_trace_witness_v1 import canonical_bytes, seal
 
 
+@pytest.fixture(autouse=True)
+def rigorous_qk_backend(monkeypatch):
+    monkeypatch.setenv("CORET_PRECISE_DOT_NUMERICAL_BACKEND", "rigorous_fp64")
+    monkeypatch.setenv("CORET_CUDA_DRIVER", "/usr/lib/wsl/lib/libcuda.so.1")
+
+
 @pytest.fixture(scope="module")
 def trace_fixture(tmp_path_factory):
+    # The independent-checker environment carries gmpy2/CUDA while these two
+    # packaging-only DeepT dependencies live in the parent installation.
+    parent_packages = Path("/home/vafali_ubuntu/anaconda3/lib/python3.12/site-packages")
+    if parent_packages.exists() and str(parent_packages) not in sys.path:
+        sys.path.append(str(parent_packages))
     repository = REPO / "research_hab/public_benchmarks/DeepT"
     code = tempfile.TemporaryDirectory(prefix="coret_prefix_native_")
     packed = subprocess.check_output([
@@ -46,9 +57,10 @@ def trace_fixture(tmp_path_factory):
     sys.modules["Verifiers"] = package
     from Verifiers.Zonotope import Zonotope
 
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     args = SimpleNamespace(
-        perturbed_words=1, attack_type="lp", device=torch.device("cpu"),
-        cpu=True, all_words=False, num_input_error_terms=128,
+        perturbed_words=1, attack_type="lp", device=device,
+        cpu=device.type == "cpu", all_words=False, num_input_error_terms=128,
         use_dot_product_variant3=False, use_other_dot_product_ordering=False,
         concretize_special_norm_error_together=False)
     root = tmp_path_factory.mktemp("production_prefix")
@@ -79,7 +91,7 @@ def _replace_blob(root, descriptor, transform):
     path = root / descriptor["relative_path"]
     raw = transform(bytearray(path.read_bytes()))
     digest = hashlib.sha256(raw).hexdigest()
-    replacement = root / "blobs" / f"{digest}.float32.le.bin"
+    replacement = path.parent / f"{digest}.float32.le.bin"
     replacement.write_bytes(raw)
     descriptor["sha256"] = digest
     descriptor["relative_path"] = replacement.relative_to(root).as_posix()
@@ -99,14 +111,27 @@ def test_real_prefix_valid_and_bitwise_transparent(trace_fixture):
         "PRODUCTION_RANGED_SYMBOL_TRACE_PASS",
         "PRODUCTION_GENERATOR_REDUCTION_TRACE_PASS",
         "PRODUCTION_REDUCTION_STATE_CONTINUITY_PASS",
-        "PRODUCTION_REDUCTION_BITWISE_EQUIVALENCE_PASS"))
+        "PRODUCTION_REDUCTION_BITWISE_EQUIVALENCE_PASS",
+        "PRODUCTION_Q_PROJECTION_PASS",
+        "PRODUCTION_K_PROJECTION_PASS",
+        "PRODUCTION_HEAD_MAPPING_PASS",
+        "PRODUCTION_QK_NUMERICAL_CHECK_PASS",
+        "PRODUCTION_QK_STATE_CONTINUITY_PASS",
+        "PRODUCTION_QK_BITWISE_EQUIVALENCE_PASS"))
     assert states[0].zonotope_w.shape == (129, 4, 128)
     assert states[1].zonotope_w.shape == (901, 4, 128)
     assert states[2] is states[1]
     assert states[3] is states[2]
+    assert states[4].zonotope_w.shape == (901, 4, 128)
+    assert states[5].zonotope_w.shape == (901, 4, 128)
+    assert states[6].zonotope_w.shape == (4, 901, 4, 32)
+    assert states[7].zonotope_w.shape == (4, 901, 4, 32)
+    assert states[8].zonotope_w.shape == (4, 965, 4, 4)
     assert result["input_generator_count"] == 900
     assert result["output_generator_count"] == 900
     assert result["removed_count"] == result["replacement_count"] == 0
+    assert result["qk_generator_count"] == 964
+    assert result["qk_fresh_count"] == 64
     assert graph["transition_records"][0]["tau_k"][
         "sqrt_active_flat_indices"] == list(range(128, 256))
     assert graph["transition_records"][0]["tau_k"][
@@ -313,3 +338,84 @@ def test_reduction_persistent_state_and_blob_mutations_reject(
     raw = bytearray(path.read_bytes()); raw[-1] ^= 1; path.write_bytes(raw)
     with pytest.raises(AssertionError, match="blob identity"):
         checker.check_production_prefix(root)
+
+
+@pytest.mark.parametrize("mutation", [
+    "q_parameter", "k_parameter", "projection", "head", "generator", "support", "ghost",
+    "numerical", "fresh", "radius", "output_blob",
+])
+def test_qk_transition_mutations_reject(trace_fixture, tmp_path, mutation):
+    root, graph = _copy(trace_fixture, tmp_path / mutation)
+    expected = (AssertionError, KeyError)
+    match = None
+    if mutation in {"q_parameter", "k_parameter"}:
+        transition_index = 3 if mutation == "q_parameter" else 4
+        descriptor = graph["transition_records"][transition_index][
+            "operator_witness"]["weight"]
+        _replace_blob(
+            root, descriptor,
+            lambda raw: bytes([raw[0] ^ 1]) + bytes(raw[1:]))
+        seal(graph["source_domain"])
+        seal(graph["transition_records"][transition_index])
+        match = "frozen model/input component identity"
+    elif mutation == "projection":
+        descriptor = graph["state_records"][4][
+            "producer_tensor_content_ids"]["weights"]
+        path = root / descriptor["relative_path"]
+        raw = bytearray(path.read_bytes()); raw[0] ^= 1; path.write_bytes(raw)
+        match = "blob identity"
+    elif mutation == "head":
+        graph["transition_records"][5]["tau_k"]["permutation"] = [0, 1, 2, 3]
+        seal(graph["transition_records"][5]); match = "head mapping trace"
+    elif mutation == "generator":
+        graph["state_records"][6]["generator_ids"][:2] = reversed(
+            graph["state_records"][6]["generator_ids"][:2])
+        mapping = graph["state_records"][6]["ghost_state_linkage"][
+            "ordered_native_to_ghost"]
+        mapping[0]["ghost_id"], mapping[1]["ghost_id"] = (
+            mapping[1]["ghost_id"], mapping[0]["ghost_id"])
+        seal(graph["state_records"][6]); match = "topology mismatch"
+    elif mutation == "support":
+        graph["state_records"][8]["generator_support_masks"][0] ^= 1
+        seal(graph["state_records"][8]); match = "support transition"
+    elif mutation == "ghost":
+        graph["state_records"][8]["ghost_state_linkage"][
+            "ordered_native_to_ghost"] = []
+        seal(graph["state_records"][8]); match = "mapping/order"
+    elif mutation == "numerical":
+        del graph["state_records"][8]["numerical_sidecar_linkage"]
+        seal(graph["state_records"][8])
+    elif mutation == "fresh":
+        ids = graph["transition_records"][7]["tau_k"]["fresh_generator_ids"]
+        ids[-2:] = reversed(ids[-2:])
+        seal(graph["transition_records"][7]); match = "fresh generator identity/order"
+    elif mutation == "radius":
+        witness = graph["transition_records"][7]["operator_witness"][
+            "independent_numerical_witness"]
+        descriptor = witness["output"]
+        shape = descriptor["shape"]
+        generator = 1 + 900
+        coordinate = (((0 * shape[1] + generator) * shape[2]) * shape[3])
+        def narrow(raw):
+            value = struct.unpack_from("<f", raw, coordinate * 4)[0]
+            narrowed = math.nextafter(value, -math.inf)
+            bits = struct.unpack("<I", struct.pack("<f", value))[0]
+            struct.pack_into("<I", raw, coordinate * 4, bits - 1)
+            assert struct.unpack_from("<f", raw, coordinate * 4)[0] <= narrowed
+            return bytes(raw)
+        _replace_blob(root, descriptor, narrow)
+        seal(witness); seal(graph["transition_records"][7])
+        match = "numerical witness/state continuity"
+    else:
+        descriptor = graph["state_records"][8][
+            "producer_tensor_content_ids"]["weights"]
+        path = root / descriptor["relative_path"]
+        raw = bytearray(path.read_bytes()); raw[-1] ^= 1; path.write_bytes(raw)
+        match = "blob identity"
+    _write(root, graph)
+    if match is None:
+        with pytest.raises(expected):
+            checker.check_production_prefix(root)
+    else:
+        with pytest.raises(expected, match=match):
+            checker.check_production_prefix(root)
