@@ -16,6 +16,10 @@ BLOB_SCHEMA = "CORET_TRACE_BLOB_V1"
 PINNED_REVISION = "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf"
 CHECKPOINT_SHA256 = "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
 PRODUCTION_MAX_ERROR_TERMS = 14000
+FP32_UNIT_ROUNDOFF = 2.0 ** -24
+AFFINE_GAMMA_129 = (129 * FP32_UNIT_ROUNDOFF) / (
+    1 - 129 * FP32_UNIT_ROUNDOFF)
+QK_LOCAL_ERROR_RESERVE = 2.0 ** -18
 FIXTURE_COMPONENT_SHA256 = {
     "word": "03d519c8bb3e9db738e26145cc45b24b7bca074b3ca49d683686845c6b6a3294",
     "position": "99f6c66bb4dc315174155e78ab729b6689a33245f11e11ee7f99f8aae9cc3d23",
@@ -236,6 +240,9 @@ def _state(root, record):
     if (sidecar.get("kind") != "coefficient_symmetric_radius"
             or sidecar.get("content") != "numerical_radius"):
         raise AssertionError("numerical sidecar missing")
+    actual_max = max(numerical_values := list(numerical_values))
+    if sidecar.get("max_radius_hex") != float(actual_max).hex():
+        raise AssertionError("numerical sidecar global-max metadata mismatch")
     if any(not math.isfinite(value) or value < 0
            for value in numerical_values):
         raise AssertionError("invalid numerical sidecar")
@@ -302,17 +309,20 @@ def _check_affine_projection(root, transition, source, output, label):
     _seal(transition, f"{label} projection transition")
     tau = transition.get("tau_k", {})
     witness = transition.get("operator_witness", {})
+    expected_tau = {
+        "projection": label, "input_width": 128,
+        "output_width": 128,
+        "native_equation": "matmul(weight_transpose)_then_add_bias",
+        "generator_transition": "ordered_identity",
+        "support_transition": "token_mask_identity",
+        "numerical_policy": "coefficient_row_local_abs_weight_plus_gamma129",
+        "gamma_129_hex": float(AFFINE_GAMMA_129).hex(),
+    }
     if (transition.get("operator_family") != "affine_projection"
             or transition.get("input_state_ids") != [source["id"]]
             or transition.get("predecessor_state_id") != source["id"]
             or transition.get("output_state_ids") != [output["id"]]
-            or tau != {
-                "projection": label, "input_width": 128,
-                "output_width": 128,
-                "native_equation": "matmul(weight_transpose)_then_add_bias",
-                "generator_transition": "ordered_identity",
-                "support_transition": "token_mask_identity",
-            }
+            or tau != expected_tau
             or witness.get("input_weights_sha256")
             != source["weights_sha256"]
             or witness.get("output_weights_sha256")
@@ -338,24 +348,29 @@ def _check_affine_projection(root, transition, source, output, label):
             or output["reasons"] != source["reasons"]):
         raise AssertionError(f"{label} projection topology mismatch")
 
-    # This is deliberately independent of the producer's SGEMM schedule.
-    # For every coefficient, |T_real(x)-y_hat| is bounded by the triangle
-    # inequality using exact IEEE operands and the predecessor sidecar.
-    maximum_input = max(
-        abs(_dec(value)) + _dec(radius)
-        for value, radius in zip(_flat(source["weights"]),
-                                 _flat(source["numerical"])))
-    maximum_weight_l1 = max(
-        sum((abs(_dec(value)) for value in row), Decimal(0))
-        for row in weight)
-    maximum_bias = max(abs(_dec(value)) for value in bias)
-    maximum_output = max(abs(_dec(value)) for value in _flat(output["weights"]))
-    required = (maximum_input * maximum_weight_l1
-                + maximum_bias + maximum_output)
-    minimum_radius = min(_dec(value) for value in _flat(output["numerical"]))
-    if minimum_radius < required:
-        raise AssertionError(f"{label} projection numerical sidecar too narrow")
-    return required
+    input_eta = list(_flat(source["numerical"]))
+    if not input_eta or any(value != input_eta[0] for value in input_eta):
+        raise AssertionError(f"{label} affine fixture input sidecar is not uniform")
+    eta = input_eta[0]
+    weight_l1 = [math.fsum(abs(value) for value in row) for row in weight]
+    maximum_required = 0.0
+    for row in range(901):
+        for token in range(4):
+            maximum = max(abs(value) for value in source["weights"][row][token])
+            for coordinate in range(128):
+                required = (eta * weight_l1[coordinate]
+                            + AFFINE_GAMMA_129 * maximum
+                            * weight_l1[coordinate])
+                if row == 0:
+                    required += AFFINE_GAMMA_129 * abs(bias[coordinate])
+                stored = output["numerical"][row][token][coordinate]
+                if stored < required:
+                    raise AssertionError(
+                        f"{label} projection numerical sidecar too narrow")
+                maximum_required = max(maximum_required, required)
+    if len(set(_flat(output["numerical"]))) < 2:
+        raise AssertionError(f"{label} projection sidecar was globally broadcast")
+    return maximum_required
 
 
 def _check_head_mapping(transition, source, output, label):
@@ -397,26 +412,80 @@ def _check_head_mapping(transition, source, output, label):
                         f"{label} head numerical-sidecar mapping mismatch")
 
 
-def _check_qk_sidecar(q, k, output):
-    maximum_q = max(abs(_dec(value)) + _dec(radius)
-                    for value, radius in zip(_flat(q["weights"]),
-                                             _flat(q["numerical"])))
-    maximum_k = max(abs(_dec(value)) + _dec(radius)
-                    for value, radius in zip(_flat(k["weights"]),
-                                             _flat(k["numerical"])))
-    generators, inner = len(q["ids"]), q["shape"][-1]
-    product = maximum_q * maximum_k * Decimal(inner)
-    center = product * (Decimal(1) + Decimal(generators) / Decimal(2))
-    retained = product * Decimal(2)
-    quadratic = product * (
-        Decimal(generators * generators) - Decimal(generators) / Decimal(2))
-    maximum_exact = max(center, retained, quadratic)
-    maximum_output = max(abs(_dec(value)) for value in _flat(output["weights"]))
-    required = maximum_exact + maximum_output
-    minimum_radius = min(_dec(value) for value in _flat(output["numerical"]))
-    if minimum_radius < required:
-        raise AssertionError("QK propagated numerical sidecar too narrow")
-    return required
+def _check_qk_sidecar(q, k, output, rigorous_backend):
+    generators = len(q["ids"])
+    coordinate_results = rigorous_backend["coordinate_results"]
+    maxima = {"center": 0.0, "retained": 0.0, "fresh": 0.0,
+              "coordinate": 0.0, "local": 0.0}
+    for head in range(4):
+        for query in range(4):
+            for key in range(4):
+                qv = [q["weights"][head][row][query]
+                      for row in range(generators + 1)]
+                kv = [k["weights"][head][row][key]
+                      for row in range(generators + 1)]
+                qe = [q["numerical"][head][row][query]
+                      for row in range(generators + 1)]
+                ke = [k["numerical"][head][row][key]
+                      for row in range(generators + 1)]
+                def sensitivity(first, second):
+                    return math.fsum(
+                        abs(qv[first][d]) * ke[second][d]
+                        + abs(kv[second][d]) * qe[first][d]
+                        + qe[first][d] * ke[second][d]
+                        for d in range(32))
+                diagonal = [sensitivity(i, i)
+                            for i in range(1, generators + 1)]
+                offset = head * 16 + query * 4 + key
+                local = (float(coordinate_results[offset]["center_upper"])
+                         + float(coordinate_results[offset]["retained_upper"]))
+                if local > QK_LOCAL_ERROR_RESERVE:
+                    raise AssertionError("QK local numerical reserve is too narrow")
+                center = (sensitivity(0, 0) + 0.5 * math.fsum(diagonal)
+                          + local)
+                if output["numerical"][head][0][query][key] < center:
+                    raise AssertionError("QK center sidecar too narrow")
+                retained = []
+                for index in range(1, generators + 1):
+                    required = sensitivity(0, index) + sensitivity(index, 0)
+                    retained.append(required)
+                    if output["numerical"][head][index][query][key] < required:
+                        raise AssertionError("QK retained sidecar too narrow")
+                sum_q = [math.fsum(abs(qv[i][d])
+                                  for i in range(1, generators + 1))
+                         for d in range(32)]
+                sum_k = [math.fsum(abs(kv[i][d])
+                                  for i in range(1, generators + 1))
+                         for d in range(32)]
+                sum_qe = [math.fsum(qe[i][d]
+                                   for i in range(1, generators + 1))
+                          for d in range(32)]
+                sum_ke = [math.fsum(ke[i][d]
+                                   for i in range(1, generators + 1))
+                          for d in range(32)]
+                all_pairs = math.fsum(
+                    sum_q[d] * sum_ke[d] + sum_k[d] * sum_qe[d]
+                    + sum_qe[d] * sum_ke[d] for d in range(32))
+                fresh = all_pairs - 0.5 * math.fsum(diagonal)
+                owner = 1 + generators + offset
+                for row in range(1 + generators, 1 + generators + 64):
+                    stored = output["numerical"][head][row][query][key]
+                    if row == owner:
+                        if stored < fresh:
+                            raise AssertionError(
+                                "QK fresh-radius sensitivity is too narrow")
+                    elif stored != 0.0:
+                        raise AssertionError(
+                            "QK numerical sidecar violates fresh ownership")
+                coordinate = center + math.fsum(retained) + fresh
+                maxima["center"] = max(maxima["center"], center)
+                maxima["retained"] = max(
+                    maxima["retained"], max(retained))
+                maxima["fresh"] = max(maxima["fresh"], fresh)
+                maxima["coordinate"] = max(
+                    maxima["coordinate"], coordinate)
+                maxima["local"] = max(maxima["local"], local)
+    return maxima
 
 
 def _zero_rows(count, tokens, width):
@@ -855,6 +924,15 @@ def check_production_prefix(root):
             or qk_tau.get("fresh_generator_count") != fresh
             or qk_tau.get("numerical_backend")
             != "checker_only_rigorous_fp64"
+            or qk_tau.get("upstream_sensitivity")
+            != "dependency_aware_factorized_O_gD"
+            or qk_tau.get("sensitivity_terms") != [
+                "abs_q_times_eta_k", "abs_k_times_eta_q",
+                "eta_q_times_eta_k"]
+            or qk_tau.get("local_error_reserve_hex")
+            != float(QK_LOCAL_ERROR_RESERVE).hex()
+            or qk_tau.get("local_error_placement")
+            != "once_in_center_coordinate"
             or qk_witness.get("input_q_weights_sha256")
             != q_heads_commitment
             or qk_witness.get("input_k_weights_sha256")
@@ -913,7 +991,8 @@ def check_production_prefix(root):
             or rigorous.get("numerical_backend")
             != "checker_only_rigorous_fp64"):
         raise AssertionError("rigorous QK numerical checker rejected")
-    qk_required = _check_qk_sidecar(q_heads, k_heads, qk_output)
+    qk_required = _check_qk_sidecar(
+        q_heads, k_heads, qk_output, rigorous["backend"])
 
     if graph.get("final_property_record") is not None:
         raise AssertionError("prefix trace must not claim a property")
@@ -941,7 +1020,11 @@ def check_production_prefix(root):
         "replacement_count": 0,
         "q_projection_required_sidecar": str(q_required),
         "k_projection_required_sidecar": str(k_required),
-        "qk_required_sidecar": str(qk_required),
+        "qk_center_max_sidecar": qk_required["center"],
+        "qk_retained_max_sidecar": qk_required["retained"],
+        "qk_fresh_max_sidecar": qk_required["fresh"],
+        "qk_coordinate_max_sidecar": qk_required["coordinate"],
+        "qk_local_max_sidecar": qk_required["local"],
         "rigorous_qk_checker_seconds": rigorous["backend"]["wall_seconds"],
         "q_shape": list(q_heads["shape"]),
         "k_shape": list(k_heads["shape"]),

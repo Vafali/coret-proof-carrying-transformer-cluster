@@ -33,8 +33,10 @@ FIXTURE_RHO = 1.0 / 1600.0
 # the required interval from exact IEEE inputs; the fixture's measured maximum
 # requirement is 3.812e-7, below this frozen binary radius.
 NUMERICAL_RADIUS = 2.0 ** -20
-PROJECTION_NUMERICAL_RADIUS = 2.0 ** 7
-QK_NUMERICAL_RADIUS = 2.0 ** 40
+FP32_UNIT_ROUNDOFF = 2.0 ** -24
+AFFINE_GAMMA_129 = (129 * FP32_UNIT_ROUNDOFF) / (
+    1 - 129 * FP32_UNIT_ROUNDOFF)
+QK_LOCAL_ERROR_RESERVE = 2.0 ** -18
 PURPOSE = "bounded_real_production_prefix_trace"
 PRODUCTION_MAX_ERROR_TERMS = 14000
 ATTENTION_HEADS = 4
@@ -71,12 +73,19 @@ def _state_record(store, z, proof, state_id: str, numerical_radius: float):
             "high": store.f32_tensor(
                 z.error_term_range_high, f"{state_id}.range_high"),
         }
+    if torch.is_tensor(numerical_radius):
+        numerical = numerical_radius.to(
+            device=z.zonotope_w.device, dtype=z.zonotope_w.dtype)
+        if numerical.shape != z.zonotope_w.shape:
+            raise RuntimeError("numerical sidecar shape differs from state")
+    else:
+        numerical = torch.full_like(z.zonotope_w, float(numerical_radius))
     value = {
         "state_id": state_id,
         "producer_tensor_content_ids": {
             "weights": store.f32_tensor(z.zonotope_w, f"{state_id}.weights"),
             "numerical_radius": store.f32_tensor(
-                torch.full_like(z.zonotope_w, float(numerical_radius)),
+                numerical,
                 f"{state_id}.numerical_radius")},
         "centers": {"row": 0},
         "native_generator_coefficients": {"rows_start": 1},
@@ -89,10 +98,80 @@ def _state_record(store, z, proof, state_id: str, numerical_radius: float):
         "shape": [int(item) for item in z.zonotope_w.shape],
         "numerical_sidecar_linkage": {
             "kind": "coefficient_symmetric_radius",
-            "content": "numerical_radius"},
+            "content": "numerical_radius",
+            "max_radius_hex": float(numerical.max()).hex()},
         "ghost_state_linkage": {"ordered_native_to_ghost": mapping},
     }
     return seal(value)
+
+
+def _affine_sidecar(source, source_eta, parameter):
+    """Coefficient-row-local affine propagation plus FP32 gamma bound."""
+    x = source.zonotope_w.detach().double()
+    eta = source_eta.detach().double()
+    weight = parameter.weight.detach().double().abs()
+    # This fixture's accepted LayerNorm sidecar is uniform, but retain the
+    # coefficient-indexed contraction in the producer.
+    propagated = torch.einsum("rtf,of->rto", eta, weight)
+    maximum = x.abs().amax(dim=-1, keepdim=True)
+    weight_l1 = weight.sum(dim=-1).view(1, 1, -1)
+    rounding = AFFINE_GAMMA_129 * maximum * weight_l1
+    rounding[0] += AFFINE_GAMMA_129 * parameter.bias.detach().double().abs()
+    result = (propagated + rounding).float()
+    return torch.nextafter(result, torch.full_like(result, float("inf")))
+
+
+def _qk_sidecar(q_heads, k_heads, q_eta, k_eta, output):
+    """Dependency-aware upstream sensitivity for the native QK equation."""
+    device = output.zonotope_w.device
+    q = q_heads.zonotope_w.detach().cpu().double()
+    k = k_heads.zonotope_w.detach().cpu().double()
+    eq, ek = q_eta.detach().cpu().double(), k_eta.detach().cpu().double()
+    heads, rows, tokens, _inner = q.shape
+    generators = rows - 1
+    result = torch.zeros(
+        output.zonotope_w.shape, dtype=torch.float64, device="cpu")
+    for head in range(heads):
+        for query in range(tokens):
+            for key in range(tokens):
+                qv, kv = q[head, :, query], k[head, :, key]
+                qe, ke = eq[head, :, query], ek[head, :, key]
+                def sensitivity(first, second):
+                    return (qv[first].abs() * ke[second]
+                            + kv[second].abs() * qe[first]
+                            + qe[first] * ke[second]).sum()
+                diagonal = torch.stack([
+                    sensitivity(index, index)
+                    for index in range(1, generators + 1)])
+                center = sensitivity(0, 0) + 0.5 * diagonal.sum()
+                # The accepted rigorous backend returns the aggregate local
+                # center/retained discrepancy.  Reserve it once in the center,
+                # never once per retained row.
+                result[head, 0, query, key] = (
+                    center + QK_LOCAL_ERROR_RESERVE)
+                for index in range(1, generators + 1):
+                    result[head, index, query, key] = (
+                        sensitivity(0, index) + sensitivity(index, 0))
+                sum_q = qv[1:].abs().sum(dim=0)
+                sum_k = kv[1:].abs().sum(dim=0)
+                sum_eq = qe[1:].sum(dim=0)
+                sum_ek = ke[1:].sum(dim=0)
+                all_pairs = (sum_q * sum_ek + sum_k * sum_eq
+                             + sum_eq * sum_ek).sum()
+                fresh = all_pairs - 0.5 * diagonal.sum()
+                owner = 1 + generators + head * tokens * tokens + query * tokens + key
+                result[head, owner, query, key] = fresh
+    # Cover proof-side float64 reduction/cast only; this is not an empirical
+    # producer arithmetic allowance.
+    result = torch.where(
+        result > 0,
+        result * (1.0 + 2.0 ** -40) + 2.0 ** -50,
+        result)
+    result = result.float()
+    return torch.where(
+        result > 0,
+        torch.nextafter(result, torch.full_like(result, float("inf"))),
+        result).to(device=device)
 
 
 def _load_checkpoint():
@@ -211,14 +290,27 @@ def build_production_prefix_trace(root, Zonotope, args, *, instrument=True):
     if len(expected_fresh_ids) != len(fresh.masks):
         raise RuntimeError("native LayerNorm fresh identity count differs")
 
+    reduced_eta = torch.full_like(
+        traced_reduced.zonotope_w, NUMERICAL_RADIUS)
+
     # Execute precisely the production Q/K prefix.  The uninstrumented branch
     # uses the same accepted structural native facade without witness I/O;
     # therefore this comparison isolates producer transparency.
     q_projection = traced_reduced.dense(query_parameter)
     k_projection = traced_reduced.dense(key_parameter)
+    q_projection_eta = _affine_sidecar(
+        traced_reduced, reduced_eta, query_parameter)
+    k_projection_eta = _affine_sidecar(
+        traced_reduced, reduced_eta, key_parameter)
     q_heads = q_projection.add_attention_heads_dim(ATTENTION_HEADS)
     k_heads = k_projection.add_attention_heads_dim(ATTENTION_HEADS)
+    q_heads_eta = q_projection_eta.reshape(
+        901, 4, ATTENTION_HEADS, 32).permute(2, 0, 1, 3).contiguous()
+    k_heads_eta = k_projection_eta.reshape(
+        901, 4, ATTENTION_HEADS, 32).permute(2, 0, 1, 3).contiguous()
     qk_output = dispatch.qk(q_heads, k_heads)
+    qk_eta = _qk_sidecar(
+        q_heads, k_heads, q_heads_eta, k_heads_eta, qk_output)
     qk_proof = structural.get_support(qk_output)
     structural.validate_support(qk_output, qk_proof, token_axis=-2)
 
@@ -263,19 +355,19 @@ def build_production_prefix_trace(root, Zonotope, args, *, instrument=True):
         "p3_block0_pre_qk_reduced", NUMERICAL_RADIUS)
     q_projection_record = _state_record(
         store, q_projection, reduced_proof,
-        "p4_block0_q_projection", PROJECTION_NUMERICAL_RADIUS)
+        "p4_block0_q_projection", q_projection_eta)
     k_projection_record = _state_record(
         store, k_projection, reduced_proof,
-        "p5_block0_k_projection", PROJECTION_NUMERICAL_RADIUS)
+        "p5_block0_k_projection", k_projection_eta)
     q_heads_record = _state_record(
         store, q_heads, reduced_proof,
-        "p6_block0_q_heads", PROJECTION_NUMERICAL_RADIUS)
+        "p6_block0_q_heads", q_heads_eta)
     k_heads_record = _state_record(
         store, k_heads, reduced_proof,
-        "p7_block0_k_heads", PROJECTION_NUMERICAL_RADIUS)
+        "p7_block0_k_heads", k_heads_eta)
     qk_record = _state_record(
         store, qk_output, qk_proof,
-        "p8_block0_qk_output", QK_NUMERICAL_RADIUS)
+        "p8_block0_qk_output", qk_eta)
     source_sha = source_record["producer_tensor_content_ids"]["weights"]["sha256"]
     output_sha = output_record["producer_tensor_content_ids"]["weights"]["sha256"]
     recentered_sha = recentered_record[
@@ -421,6 +513,8 @@ def build_production_prefix_trace(root, Zonotope, args, *, instrument=True):
             "native_equation": "matmul(weight_transpose)_then_add_bias",
             "generator_transition": "ordered_identity",
             "support_transition": "token_mask_identity",
+            "numerical_policy": "coefficient_row_local_abs_weight_plus_gamma129",
+            "gamma_129_hex": float(AFFINE_GAMMA_129).hex(),
         },
         "operator_witness": {
             "weight": component_records["q_weight"],
@@ -440,6 +534,8 @@ def build_production_prefix_trace(root, Zonotope, args, *, instrument=True):
             "native_equation": "matmul(weight_transpose)_then_add_bias",
             "generator_transition": "ordered_identity",
             "support_transition": "token_mask_identity",
+            "numerical_policy": "coefficient_row_local_abs_weight_plus_gamma129",
+            "gamma_129_hex": float(AFFINE_GAMMA_129).hex(),
         },
         "operator_witness": {
             "weight": component_records["k_weight"],
@@ -496,6 +592,12 @@ def build_production_prefix_trace(root, Zonotope, args, *, instrument=True):
             "fresh_generator_ids": list(
                 qk_proof.ids[traced_reduced.num_error_terms:]),
             "numerical_backend": "checker_only_rigorous_fp64",
+            "upstream_sensitivity": "dependency_aware_factorized_O_gD",
+            "sensitivity_terms": [
+                "abs_q_times_eta_k", "abs_k_times_eta_q", "eta_q_times_eta_k"],
+            "local_error_reserve_hex": float(
+                QK_LOCAL_ERROR_RESERVE).hex(),
+            "local_error_placement": "once_in_center_coordinate",
         },
         "operator_witness": {
             "input_q_weights_sha256": q_heads_sha,

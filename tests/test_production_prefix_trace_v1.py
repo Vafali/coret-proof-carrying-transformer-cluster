@@ -419,3 +419,52 @@ def test_qk_transition_mutations_reject(trace_fixture, tmp_path, mutation):
     else:
         with pytest.raises(expected, match=match):
             checker.check_production_prefix(root)
+
+
+@pytest.mark.parametrize("mutation", [
+    "cross_generator", "retained_substitution", "dropped_affine_rounding",
+    "dropped_bilinear_product", "narrowed_fresh", "bad_global_max",
+])
+def test_qk_sidecar_tightness_mutations_reject(
+        trace_fixture, tmp_path, mutation):
+    root, graph = _copy(trace_fixture, tmp_path / mutation)
+    if mutation == "dropped_bilinear_product":
+        graph["transition_records"][7]["tau_k"]["sensitivity_terms"].pop()
+        seal(graph["transition_records"][7]); _write(root, graph)
+        with pytest.raises(AssertionError, match="native precise QK trace"):
+            checker.check_production_prefix(root)
+        return
+    state_index = 4 if mutation in {
+        "cross_generator", "dropped_affine_rounding"} else 8
+    state = graph["state_records"][state_index]
+    descriptor = state["producer_tensor_content_ids"]["numerical_radius"]
+    shape = descriptor["shape"]
+    def mutate(raw):
+        values = [item[0] for item in struct.iter_unpack("<f", raw)]
+        if mutation == "cross_generator":
+            block = 4 * 128
+            first, second = 200 * block, 201 * block
+            values[first:first+block], values[second:second+block] = (
+                values[second:second+block], values[first:first+block])
+        elif mutation == "retained_substitution":
+            block = 4 * 4
+            first, second = block, 2 * block
+            values[first:first+block], values[second:second+block] = (
+                values[second:second+block], values[first:first+block])
+        elif mutation == "dropped_affine_rounding":
+            index = max(range(len(values)), key=values.__getitem__)
+            values[index] *= 0.5
+        elif mutation == "narrowed_fresh":
+            index = ((0 * shape[1] + 901) * shape[2]) * shape[3]
+            values[index] *= 0.5
+        return b"".join(struct.pack("<f", value) for value in values)
+    if mutation != "bad_global_max":
+        _replace_blob(root, descriptor, mutate)
+        raw = (root / descriptor["relative_path"]).read_bytes()
+        maximum = max(item[0] for item in struct.iter_unpack("<f", raw))
+        state["numerical_sidecar_linkage"]["max_radius_hex"] = maximum.hex()
+    else:
+        state["numerical_sidecar_linkage"]["max_radius_hex"] = 0.0.hex()
+    seal(state); _write(root, graph)
+    with pytest.raises(AssertionError):
+        checker.check_production_prefix(root)
