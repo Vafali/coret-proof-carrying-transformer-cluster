@@ -24,10 +24,15 @@ def _manifest_and_plan():
         properties.append({
             "property_id": f"property_{ordinal:03d}",
             "benchmark_ordinal": ordinal,
-            "sentence_ordinal": ordinal // 20,
+            "canonical_binary_test_index": ordinal,
+            "sentence_ordinal": ordinal,
+            "sentence_id": f"sentence_{ordinal:03d}",
+            "source_test_line": ordinal,
             "token_position": 1,
             "sequence_length": 2,
-            "token_ids": [101, 102],
+            "source_dimension": 128,
+            "raw_sentence_sha256": f"{ordinal:064x}",
+            "token": "x", "token_id": 102,
             "clean_label": 1, "nominal_prediction": 1,
             "cached_DeepT_reference": {
                 "certified_lower_endpoint_binary64": radius,
@@ -46,24 +51,118 @@ def _manifest_and_plan():
                           properties[63:]]}]},
         ],
     }
-    return {"properties": properties}, plan
+    historical = {
+        "properties": [
+            {field: row[field] for field in campaign.TOKEN_IDENTITY_FIELDS}
+            for row in properties
+        ],
+        "examples": [{
+            "canonical_binary_test_index": row["canonical_binary_test_index"],
+            "clean_label": row["clean_label"],
+            "nominal_prediction": row["nominal_prediction"],
+            "raw_sentence_sha256": row["raw_sentence_sha256"],
+            "sentence_id": row["sentence_id"],
+            "sentence_ordinal": row["sentence_ordinal"],
+            "sequence_length_including_special_tokens": row["sequence_length"],
+            "source_test_line": row["source_test_line"],
+            "token_ids": [101, 102],
+            "tokens": ["[CLS]", "x"],
+            "eligible_token_positions": [1],
+        } for row in properties],
+    }
+    identity = {
+        "path": "/frozen/historical.json",
+        "file_sha256": "f" * 64,
+        "canonical_manifest_sha256": "s" * 64,
+        "source": "frozen historical scientific manifest examples[].token_ids",
+    }
+    return {"properties": properties}, plan, historical, identity
 
 
 def test_preflight_finds_exact_frozen_population_and_split(monkeypatch, tmp_path):
-    manifest, plan = _manifest_and_plan()
+    manifest, plan, historical, identity = _manifest_and_plan()
     monkeypatch.setattr(
         campaign.cluster_common, "verify_artifact_manifest", lambda _root: {})
     monkeypatch.setattr(
         campaign.cluster_common, "load_production_manifest",
         lambda _root: manifest)
     monkeypatch.setattr(campaign.a40_fresh_common, "load_plan", lambda: plan)
+    monkeypatch.setattr(
+        campaign, "_load_authoritative_token_source",
+        lambda _root: (historical, identity))
     result = campaign.preflight(tmp_path)
     assert result["property_count"] == 127
     assert result["worker_property_counts"] == [63, 64]
     assert len(set(sum(result["worker_property_ids"], []))) == 127
     assert result["candidate_radius_source"] == (
         "cached_DeepT_reference.certified_lower_endpoint_binary64")
+    assert result["resolved_token_property_count"] == 127
+    assert result["authoritative_token_source"] == identity
     assert result["scientific_queries"] == 0
+
+
+def _single_input():
+    manifest, _, historical, identity = _manifest_and_plan()
+    return manifest["properties"][0], historical, identity
+
+
+def test_missing_embedded_token_ids_resolve_from_authoritative_source():
+    row, historical, identity = _single_input()
+    assert "token_ids" not in row
+    resolved = campaign._resolve_campaign_input(row, historical, identity)
+    assert resolved["property_id"] == row["property_id"]
+    assert resolved["token_ids"] == [101, 102]
+    assert len(resolved["token_ids"]) == resolved["sequence_length"]
+    assert resolved["token_input_source"] == identity
+
+
+def test_conflicting_authoritative_token_sources_reject():
+    row, historical, identity = _single_input()
+    conflicting = dict(historical["examples"][0])
+    conflicting["token_ids"] = [101, 999]
+    historical["examples"].append(conflicting)
+    with pytest.raises(RuntimeError, match="absent or ambiguous"):
+        campaign._resolve_campaign_input(row, historical, identity)
+
+
+def test_missing_authoritative_token_source_rejects():
+    row, historical, identity = _single_input()
+    historical["examples"] = historical["examples"][1:]
+    with pytest.raises(RuntimeError, match="absent or ambiguous"):
+        campaign._resolve_campaign_input(row, historical, identity)
+
+
+def test_property_id_mismatch_rejects():
+    row, historical, identity = _single_input()
+    row = {**row, "property_id": "different_property"}
+    with pytest.raises(RuntimeError, match="property source is absent"):
+        campaign._resolve_campaign_input(row, historical, identity)
+
+
+def test_authoritative_token_count_mismatch_rejects():
+    row, historical, identity = _single_input()
+    historical["examples"][0]["token_ids"] = [101]
+    with pytest.raises(RuntimeError, match="token count differs"):
+        campaign._resolve_campaign_input(row, historical, identity)
+
+
+def test_embedded_token_ids_must_agree_with_authoritative_source():
+    row, historical, identity = _single_input()
+    matching = campaign._resolve_campaign_input(
+        {**row, "token_ids": [101, 102]}, historical, identity)
+    assert matching["token_ids"] == [101, 102]
+    with pytest.raises(RuntimeError, match="embedded and authoritative"):
+        campaign._resolve_campaign_input(
+            {**row, "token_ids": [101, 999]}, historical, identity)
+
+
+def test_clean_label_nominal_prediction_mismatch_still_rejects():
+    row, historical, identity = _single_input()
+    row = {**row, "clean_label": 0, "nominal_prediction": 1}
+    historical["properties"][0]["clean_label"] = 0
+    historical["examples"][0]["clean_label"] = 0
+    with pytest.raises(RuntimeError, match="clean/nominal label differs"):
+        campaign._resolve_campaign_input(row, historical, identity)
 
 
 @pytest.mark.parametrize("candidate", [0.125, 0.0])
@@ -129,7 +228,9 @@ def test_property_source_is_scoped_and_restored():
 
 def test_property_failure_is_atomic_fail_closed_and_not_retried(
         monkeypatch, tmp_path):
-    row = _manifest_and_plan()[0]["properties"][0]
+    manifest, _, historical, identity = _manifest_and_plan()
+    row = campaign._resolve_campaign_input(
+        manifest["properties"][0], historical, identity)
     monkeypatch.setattr(
         campaign.sound, "export_block0_state",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
@@ -147,7 +248,7 @@ def test_property_failure_is_atomic_fail_closed_and_not_retried(
 
 
 def test_preflight_rejects_cross_worker_overlap(monkeypatch, tmp_path):
-    manifest, plan = _manifest_and_plan()
+    manifest, plan, historical, identity = _manifest_and_plan()
     plan["workers"][1]["chunks"][0]["properties"][0] = \
         plan["workers"][0]["chunks"][0]["properties"][0]
     monkeypatch.setattr(
@@ -156,5 +257,8 @@ def test_preflight_rejects_cross_worker_overlap(monkeypatch, tmp_path):
         campaign.cluster_common, "load_production_manifest",
         lambda _root: manifest)
     monkeypatch.setattr(campaign.a40_fresh_common, "load_plan", lambda: plan)
+    monkeypatch.setattr(
+        campaign, "_load_authoritative_token_source",
+        lambda _root: (historical, identity))
     with pytest.raises(RuntimeError, match="does not cover"):
         campaign.preflight(tmp_path)

@@ -33,6 +33,12 @@ CANDIDATE_RADIUS_HEX_FIELD = "certified_lower_endpoint_binary64_hex"
 CANDIDATE_RADIUS_SOURCE = (
     "cached_DeepT_reference.certified_lower_endpoint_binary64"
 )
+TOKEN_IDENTITY_FIELDS = (
+    "property_id", "canonical_binary_test_index", "clean_label",
+    "nominal_prediction", "raw_sentence_sha256", "sentence_id",
+    "sentence_ordinal", "sequence_length", "source_dimension",
+    "source_test_line", "token", "token_id", "token_position",
+)
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -102,6 +108,108 @@ def _candidate_radius(row: dict) -> float:
     return candidate
 
 
+def _load_authoritative_token_source(artifact_root: Path) -> tuple[dict, dict]:
+    path = cluster_common.historical_manifest_path(artifact_root)
+    manifest = cluster_common.verified_json(
+        path, "canonical_manifest_sha256")
+    if manifest.get("canonical_manifest_sha256") != \
+            cluster_common.SCIENTIFIC_MANIFEST_SHA:
+        raise RuntimeError("authoritative token-source identity differs")
+    return manifest, {
+        "path": str(path),
+        "file_sha256": cluster_common.sha256(path),
+        "canonical_manifest_sha256": manifest["canonical_manifest_sha256"],
+        "source": "frozen historical scientific manifest examples[].token_ids",
+    }
+
+
+def _resolve_campaign_input(row: dict, historical: dict,
+                            source_identity: dict) -> dict:
+    property_id = row.get("property_id")
+    properties = [item for item in historical.get("properties", ())
+                  if item.get("property_id") == property_id]
+    if len(properties) != 1:
+        raise RuntimeError(
+            f"authoritative property source is absent or ambiguous: {property_id}"
+        )
+    authoritative_property = properties[0]
+    for field in TOKEN_IDENTITY_FIELDS:
+        if field not in row or field not in authoritative_property:
+            raise RuntimeError(
+                f"property identity field is absent: {property_id}: {field}"
+            )
+        if row[field] != authoritative_property[field]:
+            raise RuntimeError(
+                f"property identity differs: {property_id}: {field}"
+            )
+
+    examples = [item for item in historical.get("examples", ())
+                if item.get("sentence_ordinal") == row["sentence_ordinal"]]
+    if len(examples) != 1:
+        raise RuntimeError(
+            f"authoritative token source is absent or ambiguous: {property_id}"
+        )
+    example = examples[0]
+    example_checks = {
+        "canonical_binary_test_index": row["canonical_binary_test_index"],
+        "clean_label": row["clean_label"],
+        "nominal_prediction": row["nominal_prediction"],
+        "raw_sentence_sha256": row["raw_sentence_sha256"],
+        "sentence_id": row["sentence_id"],
+        "sentence_ordinal": row["sentence_ordinal"],
+        "sequence_length_including_special_tokens": row["sequence_length"],
+        "source_test_line": row["source_test_line"],
+    }
+    for field, expected in example_checks.items():
+        if example.get(field) != expected:
+            raise RuntimeError(
+                f"token-source property identity differs: {property_id}: {field}"
+            )
+    if row["clean_label"] != row["nominal_prediction"]:
+        raise RuntimeError(f"clean/nominal label differs: {property_id}")
+
+    raw_token_ids = example.get("token_ids")
+    if not isinstance(raw_token_ids, list) or any(
+            isinstance(item, bool) or not isinstance(item, int)
+            for item in raw_token_ids):
+        raise RuntimeError(f"authoritative token IDs are malformed: {property_id}")
+    token_ids = list(raw_token_ids)
+    if len(token_ids) != row["sequence_length"]:
+        raise RuntimeError(f"authoritative token count differs: {property_id}")
+    position = int(row["token_position"])
+    tokens = example.get("tokens")
+    if (position < 0 or position >= len(token_ids)
+            or token_ids[position] != row["token_id"]
+            or not isinstance(tokens, list) or len(tokens) != len(token_ids)
+            or tokens[position] != row["token"]
+            or position not in example.get("eligible_token_positions", ())):
+        raise RuntimeError(f"token/property position identity differs: {property_id}")
+
+    embedded = row.get("token_ids")
+    if embedded is not None and list(embedded) != token_ids:
+        raise RuntimeError(f"embedded and authoritative token IDs differ: {property_id}")
+
+    return {
+        **row,
+        "token_ids": token_ids,
+        "token_input_source": dict(source_identity),
+    }
+
+
+def _resolved_campaign_inputs(artifact_root: Path,
+                              manifest: dict) -> tuple[dict[str, dict], dict]:
+    historical, source_identity = _load_authoritative_token_source(
+        artifact_root)
+    resolved = {}
+    for row in manifest["properties"]:
+        item = _resolve_campaign_input(row, historical, source_identity)
+        property_id = item["property_id"]
+        if property_id in resolved:
+            raise RuntimeError(f"duplicate resolved campaign property: {property_id}")
+        resolved[property_id] = item
+    return resolved, source_identity
+
+
 def preflight(artifact_root: Path) -> dict:
     cluster_common.verify_artifact_manifest(artifact_root)
     manifest = cluster_common.load_production_manifest(artifact_root)
@@ -112,7 +220,7 @@ def preflight(artifact_root: Path) -> dict:
     if (len(ids) != 127 or len(set(ids)) != 127
             or set(ids) != set(manifest_ids)):
         raise RuntimeError("campaign split does not cover frozen 127 properties")
-    indexed = {row["property_id"]: row for row in manifest["properties"]}
+    indexed, token_source = _resolved_campaign_inputs(artifact_root, manifest)
     for property_id in ids:
         row = indexed[property_id]
         _candidate_radius(row)
@@ -131,6 +239,8 @@ def preflight(artifact_root: Path) -> dict:
             cluster_common.PRODUCTION_MANIFEST_SHA,
         "source_plan_sha256": plan["canonical_manifest_sha256"],
         "candidate_radius_source": CANDIDATE_RADIUS_SOURCE,
+        "resolved_token_property_count": len(indexed),
+        "authoritative_token_source": token_source,
         "scientific_queries": 0,
     }
 
@@ -358,7 +468,7 @@ def run_worker(worker_id: int, artifact_root: Path, result_root: Path,
     if not visible or "," in visible:
         raise RuntimeError("campaign requires exactly one visible A40 GPU")
     manifest = cluster_common.load_production_manifest(artifact_root)
-    properties = {row["property_id"]: row for row in manifest["properties"]}
+    properties, _ = _resolved_campaign_inputs(artifact_root, manifest)
     plan = a40_fresh_common.load_plan()
     assignments = _ordered_assignments(plan, worker_id)
     started = time.perf_counter()
