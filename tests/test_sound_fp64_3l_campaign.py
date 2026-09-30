@@ -2,6 +2,7 @@ import importlib.util
 import json
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -224,6 +225,85 @@ def test_property_source_is_scoped_and_restored():
     assert (campaign.prefix.FIXTURE_TOKEN_IDS,
             campaign.prefix.FIXTURE_PERTURBED_TOKEN,
             campaign.prefix.FIXTURE_RHO) == original
+
+
+def test_campaign_block0_initializes_reduction_ledger_before_first_reduction(
+        monkeypatch, tmp_path):
+    class ReachedReductionLedger(RuntimeError):
+        pass
+
+    class FakeZonotope:
+        def __init__(self, **_kwargs):
+            self.num_error_terms = campaign.sound.MAXIMUM_GENERATORS + 1
+
+    class FakeDispatch:
+        counts = {}
+
+        def layer_norm(self, state, _parameters, _mode):
+            return state
+
+        def reduce(self, *_args):
+            raise AssertionError("oversized state must use sound reduction")
+
+    @contextmanager
+    def pinned_zonotope():
+        yield FakeZonotope
+
+    proof = types.SimpleNamespace()
+    checkpoint = {
+        "bert.embeddings.word_embeddings.weight":
+            campaign.sound.torch.zeros((3, 1), dtype=campaign.sound.torch.float64),
+        "bert.embeddings.position_embeddings.weight":
+            campaign.sound.torch.zeros((2, 1), dtype=campaign.sound.torch.float64),
+        "bert.embeddings.token_type_embeddings.weight":
+            campaign.sound.torch.zeros((1, 1), dtype=campaign.sound.torch.float64),
+    }
+
+    monkeypatch.setattr(campaign.sound, "pinned_zonotope", pinned_zonotope)
+    monkeypatch.setattr(campaign.sound.prefix, "_load_checkpoint",
+                        lambda: checkpoint)
+    monkeypatch.setattr(campaign.sound.prefix, "FIXTURE_TOKEN_IDS", (1, 2))
+    monkeypatch.setattr(campaign.sound, "_args", lambda _device: object())
+    monkeypatch.setattr(campaign.sound.structural, "local_mask", lambda _p: 1)
+    monkeypatch.setattr(campaign.sound.structural, "proof_from_masks",
+                        lambda *_args: proof)
+    monkeypatch.setattr(campaign.sound.structural, "attach_support",
+                        lambda *_args: None)
+    monkeypatch.setattr(campaign.sound.structural, "get_support",
+                        lambda _state: proof)
+    monkeypatch.setattr(
+        campaign.sound.structural, "StructuralNativeSemanticOperators",
+        lambda: types.SimpleNamespace())
+    monkeypatch.setattr(
+        campaign.sound.production, "NativeProductionDispatch",
+        lambda delegate: FakeDispatch())
+    monkeypatch.setattr(campaign.sound.production, "_recenter_native_ranges",
+                        lambda state: state)
+    monkeypatch.setattr(campaign.sound, "_inject",
+                        lambda state, state_proof, *_args, **_kwargs:
+                        (state, state_proof))
+    monkeypatch.setattr(campaign.sound, "_metrics",
+                        lambda *_args: {"bounded": True})
+    monkeypatch.setattr(campaign.sound, "_parameter",
+                        lambda *_args: object())
+    monkeypatch.setattr(campaign.sound, "_layernorm_majorant",
+                        lambda *_args: 0.0)
+    monkeypatch.setattr(campaign.sound, "_reserve_from_majorant",
+                        lambda *_args: 0.0)
+
+    def inspect_reduction_ledger(_state, _proof, label, reductions):
+        assert label == "block0_pre_qk_reduction"
+        assert reductions == []
+        reductions.append({"label": label, "support_inflation": 0.0})
+        assert reductions[0]["label"] == label
+        raise ReachedReductionLedger
+
+    monkeypatch.setattr(
+        campaign.sound, "_maybe_reduce", inspect_reduction_ledger)
+    with pytest.raises(ReachedReductionLedger):
+        campaign.sound.export_block0_state(
+            tmp_path / "unused.pt", device="cpu",
+            run_representative_mpfr=False)
 
 
 def test_property_failure_is_atomic_fail_closed_and_not_retried(

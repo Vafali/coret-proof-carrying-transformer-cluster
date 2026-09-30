@@ -3013,7 +3013,7 @@ def run_sound_fp64(device=None, continuation=None,
                 [structural.local_mask(prefix.FIXTURE_PERTURBED_TOKEN)] * 128,
                 len(prefix.FIXTURE_TOKEN_IDS), "input_source")
             structural.attach_support(z, proof)
-            measurements = []
+            measurements, reductions = [], []
             embedding_radius = _outward_positive(
                 (word.abs() + position.abs() + token_type.abs())
                 * (2.0 * _gamma(2) + FP64_U))
