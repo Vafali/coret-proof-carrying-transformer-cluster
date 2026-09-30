@@ -23,7 +23,7 @@ def _sha(path: Path) -> str:
 
 def _proof(ids):
     return {
-        "masks": [1 << index for index in range(len(ids))],
+        "masks": [1 << (index % 4) for index in range(len(ids))],
         "ids": list(ids), "reasons": ["unit" for _ in ids],
         "num_tokens": 4,
     }
@@ -39,8 +39,18 @@ def _state(shape, ids):
     }
 
 
+def _expanded_state(shape, count, prefix):
+    state = _state(shape, [f"{prefix}_{index:05d}" for index in range(count)])
+    # Preserve the exact production shape without materializing tens of MiB.
+    state["weights"] = torch.zeros(1, dtype=torch.float64).expand(shape)
+    return state
+
+
 def _fixture(tmp_path, monkeypatch):
-    monkeypatch.setattr(resume, "EXPECTED_GENERATORS", 2)
+    monkeypatch.setattr(resume, "EXPECTED_HIDDEN_GENERATORS", 1)
+    monkeypatch.setattr(resume, "EXPECTED_ALIGNED_Q_GENERATORS", 2)
+    monkeypatch.setattr(resume, "EXPECTED_ALIGNED_K_GENERATORS", 2)
+    monkeypatch.setattr(resume, "EXPECTED_QK_GENERATORS", 2)
     monkeypatch.setattr(resume, "EXPECTED_PRE_REDUCTION_GENERATORS", 4)
     monkeypatch.setattr(resume, "EXPECTED_NATIVE_FRESH", 1)
     monkeypatch.setattr(resume, "EXPECTED_NUMERICAL_FRESH", 1)
@@ -73,7 +83,7 @@ def _fixture(tmp_path, monkeypatch):
         "schema": resume.INPUT_SCHEMA,
         "pinned_revision": resume.sound.PINNED_REVISION,
         "states": {
-            "hidden": _state((3, 4, 128), ["hidden0", "hidden1"]),
+            "hidden": _state((2, 4, 128), ["hidden0"]),
             "qk": _state((4, 3, 4, 4), ids),
         },
         "report": embedded,
@@ -96,6 +106,94 @@ def test_authenticated_qk_is_accepted_without_qk_execution(tmp_path, monkeypatch
     assert result["bound_calls"] == 0
     assert result["qk"]["generator_axis"] == 1
     assert result["qk"]["generator_count"] == 2
+    assert result["hidden"]["generator_count"] == 1
+    assert result["authenticated_topology"] == {
+        "hidden_predecessor_generators": 1,
+        "aligned_q_generators": 2,
+        "aligned_k_generators": 2,
+        "aligned_qk_artifact_sha256": "p" * 64,
+        "post_qk_generators": 2,
+        "post_qk_pre_reduction_generators": 4,
+    }
+
+
+def test_exact_production_hidden_and_qk_counts_are_state_specific():
+    states = {
+        "hidden": _expanded_state(
+            (resume.EXPECTED_HIDDEN_GENERATORS + 1, 4, 128),
+            resume.EXPECTED_HIDDEN_GENERATORS, "hidden"),
+        "qk": _expanded_state(
+            (4, resume.EXPECTED_QK_GENERATORS + 1, 4, 4),
+            resume.EXPECTED_QK_GENERATORS, "qk"),
+    }
+    hidden, qk = resume._validate_serialized_states(states)
+    assert hidden["generator_count"] == 13_338
+    assert hidden["shape"] == [13_339, 4, 128]
+    assert qk["generator_count"] == 14_000
+    assert qk["shape"] == [4, 14_001, 4, 4]
+
+
+@pytest.mark.parametrize("hidden_count", [13_337, 13_339])
+def test_hidden_off_by_one_counts_reject(hidden_count):
+    states = {
+        "hidden": _expanded_state(
+            (hidden_count + 1, 4, 128), hidden_count, "hidden"),
+        "qk": _expanded_state(
+            (4, resume.EXPECTED_QK_GENERATORS + 1, 4, 4),
+            resume.EXPECTED_QK_GENERATORS, "qk"),
+    }
+    with pytest.raises(RuntimeError, match="hidden: generator count differs"):
+        resume._validate_serialized_states(states)
+
+
+@pytest.mark.parametrize("wrong_qk_count", [13_999, 14_001])
+def test_post_qk_count_rejects(wrong_qk_count):
+    hidden = _expanded_state(
+        (resume.EXPECTED_HIDDEN_GENERATORS + 1, 4, 128),
+        resume.EXPECTED_HIDDEN_GENERATORS, "hidden")
+    qk = _expanded_state(
+        (4, wrong_qk_count + 1, 4, 4), wrong_qk_count, "qk")
+    with pytest.raises(RuntimeError, match="qk: generator count differs"):
+        resume._validate_serialized_states({"hidden": hidden, "qk": qk})
+
+
+def test_swapped_hidden_and_qk_metadata_rejects():
+    hidden = _expanded_state(
+        (resume.EXPECTED_HIDDEN_GENERATORS + 1, 4, 128),
+        resume.EXPECTED_HIDDEN_GENERATORS, "hidden")
+    qk = _expanded_state(
+        (4, resume.EXPECTED_QK_GENERATORS + 1, 4, 4),
+        resume.EXPECTED_QK_GENERATORS, "qk")
+    hidden["proof"], qk["proof"] = qk["proof"], hidden["proof"]
+    with pytest.raises(RuntimeError, match="hidden: provenance length differs"):
+        resume._validate_serialized_states({"hidden": hidden, "qk": qk})
+
+
+@pytest.mark.parametrize("aligned_count", [13_999, 14_001])
+def test_aligned_q_and_k_counts_must_both_be_14000(aligned_count):
+    with pytest.raises(RuntimeError, match="aligned Q/K generator count differs"):
+        resume._validate_transition_counts({
+            "input_generator_count": aligned_count,
+            "pre_reduction_generator_count": 14_128,
+            "output_generator_count": 14_000,
+            "native_fresh_generator_count": 64,
+            "fp64_numerical_fresh_count": 64,
+        })
+
+
+def test_aligned_qk_input_count_metadata_rejects(tmp_path, monkeypatch):
+    artifact, report = _fixture(tmp_path, monkeypatch)
+    payload = torch.load(artifact, weights_only=False)
+    payload["report"]["input_generator_count"] = 1
+    changed = tmp_path / "wrong_qk_input_count.pt"
+    torch.save(payload, changed)
+    external = dict(payload["report"])
+    external["output_sha256"] = _sha(changed)
+    changed_report = tmp_path / "wrong_qk_input_count.json"
+    changed_report.write_text(json.dumps(external, sort_keys=True) + "\n")
+    with pytest.raises(RuntimeError, match="aligned Q/K generator count differs"):
+        resume.authenticate(
+            changed, changed_report, _sha(changed), _sha(changed_report))
 
 
 def test_authentication_rejects_hash_schema_and_reduction_order(

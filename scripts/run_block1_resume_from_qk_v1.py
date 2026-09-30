@@ -36,7 +36,10 @@ EXPECTED_REPORT_SHA256 = (
     "938c71b27a4f761b2e31bd61ae8878e962d4bfb6e236539d1dec845f289f8393")
 EXPECTED_QK_PREDECESSOR_SHA256 = (
     "a0953d1a9b65a1a8dd810567d161a2dd4a4b5d763c6694f5fbb1cc45f7b0503a")
-EXPECTED_GENERATORS = 14_000
+EXPECTED_HIDDEN_GENERATORS = 13_338
+EXPECTED_ALIGNED_Q_GENERATORS = 14_000
+EXPECTED_ALIGNED_K_GENERATORS = 14_000
+EXPECTED_QK_GENERATORS = 14_000
 EXPECTED_PRE_REDUCTION_GENERATORS = 14_128
 EXPECTED_NATIVE_FRESH = 64
 EXPECTED_NUMERICAL_FRESH = 64
@@ -116,7 +119,8 @@ def _validate_state(name: str, state: dict, expected_generators: int) -> dict:
 def _validate_qk_reduction(reduction: dict, qk_ids: list[str]) -> None:
     expected = {
         "operator": "b1_qk", "count_before": EXPECTED_PRE_REDUCTION_GENERATORS,
-        "count_after": EXPECTED_GENERATORS, "retained": EXPECTED_RETAINED,
+        "count_after": EXPECTED_QK_GENERATORS,
+        "retained": EXPECTED_RETAINED,
         "absorbed": EXPECTED_ABSORBED,
         "added_box_generators": EXPECTED_REPLACEMENTS,
     }
@@ -132,6 +136,42 @@ def _validate_qk_reduction(reduction: dict, qk_ids: list[str]) -> None:
         raise RuntimeError("embedded QK reduction output order differs")
 
 
+def _validate_serialized_states(states: dict) -> tuple[dict, dict]:
+    if set(states) != {"hidden", "qk"}:
+        raise RuntimeError("QK state inventory differs")
+    hidden = _validate_state(
+        "hidden", states["hidden"], EXPECTED_HIDDEN_GENERATORS)
+    qk = _validate_state("qk", states["qk"], EXPECTED_QK_GENERATORS)
+    if hidden["num_tokens"] != qk["num_tokens"]:
+        raise RuntimeError("QK/hidden provenance token universes differ")
+    expected_hidden_shape = [EXPECTED_HIDDEN_GENERATORS + 1, 4, 128]
+    expected_qk_shape = [4, EXPECTED_QK_GENERATORS + 1, 4, 4]
+    if hidden["shape"] != expected_hidden_shape:
+        raise RuntimeError(f"hidden state shape differs: {hidden['shape']}")
+    if qk["shape"] != expected_qk_shape:
+        raise RuntimeError(f"QK state shape differs: {qk['shape']}")
+    return hidden, qk
+
+
+def _validate_transition_counts(embedded: dict) -> None:
+    aligned_count = embedded.get("input_generator_count")
+    if (aligned_count != EXPECTED_ALIGNED_Q_GENERATORS
+            or aligned_count != EXPECTED_ALIGNED_K_GENERATORS):
+        raise RuntimeError(
+            "embedded aligned Q/K generator count differs: "
+            f"{aligned_count} != "
+            f"{EXPECTED_ALIGNED_Q_GENERATORS}/{EXPECTED_ALIGNED_K_GENERATORS}")
+    if (embedded.get("pre_reduction_generator_count")
+            != EXPECTED_PRE_REDUCTION_GENERATORS
+            or embedded.get("output_generator_count")
+            != EXPECTED_QK_GENERATORS
+            or embedded.get("native_fresh_generator_count")
+            != EXPECTED_NATIVE_FRESH
+            or embedded.get("fp64_numerical_fresh_count")
+            != EXPECTED_NUMERICAL_FRESH):
+        raise RuntimeError("embedded QK transition counts differ")
+
+
 def authenticate(qk_path: Path, qk_report_path: Path,
                  expected_sha256: str = EXPECTED_INPUT_SHA256,
                  expected_report_sha256: str = EXPECTED_REPORT_SHA256) -> dict:
@@ -145,33 +185,16 @@ def authenticate(qk_path: Path, qk_report_path: Path,
             f"QK report SHA256 mismatch: {report_sha} "
             f"!= {expected_report_sha256}")
     payload = sound._load_artifact(qk_path, INPUT_SCHEMA)
-    if set(payload.get("states", {})) != {"hidden", "qk"}:
-        raise RuntimeError("QK state inventory differs")
-    hidden = _validate_state(
-        "hidden", payload["states"]["hidden"], EXPECTED_GENERATORS)
-    qk = _validate_state("qk", payload["states"]["qk"], EXPECTED_GENERATORS)
-    if hidden["num_tokens"] != qk["num_tokens"]:
-        raise RuntimeError("QK/hidden provenance token universes differ")
-    if hidden["shape"] != [EXPECTED_GENERATORS + 1, 4, 128]:
-        raise RuntimeError(f"hidden state shape differs: {hidden['shape']}")
-    if qk["shape"] != [4, EXPECTED_GENERATORS + 1, 4, 4]:
-        raise RuntimeError(f"QK state shape differs: {qk['shape']}")
+    hidden, qk = _validate_serialized_states(payload.get("states", {}))
 
     embedded = payload.get("report", {})
     if (embedded.get("schema") != INPUT_REPORT_SCHEMA
             or embedded.get("input_sha256")
             != EXPECTED_QK_PREDECESSOR_SHA256
-            or embedded.get("input_generator_count") != EXPECTED_GENERATORS
-            or embedded.get("pre_reduction_generator_count")
-            != EXPECTED_PRE_REDUCTION_GENERATORS
-            or embedded.get("output_generator_count") != EXPECTED_GENERATORS
-            or embedded.get("native_fresh_generator_count")
-            != EXPECTED_NATIVE_FRESH
-            or embedded.get("fp64_numerical_fresh_count")
-            != EXPECTED_NUMERICAL_FRESH
             or embedded.get("generic_fallback_count") != 0
             or embedded.get("all_outputs_finite") is not True):
         raise RuntimeError("embedded QK predecessor/topology metadata differs")
+    _validate_transition_counts(embedded)
     _validate_qk_reduction(
         embedded.get("post_qk_reduction", {}),
         payload["states"]["qk"]["proof"]["ids"])
@@ -195,6 +218,15 @@ def authenticate(qk_path: Path, qk_report_path: Path,
         "input_report_path": str(qk_report_path),
         "input_report_sha256": report_sha,
         "hidden": hidden, "qk": qk, "qk_invocations": 0,
+        "authenticated_topology": {
+            "hidden_predecessor_generators": EXPECTED_HIDDEN_GENERATORS,
+            "aligned_q_generators": EXPECTED_ALIGNED_Q_GENERATORS,
+            "aligned_k_generators": EXPECTED_ALIGNED_K_GENERATORS,
+            "aligned_qk_artifact_sha256": EXPECTED_QK_PREDECESSOR_SHA256,
+            "post_qk_generators": EXPECTED_QK_GENERATORS,
+            "post_qk_pre_reduction_generators":
+                EXPECTED_PRE_REDUCTION_GENERATORS,
+        },
         "qk_mpfr_spot": qk_mpfr_spot,
         "scientific_properties": 0, "bound_calls": 0,
     }
