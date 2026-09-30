@@ -1937,6 +1937,7 @@ def run_block1_softmax_only(input_path, output_path, device=None):
                 },
                 "injections": measurements, "reductions": reductions,
                 "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+                "generic_fallback_count": dispatch.generic_family_invocations,
             }
             artifact = _save_artifact(
                 output_path, "CORET_SOUND_FP64_BLOCK1_STAGE1_V1",
@@ -2184,10 +2185,24 @@ def run_block1_stage2_av_only(input_path, output_path, device=None):
             raw = dispatch.attention_value(probability, value)
             raw_proof = structural.get_support(raw)
             ops = 32 * (probability.num_error_terms + 1) ** 2 * 16 + 4096
+            reserve = _reserve_from_majorant(
+                _bilinear_majorant(probability, value.t()), ops)
+            transposed = value.t()
+            with _mp_context(gmpy2.RoundToNearest):
+                exact = _mp(0)
+                for key_index in range(value.num_words):
+                    exact += (
+                        _mp(probability.zonotope_w[0, 0, 0, key_index])
+                        * _mp(transposed.zonotope_w[0, 1, 0, key_index]))
+                    exact += (
+                        _mp(probability.zonotope_w[0, 1, 0, key_index])
+                        * _mp(transposed.zonotope_w[0, 0, 0, key_index]))
+            mpfr_spot = _oracle_containment(
+                "block1_actual_av_retained_coefficient", exact,
+                raw.zonotope_w[0, 1, 0, 0], float(reserve.max()))
             context, context_proof = _inject(
                 raw, raw_proof, [probability, value], "b1_attention_value",
-                ops, measurements, reserve=_reserve_from_majorant(
-                    _bilinear_majorant(probability, value.t()), ops))
+                ops, measurements, reserve=reserve)
             context, context_proof = _maybe_reduce(
                 context, context_proof, "b1_attention_value", reductions)
             if device.type == "cuda": torch.cuda.synchronize()
@@ -2196,7 +2211,9 @@ def run_block1_stage2_av_only(input_path, output_path, device=None):
                 "measurements": [_state_measurement(
                     "block1_attention_value", context, context_proof, seconds)],
                 "injections": measurements, "reductions": reductions,
+                "mpfr_spots": [mpfr_spot],
                 "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+                "generic_fallback_count": dispatch.generic_family_invocations,
                 "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(device))
                 if device.type == "cuda" else 0,
                 "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(device))
@@ -2552,7 +2569,7 @@ def run_block1_stage2_post_ln(input_path, output_path, device=None):
             delegate._hidden = residual_proof
             delegate._attention_output = residual_proof
             dispatch = production.NativeProductionDispatch(delegate=delegate)
-            measurements, reductions = [], []
+            measurements, reductions, oracles = [], [], []
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
             started = time.perf_counter()
@@ -2573,6 +2590,25 @@ def run_block1_stage2_post_ln(input_path, output_path, device=None):
                     _layernorm_majorant(residual, parameter), ops))
             post, post_proof = _maybe_reduce(
                 post, post_proof, "b1_post_attention_layernorm", reductions)
+            reserve = max(item["maximum_local_widening"]
+                          for item in measurements
+                          if item["label"] == "b1_post_attention_layernorm")
+            values = centered.zonotope_w[0, 0].detach().cpu().tolist()
+            with _mp_context(gmpy2.RoundToNearest):
+                exact_variance = sum(
+                    (_mp(item) * _mp(item) for item in values), _mp(0)
+                ) / len(values)
+            machine_variance = (
+                centered.zonotope_w[0, 0].square().sum() / len(values))
+            oracles.append(_oracle_containment(
+                "block1_post_attention_layernorm_variance_nominal",
+                exact_variance, machine_variance, reserve))
+            low_value = variance_low[0, 0] + 1e-12
+            with _mp_context(gmpy2.RoundToNearest):
+                exact_root = gmpy2.sqrt(_mp(low_value))
+            oracles.append(_oracle_containment(
+                "block1_post_attention_layernorm_sqrt_lower", exact_root,
+                torch.sqrt(low_value), reserve))
             if device.type == "cuda": torch.cuda.synchronize()
             seconds = time.perf_counter() - started
             report = {
@@ -2586,7 +2622,9 @@ def run_block1_stage2_post_ln(input_path, output_path, device=None):
                     "minimum_variance_lower": float(variance_low.min()),
                 },
                 "injections": measurements, "reductions": reductions,
+                "mpfr_spots": oracles,
                 "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+                "generic_fallback_count": dispatch.generic_family_invocations,
                 "peak_allocated_bytes": int(torch.cuda.max_memory_allocated())
                 if device.type == "cuda" else 0,
                 "peak_reserved_bytes": int(torch.cuda.max_memory_reserved())
@@ -2655,6 +2693,7 @@ def run_block1_stage3_ffn1(input_path, output_path, device=None):
                 "branch_separation": branch,
                 "injections": measurements, "reductions": reductions,
                 "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+                "generic_fallback_count": dispatch.generic_family_invocations,
                 "peak_allocated_bytes": int(torch.cuda.max_memory_allocated())
                 if device.type == "cuda" else 0,
                 "peak_reserved_bytes": int(torch.cuda.max_memory_reserved())
@@ -2841,7 +2880,7 @@ def run_block1_stage3_final_ln(input_path, output_path, device=None):
             oracles.append(_oracle_containment(
                 "block1_actual_layernorm_variance_nominal", exact, machine,
                 reserve))
-            low_value = variance_low[0, 0]
+            low_value = variance_low[0, 0] + 1e-12
             with _mp_context(gmpy2.RoundToNearest):
                 exact_root = gmpy2.sqrt(_mp(low_value))
             oracles.append(_oracle_containment(
@@ -2863,6 +2902,7 @@ def run_block1_stage3_final_ln(input_path, output_path, device=None):
                 "mpfr_spots": oracles, "injections": measurements,
                 "reductions": reductions,
                 "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+                "generic_fallback_count": dispatch.generic_family_invocations,
                 "peak_allocated_bytes": int(torch.cuda.max_memory_allocated())
                 if device.type == "cuda" else 0,
                 "peak_reserved_bytes": int(torch.cuda.max_memory_reserved())
