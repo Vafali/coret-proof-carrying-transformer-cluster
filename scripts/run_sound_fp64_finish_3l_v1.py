@@ -169,8 +169,13 @@ def _stage_measure(label, state, proof, started, rows):
 
 
 def execute(input_path: Path, report_path: Path, output_path: Path,
-            output_report: Path, device_index: int) -> dict:
-    authenticated = authenticate(input_path, report_path)
+            output_report: Path, device_index: int,
+            expected_input_sha256: str = EXPECTED_INPUT_SHA256,
+            expected_report_sha256: str = EXPECTED_REPORT_SHA256,
+            run_representative_mpfr: bool = True) -> dict:
+    authenticated = authenticate(
+        input_path, report_path, expected_input_sha256,
+        expected_report_sha256)
     if output_path.exists() or output_report.exists():
         raise RuntimeError("refusing to overwrite 3-layer output")
     if not torch.cuda.is_available():
@@ -240,16 +245,17 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             qk_ops = 32 * (q.num_error_terms + 1) ** 2 * 16 + 4096
             qk_reserve = sound._reserve_from_majorant(
                 sound._bilinear_majorant(q, k), qk_ops)
-            with sound._mp_context(gmpy2.RoundToNearest):
-                exact = gmpy2.mpfr(0)
-                for feature in range(q.zonotope_w.shape[-1]):
-                    exact += (sound._mp(q.zonotope_w[0, 0, 0, feature])
-                              * sound._mp(k.zonotope_w[0, 1, 0, feature]))
-                    exact += (sound._mp(q.zonotope_w[0, 1, 0, feature])
-                              * sound._mp(k.zonotope_w[0, 0, 0, feature]))
-            spots.append(_spot(
-                "block2_qk_retained_coefficient", exact,
-                raw_qk.zonotope_w[0, 1, 0, 0], float(qk_reserve.max())))
+            if run_representative_mpfr:
+                with sound._mp_context(gmpy2.RoundToNearest):
+                    exact = gmpy2.mpfr(0)
+                    for feature in range(q.zonotope_w.shape[-1]):
+                        exact += (sound._mp(q.zonotope_w[0, 0, 0, feature])
+                                  * sound._mp(k.zonotope_w[0, 1, 0, feature]))
+                        exact += (sound._mp(q.zonotope_w[0, 1, 0, feature])
+                                  * sound._mp(k.zonotope_w[0, 0, 0, feature]))
+                spots.append(_spot(
+                    "block2_qk_retained_coefficient", exact,
+                    raw_qk.zonotope_w[0, 1, 0, 0], float(qk_reserve.max())))
             qk, qk_proof = sound._inject(
                 raw_qk, raw_qk_proof, [q, k], "b2_qk", qk_ops,
                 measurements, reserve=qk_reserve)
@@ -304,21 +310,23 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             av_ops = 32 * (probability.num_error_terms + 1) ** 2 * 16 + 4096
             av_reserve = sound._reserve_from_majorant(
                 sound._bilinear_majorant(probability, value.t()), av_ops)
-            transposed = value.t()
-            with sound._mp_context(gmpy2.RoundToNearest):
-                exact = gmpy2.mpfr(0)
-                for key_index in range(value.num_words):
-                    exact += (sound._mp(
-                        probability.zonotope_w[0, 0, 0, key_index])
-                              * sound._mp(
-                        transposed.zonotope_w[0, 1, 0, key_index]))
-                    exact += (sound._mp(
-                        probability.zonotope_w[0, 1, 0, key_index])
-                              * sound._mp(
-                        transposed.zonotope_w[0, 0, 0, key_index]))
-            spots.append(_spot(
-                "block2_av_retained_coefficient", exact,
-                raw_context.zonotope_w[0, 1, 0, 0], float(av_reserve.max())))
+            if run_representative_mpfr:
+                transposed = value.t()
+                with sound._mp_context(gmpy2.RoundToNearest):
+                    exact = gmpy2.mpfr(0)
+                    for key_index in range(value.num_words):
+                        exact += (sound._mp(
+                            probability.zonotope_w[0, 0, 0, key_index])
+                                  * sound._mp(
+                            transposed.zonotope_w[0, 1, 0, key_index]))
+                        exact += (sound._mp(
+                            probability.zonotope_w[0, 1, 0, key_index])
+                                  * sound._mp(
+                            transposed.zonotope_w[0, 0, 0, key_index]))
+                spots.append(_spot(
+                    "block2_av_retained_coefficient", exact,
+                    raw_context.zonotope_w[0, 1, 0, 0],
+                    float(av_reserve.max())))
             context, context_proof = sound._inject(
                 raw_context, raw_context_proof, [probability, value],
                 "b2_attention_value", av_ops, measurements,
@@ -375,20 +383,24 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 reserve=ln_reserve)
             post, post_proof = sound._maybe_reduce(
                 post, post_proof, "b2_post_attention_layernorm", reductions)
-            values = centered.zonotope_w[0, 0].detach().cpu().tolist()
-            with sound._mp_context(gmpy2.RoundToNearest):
-                exact_variance = sum((sound._mp(item) * sound._mp(item)
-                                      for item in values), gmpy2.mpfr(0)) / len(values)
-                exact_root = gmpy2.sqrt(sound._mp(
-                    variance_low[0, 0] + LAYER_NORM_EPSILON))
-            spots.extend([
-                _spot("block2_post_attention_variance_nominal", exact_variance,
-                      centered.zonotope_w[0, 0].square().sum() / len(values),
-                      float(ln_reserve.max())),
-                _spot("block2_post_attention_sqrt_lower", exact_root,
-                      torch.sqrt(variance_low[0, 0] + LAYER_NORM_EPSILON),
-                      float(ln_reserve.max())),
-            ])
+            if run_representative_mpfr:
+                values = centered.zonotope_w[0, 0].detach().cpu().tolist()
+                with sound._mp_context(gmpy2.RoundToNearest):
+                    exact_variance = sum((sound._mp(item) * sound._mp(item)
+                                          for item in values),
+                                         gmpy2.mpfr(0)) / len(values)
+                    exact_root = gmpy2.sqrt(sound._mp(
+                        variance_low[0, 0] + LAYER_NORM_EPSILON))
+                spots.extend([
+                    _spot("block2_post_attention_variance_nominal",
+                          exact_variance,
+                          centered.zonotope_w[0, 0].square().sum()
+                          / len(values), float(ln_reserve.max())),
+                    _spot("block2_post_attention_sqrt_lower", exact_root,
+                          torch.sqrt(
+                              variance_low[0, 0] + LAYER_NORM_EPSILON),
+                          float(ln_reserve.max())),
+                ])
             row = _stage_measure(
                 "block2_post_attention_layernorm", post, post_proof, started,
                 rows)
@@ -458,20 +470,23 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 reserve=ln_reserve)
             output, output_proof = sound._maybe_reduce(
                 output, output_proof, "b2_output_layernorm", reductions)
-            values = centered.zonotope_w[0, 0].detach().cpu().tolist()
-            with sound._mp_context(gmpy2.RoundToNearest):
-                exact_variance = sum((sound._mp(item) * sound._mp(item)
-                                      for item in values), gmpy2.mpfr(0)) / len(values)
-                exact_root = gmpy2.sqrt(sound._mp(
-                    variance_low[0, 0] + LAYER_NORM_EPSILON))
-            spots.extend([
-                _spot("block2_output_variance_nominal", exact_variance,
-                      centered.zonotope_w[0, 0].square().sum() / len(values),
-                      float(ln_reserve.max())),
-                _spot("block2_output_sqrt_lower", exact_root,
-                      torch.sqrt(variance_low[0, 0] + LAYER_NORM_EPSILON),
-                      float(ln_reserve.max())),
-            ])
+            if run_representative_mpfr:
+                values = centered.zonotope_w[0, 0].detach().cpu().tolist()
+                with sound._mp_context(gmpy2.RoundToNearest):
+                    exact_variance = sum((sound._mp(item) * sound._mp(item)
+                                          for item in values),
+                                         gmpy2.mpfr(0)) / len(values)
+                    exact_root = gmpy2.sqrt(sound._mp(
+                        variance_low[0, 0] + LAYER_NORM_EPSILON))
+                spots.extend([
+                    _spot("block2_output_variance_nominal", exact_variance,
+                          centered.zonotope_w[0, 0].square().sum()
+                          / len(values), float(ln_reserve.max())),
+                    _spot("block2_output_sqrt_lower", exact_root,
+                          torch.sqrt(
+                              variance_low[0, 0] + LAYER_NORM_EPSILON),
+                          float(ln_reserve.max())),
+                ])
             output, output_proof, recenter = sound._recenter_sound(
                 output, output_proof, "final_encoder_recenter", measurements,
                 reductions)
@@ -532,14 +547,15 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             classifier_reserve = max(
                 item["maximum_local_widening"] for item in measurements
                 if item["label"] == "direct_classifier_margin")
-            with sound._mp_context(gmpy2.RoundToNearest):
-                exact = sound._mp(classifier.bias[0])
-                for feature in range(128):
-                    exact += (sound._mp(pooled.zonotope_w[0, 0, feature])
-                              * sound._mp(classifier.weight[0, feature]))
-            spots.append(_spot(
-                "direct_classifier_margin_center", exact,
-                margin.zonotope_w[0, 0, 0], classifier_reserve))
+            if run_representative_mpfr:
+                with sound._mp_context(gmpy2.RoundToNearest):
+                    exact = sound._mp(classifier.bias[0])
+                    for feature in range(128):
+                        exact += (sound._mp(pooled.zonotope_w[0, 0, feature])
+                                  * sound._mp(classifier.weight[0, feature]))
+                spots.append(_spot(
+                    "direct_classifier_margin_center", exact,
+                    margin.zonotope_w[0, 0, 0], classifier_reserve))
 
             torch.cuda.synchronize()
             if dispatch.generic_family_invocations != 0:
@@ -551,9 +567,10 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             if dict(dispatch.counts) != expected_dispatch:
                 raise RuntimeError(
                     f"native dispatch inventory differs: {dict(dispatch.counts)}")
-            if not all(spot.get("one_ulp_inward_rejected") is True
-                       and spot.get("state_reserve_contains_machine_error") is True
-                       for spot in spots):
+            if (run_representative_mpfr and (not spots or not all(
+                    spot.get("one_ulp_inward_rejected") is True
+                    and spot.get("state_reserve_contains_machine_error") is True
+                    for spot in spots))):
                 raise RuntimeError("representative MPFR/one-ULP evidence incomplete")
             if final_lower <= 0:
                 raise RuntimeError(
@@ -587,6 +604,8 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 "recenter": recenter,
                 "stages": rows, "reductions": reductions,
                 "mpfr_spots": spots,
+                "representative_mpfr_checks_performed":
+                    run_representative_mpfr,
                 "dispatch_counts": dict(dispatch.counts),
                 "generic_fallback_count": 0,
                 "total_seconds": total_seconds,

@@ -1189,7 +1189,7 @@ def run_reduction_audit(device=None):
     return run_sound_fp64(device=device, continuation=continuation)
 
 
-def export_block0_state(path, device=None):
+def export_block0_state(path, device=None, run_representative_mpfr=True):
     destination = Path(path)
 
     def continuation(output, proof, _context):
@@ -1211,7 +1211,9 @@ def export_block0_state(path, device=None):
             "path": str(destination), "byte_count": destination.stat().st_size,
             "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
         }
-    return run_sound_fp64(device=device, continuation=continuation)
+    return run_sound_fp64(
+        device=device, continuation=continuation,
+        run_representative_mpfr=run_representative_mpfr)
 
 
 def _state_payload(z, proof):
@@ -1704,7 +1706,7 @@ def run_block1_qk_compute(input_path, output_path, device=None):
             delegate = structural.StructuralNativeSemanticOperators()
             delegate._qk_index = 1; delegate._hidden = proof
             dispatch = production.NativeProductionDispatch(delegate=delegate)
-            measurements = []
+            measurements, reductions = [], []
             if device.type == "cuda": torch.cuda.synchronize()
             started = time.perf_counter()
             raw = dispatch.qk(q, k); raw_proof = structural.get_support(raw)
@@ -2980,7 +2982,8 @@ def run_reduction_audit_from_artifact(path, device=None):
         torch.set_default_dtype(prior_dtype)
 
 
-def run_sound_fp64(device=None, continuation=None):
+def run_sound_fp64(device=None, continuation=None,
+                   run_representative_mpfr=True):
     """Run Block 0 with every FP64 reserve embedded in the abstract state."""
     device = torch.device(
         device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
@@ -3049,8 +3052,15 @@ def run_sound_fp64(device=None, continuation=None):
             record("embedding_layernorm", z)
             z = production._recenter_native_ranges(z)
             structural.attach_support(z, proof)
-            z = dispatch.reduce(z, MAXIMUM_GENERATORS)
-            proof = structural.get_support(z)
+            if z.num_error_terms <= MAXIMUM_GENERATORS:
+                # Preserve the accepted native no-op transition and its
+                # dispatch evidence.  Oversized production states instead use
+                # the established sound-FP64 replacement-box reduction.
+                z = dispatch.reduce(z, MAXIMUM_GENERATORS)
+                proof = structural.get_support(z)
+            else:
+                z, proof = _maybe_reduce(
+                    z, proof, "block0_pre_qk_reduction", reductions)
             delegate._hidden = proof
             residual, residual_proof = z, proof
 
@@ -3084,6 +3094,8 @@ def run_sound_fp64(device=None, continuation=None):
             k = k.add_attention_heads_dim(4)
             structural.attach_support(q, qk_input_proof)
             structural.attach_support(k, qk_input_proof)
+            q, k, qk_input_proof = _maybe_reduce_pair(
+                q, k, qk_input_proof, "block0_pre_qk_pair", reductions)
             delegate._hidden = qk_input_proof
             raw_qk = dispatch.qk(q, k)
             raw_qk_proof = structural.get_support(raw_qk)
@@ -3093,6 +3105,8 @@ def run_sound_fp64(device=None, continuation=None):
             qk, qk_proof = _inject(
                 raw_qk, raw_qk_proof, [q, k], "qk", qk_ops,
                 measurements, reserve=qk_reserve)
+            qk, qk_proof = _maybe_reduce(
+                qk, qk_proof, "block0_qk", reductions)
             delegate._score = qk_proof
             record("qk", qk)
 
@@ -3105,6 +3119,8 @@ def run_sound_fp64(device=None, continuation=None):
             scores, score_proof = _inject(
                 scores, qk_proof, [qk], "score_scaling", 1, measurements,
                 reserve=score_reserve)
+            scores, score_proof = _maybe_reduce(
+                scores, score_proof, "block0_score_scaling", reductions)
             delegate._score = score_proof
             raw_probability = dispatch.softmax(scores, no_constraints=False)
             raw_probability_proof = structural.get_support(raw_probability)
@@ -3114,6 +3130,8 @@ def run_sound_fp64(device=None, continuation=None):
             probability, probability_proof = _inject(
                 raw_probability, raw_probability_proof, [scores], "softmax",
                 softmax_ops, measurements, reserve=softmax_reserve)
+            probability, probability_proof = _maybe_reduce(
+                probability, probability_proof, "block0_softmax", reductions)
             delegate._probability = probability_proof
             record("softmax", probability)
 
@@ -3124,6 +3142,9 @@ def run_sound_fp64(device=None, continuation=None):
             probability, value, av_input_proof = _align_states(
                 probability, probability_proof, value, value_proof,
                 "attention_value_branches")
+            probability, value, av_input_proof = _maybe_reduce_pair(
+                probability, value, av_input_proof,
+                "block0_pre_av_pair", reductions)
             delegate._probability = av_input_proof
             delegate._value = av_input_proof
             raw_context = dispatch.attention_value(probability, value)
@@ -3135,6 +3156,8 @@ def run_sound_fp64(device=None, continuation=None):
             context, context_proof = _inject(
                 raw_context, raw_context_proof, [probability, value],
                 "attention_value", av_ops, measurements, reserve=av_reserve)
+            context, context_proof = _maybe_reduce(
+                context, context_proof, "block0_attention_value", reductions)
             delegate._attention_output = context_proof
             record("attention_value", context)
 
@@ -3143,15 +3166,24 @@ def run_sound_fp64(device=None, continuation=None):
             attention, attention_proof = _dense_sound(
                 context, context_proof, parameters["attention_output"],
                 "attention_output_affine", measurements)
+            attention, attention_proof = _maybe_reduce(
+                attention, attention_proof, "block0_attention_output_affine",
+                reductions)
             attention, aligned_residual, residual_union = _align_states(
                 attention, attention_proof, residual, residual_proof,
                 "attention_residual")
+            attention, aligned_residual, residual_union = _maybe_reduce_pair(
+                attention, aligned_residual, residual_union,
+                "block0_pre_attention_residual_pair", reductions)
             raw_residual = attention.add(aligned_residual)
             raw_residual_reserve = _add_reserve(attention, aligned_residual)
             attention_residual, attention_residual_proof = _inject(
                 raw_residual, residual_union,
                 [attention, aligned_residual], "attention_residual", 1,
                 measurements, reserve=raw_residual_reserve)
+            attention_residual, attention_residual_proof = _maybe_reduce(
+                attention_residual, attention_residual_proof,
+                "block0_attention_residual", reductions)
             delegate._hidden = attention_residual_proof
             delegate._attention_output = attention_residual_proof
             raw_post = dispatch.layer_norm(
@@ -3166,12 +3198,17 @@ def run_sound_fp64(device=None, continuation=None):
                 raw_post, raw_post_proof, [attention_residual],
                 "post_attention_layernorm", ln_ops, measurements,
                 reserve=post_ln_reserve)
+            post, post_proof = _maybe_reduce(
+                post, post_proof, "block0_post_attention_layernorm",
+                reductions)
             delegate._post_attention = post_proof
             record("post_attention_layernorm", post)
 
             ffn_first, ffn_first_proof = _dense_sound(
                 post, post_proof, parameters["ffn_first"], "ffn_first",
                 measurements)
+            ffn_first, ffn_first_proof = _maybe_reduce(
+                ffn_first, ffn_first_proof, "block0_ffn_first", reductions)
             delegate._post_attention = ffn_first_proof
             raw_relu = dispatch.relu(ffn_first)
             raw_relu_proof = structural.get_support(raw_relu)
@@ -3179,19 +3216,29 @@ def run_sound_fp64(device=None, continuation=None):
             relu, relu_proof = _inject(
                 raw_relu, raw_relu_proof, [ffn_first], "relu", relu_ops,
                 measurements, condition=2.0)
+            relu, relu_proof = _maybe_reduce(
+                relu, relu_proof, "block0_relu", reductions)
             delegate._relu = relu_proof
             ffn, ffn_proof = _dense_sound(
                 relu, relu_proof, parameters["ffn_second"], "ffn_second",
                 measurements)
+            ffn, ffn_proof = _maybe_reduce(
+                ffn, ffn_proof, "block0_ffn_second", reductions)
             record("ffn_output", ffn)
 
             ffn, aligned_post, ffn_union = _align_states(
                 ffn, ffn_proof, post, post_proof, "ffn_residual")
+            ffn, aligned_post, ffn_union = _maybe_reduce_pair(
+                ffn, aligned_post, ffn_union,
+                "block0_pre_ffn_residual_pair", reductions)
             raw_ffn_residual = ffn.add(aligned_post)
             ffn_reserve = _add_reserve(ffn, aligned_post)
             ffn_residual, ffn_residual_proof = _inject(
                 raw_ffn_residual, ffn_union, [ffn, aligned_post],
                 "ffn_residual", 1, measurements, reserve=ffn_reserve)
+            ffn_residual, ffn_residual_proof = _maybe_reduce(
+                ffn_residual, ffn_residual_proof,
+                "block0_ffn_residual", reductions)
             delegate._post_attention = ffn_residual_proof
             delegate._relu = ffn_residual_proof
 
@@ -3214,27 +3261,34 @@ def run_sound_fp64(device=None, continuation=None):
                 raw_output, raw_output_proof, [ffn_residual],
                 "output_layernorm", ln_ops, measurements,
                 reserve=output_ln_reserve)
+            output, output_proof = _maybe_reduce(
+                output, output_proof, "block0_output_layernorm", reductions)
             record("output_layernorm", output)
             total_seconds = time.perf_counter() - total_started
             reserves = {
                 item["label"]: item["maximum_local_widening"]
                 for item in measurements}
-            mpfr_spots = _mpfr_spots(checkpoint)
-            mpfr_spots.extend(_runtime_mpfr_spots(
-                hidden=z, query_parameter=parameters["query"], q=q, k=k,
-                raw_qk=raw_qk, scores=scores,
-                raw_probability=probability, value=value,
-                raw_context=raw_context, ffn_residual=ffn_residual,
-                centered=centered, variance=variance, reserves=reserves))
+            mpfr_spots = []
+            if run_representative_mpfr:
+                mpfr_spots = _mpfr_spots(checkpoint)
+                mpfr_spots.extend(_runtime_mpfr_spots(
+                    hidden=z, query_parameter=parameters["query"], q=q, k=k,
+                    raw_qk=raw_qk, scores=scores,
+                    raw_probability=probability, value=value,
+                    raw_context=raw_context, ffn_residual=ffn_residual,
+                    centered=centered, variance=variance, reserves=reserves))
             result = {
                 "rows": rows,
                 "numerical_injections": measurements,
+                "reductions": reductions,
                 "second_layernorm_variance_lower": float(variance_low.min()),
                 "second_layernorm_variance_upper_min": float(
                     variance_high.min()),
                 "dispatch_counts": dict(dispatch.counts),
                 "dtype": str(output.zonotope_w.dtype),
                 "mpfr_spots": mpfr_spots,
+                "representative_mpfr_checks_performed":
+                    run_representative_mpfr,
                 "final_proof_generator_count": len(output_proof.ids),
                 "total_seconds": total_seconds,
                 "peak_allocated_bytes": int(
