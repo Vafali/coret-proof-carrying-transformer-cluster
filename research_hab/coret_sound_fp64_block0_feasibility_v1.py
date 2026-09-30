@@ -11,6 +11,7 @@ import io
 import hashlib
 import json
 import math
+import copy
 import subprocess
 import sys
 import tarfile
@@ -129,12 +130,11 @@ def _metrics(label, z, elapsed):
 
 
 def _make_like(z, weights, low=None, high=None):
-    from Verifiers.Zonotope import make_zonotope_new_weights_same_args
-    result = make_zonotope_new_weights_same_args(
-        weights, source_zonotope=z, clone=False)
-    result.error_term_range_low = low
-    result.error_term_range_high = high
-    return result
+    return z.__class__(
+        args=z.args, p=z.p, eps=z.eps,
+        perturbed_word_index=z.perturbed_word_index,
+        zonotope_w=weights, error_term_range_low=low,
+        error_term_range_high=high, clone=False)
 
 
 def _ranges(z):
@@ -741,7 +741,2206 @@ def run_plain_fp64(device=None, dtype=torch.float64):
         torch.set_default_dtype(prior_dtype)
 
 
-def run_sound_fp64(device=None):
+def _tensor_sha(value):
+    raw = value.detach().cpu().contiguous().numpy().tobytes()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _coordinate_count(z):
+    if z.zonotope_w.ndim == 3:
+        return z.zonotope_w.shape[1] * z.zonotope_w.shape[2]
+    if z.zonotope_w.ndim == 4:
+        return (z.zonotope_w.shape[0] * z.zonotope_w.shape[2]
+                * z.zonotope_w.shape[3])
+    raise RuntimeError("sound reduction supports only native 3D/4D states")
+
+
+def _generator_rows(z):
+    return z.zonotope_w[1:] if z.zonotope_w.ndim == 3 else z.zonotope_w[:, 1:]
+
+
+def _center_row(z):
+    return z.zonotope_w[0] if z.zonotope_w.ndim == 3 else z.zonotope_w[:, 0]
+
+
+def _protected_indices(z, proof):
+    low, high = _ranges(z)
+    protected = []
+    for index, (identifier, reason) in enumerate(zip(proof.ids, proof.reasons)):
+        source = (identifier.startswith("input_source_")
+                  or "original_perturbed" in reason
+                  or "source" in reason and index < 128)
+        constrained = (float(low[index]) != -1.0 or float(high[index]) != 1.0)
+        if source or constrained:
+            protected.append(index)
+    return tuple(protected)
+
+
+def _ranking(z):
+    rows = _generator_rows(z).abs().double()
+    low, high = _ranges(z)
+    scale = torch.maximum(low.abs(), high.abs())
+    if z.zonotope_w.ndim == 3:
+        metric = (rows * scale.reshape(-1, 1, 1)).sum(dim=(1, 2))
+    else:
+        metric = (rows * scale.reshape(1, -1, 1, 1)).sum(dim=(0, 2, 3))
+    return metric.detach().cpu().tolist()
+
+
+def _select_reduction_indices(z, proof, cap):
+    boxes = _coordinate_count(z)
+    keep_count = int(cap) - boxes
+    if keep_count < 0 or keep_count > z.num_error_terms:
+        raise RuntimeError("invalid sound reduction cap")
+    protected = set(_protected_indices(z, proof))
+    if len(protected) > keep_count:
+        raise RuntimeError(
+            f"protected generator count {len(protected)} exceeds capacity {keep_count}")
+    metric = _ranking(z)
+    candidates = [index for index in range(z.num_error_terms)
+                  if index not in protected]
+    candidates.sort(key=lambda index: (-metric[index], index))
+    retained = sorted((*protected, *candidates[:keep_count-len(protected)]))
+    retained_set = set(retained)
+    dropped = [index for index in range(z.num_error_terms)
+               if index not in retained_set]
+    return tuple(retained), tuple(dropped), tuple(sorted(protected)), metric
+
+
+def _sound_reduce_selected(z, proof, retained, dropped, label):
+    retained = tuple(int(index) for index in retained)
+    dropped = tuple(int(index) for index in dropped)
+    if sorted((*retained, *dropped)) != list(range(z.num_error_terms)):
+        raise RuntimeError(f"{label}: reduction partition is not exhaustive")
+    low, high = _ranges(z)
+    offset, scale = (low + high) / 2.0, (high - low) / 2.0
+    rows = _generator_rows(z).double()
+    device = z.device
+    retained_tensor = torch.tensor(retained, dtype=torch.long, device=device)
+    dropped_tensor = torch.tensor(dropped, dtype=torch.long, device=device)
+    if z.zonotope_w.ndim == 3:
+        kept_rows = rows.index_select(0, retained_tensor)
+        removed = rows.index_select(0, dropped_tensor)
+        dropped_offset = offset.index_select(0, dropped_tensor).reshape(-1, 1, 1)
+        dropped_scale = scale.index_select(0, dropped_tensor).reshape(-1, 1, 1)
+        shift_terms = removed * dropped_offset
+        radius_terms = removed.abs() * dropped_scale
+        center = _center_row(z).double() + shift_terms.sum(dim=0)
+        absolute_shift = shift_terms.abs().sum(dim=0)
+        radius = radius_terms.sum(dim=0)
+        operations = max(1, 2 * len(dropped) + 1)
+        center_error = (_center_row(z).abs().double() + absolute_shift) * _gamma(
+            operations)
+        radius = _outward_positive(
+            radius * (1.0 + _gamma(max(1, len(dropped)))) + center_error)
+        tokens, width = radius.shape
+        box = torch.zeros(tokens * width, tokens, width, dtype=torch.float64,
+                          device=device)
+        mask = torch.ones(tokens, width, dtype=torch.bool, device=device)
+        box[torch.arange(tokens * width, device=device), mask] = radius[mask]
+        weights = torch.cat([center.unsqueeze(0), kept_rows, box], dim=0)
+        masks = tuple(structural.local_mask(token)
+                      for token in range(tokens) for _ in range(width))
+    else:
+        kept_rows = rows.index_select(1, retained_tensor)
+        removed = rows.index_select(1, dropped_tensor)
+        dropped_offset = offset.index_select(0, dropped_tensor).reshape(
+            1, -1, 1, 1)
+        dropped_scale = scale.index_select(0, dropped_tensor).reshape(
+            1, -1, 1, 1)
+        shift_terms = removed * dropped_offset
+        radius_terms = removed.abs() * dropped_scale
+        center = _center_row(z).double() + shift_terms.sum(dim=1)
+        absolute_shift = shift_terms.abs().sum(dim=1)
+        radius = radius_terms.sum(dim=1)
+        operations = max(1, 2 * len(dropped) + 1)
+        center_error = (_center_row(z).abs().double() + absolute_shift) * _gamma(
+            operations)
+        radius = _outward_positive(
+            radius * (1.0 + _gamma(max(1, len(dropped)))) + center_error)
+        heads, queries, columns = radius.shape
+        count = heads * queries * columns
+        box = torch.zeros(heads, count, queries, columns, dtype=torch.float64,
+                          device=device)
+        for head in range(heads):
+            first = head * queries * columns
+            indices = torch.arange(first, first + queries * columns,
+                                   device=device)
+            mask = torch.ones(queries, columns, dtype=torch.bool, device=device)
+            box[head, indices, mask] = radius[head, mask]
+        weights = torch.cat([center.unsqueeze(1), kept_rows, box], dim=1)
+        masks = tuple(structural.local_mask(query)
+                      for _head in range(heads)
+                      for query in range(queries)
+                      for _column in range(columns))
+    retained_low = low.index_select(0, retained_tensor)
+    retained_high = high.index_select(0, retained_tensor)
+    box_count = _coordinate_count(z)
+    output_low = torch.cat([retained_low, -torch.ones(
+        box_count, dtype=torch.float64, device=device)])
+    output_high = torch.cat([retained_high, torch.ones(
+        box_count, dtype=torch.float64, device=device)])
+    output = _make_like(z, weights, output_low, output_high)
+    ids = tuple(proof.ids[index] for index in retained) + tuple(
+        f"reduction_box::{label}::{index:06d}" for index in range(box_count))
+    dropped_reasons = tuple(proof.reasons[index] for index in dropped)
+    absorbs_numerical = any(
+        reason == "fp64_roundoff_coordinate_box"
+        or reason == "sound_fp64_coordinate_box_replacement_with_numerical"
+        for reason in dropped_reasons)
+    replacement_reason = (
+        "sound_fp64_coordinate_box_replacement_with_numerical"
+        if absorbs_numerical else "sound_fp64_coordinate_box_replacement")
+    reasons = tuple(proof.reasons[index] for index in retained) + tuple(
+        replacement_reason for _ in range(box_count))
+    output_proof = structural.SupportProof(
+        tuple(proof.masks[index] for index in retained) + masks,
+        ids, reasons, proof.num_tokens)
+    structural.attach_support(output, output_proof)
+    structural.validate_support(
+        output, output_proof, token_axis=-2 if z.zonotope_w.ndim == 4 else 1)
+    witness = {
+        "label": label,
+        "input_generator_count": z.num_error_terms,
+        "output_generator_count": output.num_error_terms,
+        "retained_indices": list(retained),
+        "dropped_indices": list(dropped),
+        "retained_ids": [proof.ids[index] for index in retained],
+        "dropped_ids": [proof.ids[index] for index in dropped],
+        "replacement_ids": list(ids[len(retained):]),
+        "replacement_count": box_count,
+        "input_ranges_sha256": hashlib.sha256(
+            low.detach().cpu().contiguous().numpy().tobytes()
+            + high.detach().cpu().contiguous().numpy().tobytes()).hexdigest(),
+        "output_weights_sha256": _tensor_sha(output.zonotope_w),
+        "replacement_radius_sha256": _tensor_sha(radius),
+        "rounding_operations": operations,
+        "provenance_partition": {
+            "retained": [proof.reasons[index] for index in retained],
+            "dropped": list(dropped_reasons),
+            "replacement": replacement_reason,
+            "absorbs_numerical": absorbs_numerical,
+        },
+    }
+    return output, output_proof, witness
+
+
+def sound_reduce(z, proof, cap, label):
+    retained, dropped, protected, metric = _select_reduction_indices(
+        z, proof, cap)
+    output, output_proof, witness = _sound_reduce_selected(
+        z, proof, retained, dropped, label)
+    witness.update({
+        "cap": int(cap), "protected_indices": list(protected),
+        "ranking_sha256": hashlib.sha256(json.dumps(
+            [float(value).hex() for value in metric], separators=(",", ":")
+        ).encode()).hexdigest(),
+        "selection_rule": (
+            "protect_source_and_nonunit_ranges_then_descending_weighted_l1_"
+            "with_original_index_tiebreak"),
+    })
+    return output, output_proof, witness
+
+
+def sound_reduce_pair(left, right, proof, cap, label):
+    """Reduce an aligned bilinear/residual pair with independent boxes."""
+    if left.num_error_terms != right.num_error_terms:
+        raise RuntimeError(f"{label}: pair must be generator aligned")
+    left_boxes, right_boxes = _coordinate_count(left), _coordinate_count(right)
+    keep_count = int(cap) - left_boxes - right_boxes
+    if keep_count < 0:
+        raise RuntimeError(f"{label}: pair box replacement exceeds cap")
+    left_protected = set(_protected_indices(left, proof))
+    right_protected = set(_protected_indices(right, proof))
+    protected = left_protected | right_protected
+    if len(protected) > keep_count:
+        raise RuntimeError(f"{label}: protected pair generators exceed cap")
+    left_metric, right_metric = _ranking(left), _ranking(right)
+    metric = [a + b for a, b in zip(left_metric, right_metric)]
+    candidates = [index for index in range(left.num_error_terms)
+                  if index not in protected]
+    candidates.sort(key=lambda index: (-metric[index], index))
+    retained = sorted((*protected, *candidates[:keep_count-len(protected)]))
+    retained_set = set(retained)
+    dropped = [index for index in range(left.num_error_terms)
+               if index not in retained_set]
+    reduced_left, left_proof, left_witness = _sound_reduce_selected(
+        left, proof, retained, dropped, label + "_left")
+    reduced_right, right_proof, right_witness = _sound_reduce_selected(
+        right, proof, retained, dropped, label + "_right")
+    aligned_left, aligned_right, aligned_proof = _align_states(
+        reduced_left, left_proof, reduced_right, right_proof,
+        label + "_replacement_union")
+    if aligned_left.num_error_terms != cap:
+        raise RuntimeError(
+            f"{label}: pair reduction produced {aligned_left.num_error_terms} != {cap}")
+    left_check = _check_hull_containment(left, aligned_left, label + "_left")
+    right_check = _check_hull_containment(
+        right, aligned_right, label + "_right")
+    ranking_hash = hashlib.sha256(json.dumps(
+        [float(value).hex() for value in metric], separators=(",", ":")
+    ).encode()).hexdigest()
+    return aligned_left, aligned_right, aligned_proof, {
+        "label": label, "cap": cap,
+        "input_generator_count": left.num_error_terms,
+        "retained": len(retained), "dropped": len(dropped),
+        "left_boxes": left_boxes, "right_boxes": right_boxes,
+        "output_generator_count": aligned_left.num_error_terms,
+        "protected": len(protected),
+        "protected_indices": sorted(protected),
+        "retained_indices": list(retained), "dropped_indices": list(dropped),
+        "retained_ids": [proof.ids[index] for index in retained],
+        "dropped_ids": [proof.ids[index] for index in dropped],
+        "ranking_sha256": ranking_hash,
+        "selection_rule": (
+            "pair_protect_source_and_nonunit_ranges_then_descending_combined_"
+            "weighted_l1_with_original_index_tiebreak"),
+        "left_witness": left_witness, "right_witness": right_witness,
+        "left_containment": left_check, "right_containment": right_check,
+    }
+
+
+def _check_hull_containment(source, output, label):
+    """Check the coordinate hull consequence of a relational reduction."""
+    before_low, before_high = source.concretize()
+    after_low, after_high = output.concretize()
+    tolerance = torch.finfo(torch.float64).eps * torch.maximum(
+        torch.ones_like(before_low), torch.maximum(
+            before_low.abs(), before_high.abs())) * 8
+    if bool((after_low > before_low + tolerance).any()
+            or (after_high < before_high - tolerance).any()):
+        raise AssertionError(f"{label}: reduction output misses input hull")
+    return {
+        "accepted": True,
+        "support_inflation": float(
+            (0.5 * (after_high-after_low)
+             - 0.5 * (before_high-before_low)).max()),
+        "range_inflation": float(torch.maximum(
+            before_low-after_low, after_high-before_high).max()),
+    }
+
+
+def check_reduction_witness(source, source_proof, output, output_proof,
+                            witness):
+    retained, dropped, protected, metric = _select_reduction_indices(
+        source, source_proof, int(witness["cap"]))
+    if list(retained) != witness["retained_indices"]:
+        raise AssertionError("reduction retained-index witness differs")
+    if list(dropped) != witness["dropped_indices"]:
+        raise AssertionError("reduction dropped-index witness differs")
+    if list(protected) != witness["protected_indices"]:
+        raise AssertionError("reduction protected-index witness differs")
+    if [source_proof.ids[index] for index in retained] != witness[
+            "retained_ids"]:
+        raise AssertionError("reduction retained-ID witness differs")
+    if [source_proof.ids[index] for index in dropped] != witness[
+            "dropped_ids"]:
+        raise AssertionError("reduction dropped-ID witness differs")
+    low, high = _ranges(source)
+    ranges_hash = hashlib.sha256(
+        low.detach().cpu().contiguous().numpy().tobytes()
+        + high.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+    if ranges_hash != witness["input_ranges_sha256"]:
+        raise AssertionError("reduction source-range witness differs")
+    ranking_hash = hashlib.sha256(json.dumps(
+        [float(value).hex() for value in metric], separators=(",", ":")
+    ).encode()).hexdigest()
+    if ranking_hash != witness["ranking_sha256"]:
+        raise AssertionError("reduction ranking witness differs")
+    replay, replay_proof, replay_witness = _sound_reduce_selected(
+        source, source_proof, retained, dropped, witness["label"])
+    if not torch.equal(replay.zonotope_w, output.zonotope_w):
+        raise AssertionError("reduction numerical replay differs")
+    if replay_proof != output_proof:
+        raise AssertionError("reduction provenance replay differs")
+    if list(replay_proof.ids[len(retained):]) != witness["replacement_ids"]:
+        raise AssertionError("reduction replacement-ID witness differs")
+    replay_low, replay_high = _ranges(replay)
+    output_low, output_high = _ranges(output)
+    if not (torch.equal(replay_low, output_low)
+            and torch.equal(replay_high, output_high)):
+        raise AssertionError("reduction output ranges differ")
+    if replay_witness["replacement_radius_sha256"] != witness[
+            "replacement_radius_sha256"]:
+        raise AssertionError("reduction replacement radius differs")
+    if _tensor_sha(output.zonotope_w) != witness["output_weights_sha256"]:
+        raise AssertionError("reduction output hash differs")
+    return _check_hull_containment(source, output, witness["label"])
+
+
+def _reduction_mutations(source, source_proof, output, output_proof, witness):
+    mutations = {}
+
+    def rejected(name, changed_output=output, changed_proof=output_proof,
+                 changed_witness=None):
+        try:
+            check_reduction_witness(
+                source, source_proof, changed_output, changed_proof,
+                witness if changed_witness is None else changed_witness)
+        except (AssertionError, RuntimeError):
+            mutations[name] = True
+            return
+        mutations[name] = False
+
+    changed = copy.deepcopy(witness)
+    changed["dropped_indices"] = changed["dropped_indices"][1:]
+    rejected("dropped_coefficient_omitted", changed_witness=changed)
+
+    changed_output = _make_like(
+        output, output.zonotope_w.clone(), *_ranges(output))
+    if changed_output.zonotope_w.ndim == 3:
+        row = 1 + len(witness["retained_indices"])
+        nonzero = changed_output.zonotope_w[row].nonzero()[0]
+        value = changed_output.zonotope_w[row, nonzero[0], nonzero[1]]
+        changed_output.zonotope_w[row, nonzero[0], nonzero[1]] = torch.nextafter(
+            value, torch.full_like(value, -math.inf))
+    else:
+        row = 1 + len(witness["retained_indices"])
+        nonzero = changed_output.zonotope_w[:, row].nonzero()[0]
+        value = changed_output.zonotope_w[
+            nonzero[0], row, nonzero[1], nonzero[2]]
+        changed_output.zonotope_w[
+            nonzero[0], row, nonzero[1], nonzero[2]] = torch.nextafter(
+                value, torch.full_like(value, -math.inf))
+    rejected("box_radius_narrowed_one_ulp", changed_output=changed_output)
+    rejected("under_rounded_absolute_sum", changed_output=changed_output)
+
+    changed = copy.deepcopy(witness)
+    changed["retained_ids"][0] = "wrong_retained_id"
+    rejected("wrong_retained_generator_id", changed_witness=changed)
+    changed = copy.deepcopy(witness)
+    changed["dropped_indices"][0], changed["dropped_indices"][1] = (
+        changed["dropped_indices"][1], changed["dropped_indices"][0])
+    rejected("wrong_dropped_generator_set", changed_witness=changed)
+
+    ids = list(output_proof.ids); masks = list(output_proof.masks)
+    reasons = list(output_proof.reasons)
+    ids[-1], ids[-2] = ids[-2], ids[-1]
+    reordered = structural.SupportProof(
+        tuple(masks), tuple(ids), tuple(reasons), output_proof.num_tokens)
+    rejected("generator_reorder_without_map", changed_proof=reordered)
+
+    reasons[-1] = "native_nonlinear_fresh_substitution"
+    substituted = structural.SupportProof(
+        tuple(masks), output_proof.ids, tuple(reasons), output_proof.num_tokens)
+    rejected("numerical_native_provenance_substitution",
+             changed_proof=substituted)
+
+    changed = copy.deepcopy(witness)
+    changed["input_ranges_sha256"] = "0" * 64
+    rejected("incorrect_source_range", changed_witness=changed)
+
+    if output.zonotope_w.ndim == 3:
+        shortened_weights = output.zonotope_w[:-1].clone()
+    else:
+        shortened_weights = output.zonotope_w[:, :-1].clone()
+    low, high = _ranges(output)
+    shortened = _make_like(output, shortened_weights, low[:-1], high[:-1])
+    shortened_proof = structural.SupportProof(
+        output_proof.masks[:-1], output_proof.ids[:-1],
+        output_proof.reasons[:-1], output_proof.num_tokens)
+    rejected("missing_reduction_box_generator", changed_output=shortened,
+             changed_proof=shortened_proof)
+    if not all(mutations.values()):
+        raise RuntimeError(f"reduction mutations accepted: {mutations}")
+    return mutations
+
+
+def run_reduction_audit(device=None):
+    def continuation(output, proof, context):
+        reports = []
+        mutation_result = None
+        for cap in (12000, 10000):
+            if context["device"].type == "cuda":
+                torch.cuda.synchronize()
+            started = time.perf_counter()
+            reduced, reduced_proof, witness = sound_reduce(
+                output, proof, cap, f"forced_cap_{cap}")
+            checked = check_reduction_witness(
+                output, proof, reduced, reduced_proof, witness)
+            if context["device"].type == "cuda":
+                torch.cuda.synchronize()
+            elapsed = time.perf_counter() - started
+            if mutation_result is None:
+                mutation_result = _reduction_mutations(
+                    output, proof, reduced, reduced_proof, witness)
+            low, high = reduced.concretize()
+            reports.append({
+                "cap": cap,
+                "generators_before": output.num_error_terms,
+                "retained": len(witness["retained_indices"]),
+                "dropped": len(witness["dropped_indices"]),
+                "new_box_generators": witness["replacement_count"],
+                "generators_after": reduced.num_error_terms,
+                "protected": len(witness["protected_indices"]),
+                "support_inflation": checked["support_inflation"],
+                "range_inflation": checked["range_inflation"],
+                "support_max": float((0.5 * (high-low)).max()),
+                "lower_min": float(low.min()), "upper_max": float(high.max()),
+                "seconds": elapsed,
+                "allocated_bytes": int(torch.cuda.memory_allocated(
+                    context["device"])) if context["device"].type == "cuda" else 0,
+                "reserved_bytes": int(torch.cuda.memory_reserved(
+                    context["device"])) if context["device"].type == "cuda" else 0,
+                "witness": witness,
+                "checker": checked,
+            })
+        return {"forced_caps": reports, "mutations": mutation_result}
+    return run_sound_fp64(device=device, continuation=continuation)
+
+
+def export_block0_state(path, device=None):
+    destination = Path(path)
+
+    def continuation(output, proof, _context):
+        low, high = _ranges(output)
+        payload = {
+            "schema": "CORET_SOUND_FP64_BLOCK0_STATE_V1",
+            "pinned_revision": PINNED_REVISION,
+            "weights": output.zonotope_w.detach().cpu(),
+            "range_low": low.detach().cpu(),
+            "range_high": high.detach().cpu(),
+            "proof": {
+                "masks": list(proof.masks), "ids": list(proof.ids),
+                "reasons": list(proof.reasons),
+                "num_tokens": proof.num_tokens,
+            },
+        }
+        torch.save(payload, destination)
+        return {
+            "path": str(destination), "byte_count": destination.stat().st_size,
+            "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+        }
+    return run_sound_fp64(device=device, continuation=continuation)
+
+
+def _state_payload(z, proof):
+    low, high = _ranges(z)
+    return {
+        "weights": z.zonotope_w.detach().cpu(),
+        "range_low": low.detach().cpu(), "range_high": high.detach().cpu(),
+        "proof": {"masks": list(proof.masks), "ids": list(proof.ids),
+                  "reasons": list(proof.reasons),
+                  "num_tokens": proof.num_tokens},
+    }
+
+
+def _state_from_payload(payload, Zonotope, args, device):
+    z = Zonotope(
+        args=args, p=100, eps=prefix.FIXTURE_RHO,
+        perturbed_word_index=prefix.FIXTURE_PERTURBED_TOKEN,
+        zonotope_w=payload["weights"].to(device),
+        error_term_range_low=payload["range_low"].to(device),
+        error_term_range_high=payload["range_high"].to(device), clone=False)
+    raw = payload["proof"]
+    proof = structural.SupportProof(
+        tuple(raw["masks"]), tuple(raw["ids"]), tuple(raw["reasons"]),
+        int(raw["num_tokens"]))
+    structural.attach_support(z, proof)
+    structural.validate_support(
+        z, proof, token_axis=-2 if z.zonotope_w.ndim == 4 else 1)
+    return z, proof
+
+
+def _load_artifact(path, expected_schema):
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if (payload.get("schema") != expected_schema
+            or payload.get("pinned_revision") != PINNED_REVISION):
+        raise RuntimeError(f"artifact identity differs: {expected_schema}")
+    return payload
+
+
+def _save_artifact(path, schema, states, report):
+    payload = {
+        "schema": schema, "pinned_revision": PINNED_REVISION,
+        "states": {name: _state_payload(z, proof)
+                   for name, (z, proof) in states.items()},
+        "report": report,
+    }
+    destination = Path(path)
+    torch.save(payload, destination)
+    return {"path": str(destination), "byte_count": destination.stat().st_size,
+            "sha256": hashlib.sha256(destination.read_bytes()).hexdigest()}
+
+
+def _explicit_numerical_support(z, proof):
+    indices = [index for index, reason in enumerate(proof.reasons)
+               if reason in {
+                   "fp64_roundoff_coordinate_box",
+                   "sound_fp64_coordinate_box_replacement_with_numerical",
+               }]
+    if not indices:
+        return 0.0
+    tensor = torch.tensor(indices, dtype=torch.long, device=z.device)
+    low, high = _ranges(z)
+    scale = torch.maximum(low.abs(), high.abs()).index_select(0, tensor)
+    rows = _generator_rows(z)
+    if z.zonotope_w.ndim == 3:
+        value = (rows.index_select(0, tensor).abs()
+                 * scale.reshape(-1, 1, 1)).sum(dim=0)
+    else:
+        value = (rows.index_select(1, tensor).abs()
+                 * scale.reshape(1, -1, 1, 1)).sum(dim=1)
+    return float(value.max())
+
+
+def _native_relational_support(z, proof):
+    numerical_reasons = {
+        "fp64_roundoff_coordinate_box",
+        "sound_fp64_coordinate_box_replacement_with_numerical",
+    }
+    indices = [index for index, reason in enumerate(proof.reasons)
+               if reason not in numerical_reasons]
+    if not indices:
+        return 0.0
+    tensor = torch.tensor(indices, dtype=torch.long, device=z.device)
+    low, high = _ranges(z)
+    scale = torch.maximum(low.abs(), high.abs()).index_select(0, tensor)
+    rows = _generator_rows(z)
+    if z.zonotope_w.ndim == 3:
+        value = (rows.index_select(0, tensor).abs()
+                 * scale.reshape(-1, 1, 1)).sum(dim=0)
+    else:
+        value = (rows.index_select(1, tensor).abs()
+                 * scale.reshape(1, -1, 1, 1)).sum(dim=1)
+    return float(value.max())
+
+
+def _state_measurement(label, z, proof, seconds):
+    row = _metrics(label, z, seconds)
+    numerical = _explicit_numerical_support(z, proof)
+    native = _native_relational_support(z, proof)
+    row["explicit_numerical_support_max"] = numerical
+    row["plain_fp64_relational_support_max"] = native
+    row["sound_support_max"] = row["support_max"]
+    row["numerical_native_ratio"] = numerical / max(native, 1e-300)
+    return row
+
+
+def _maybe_reduce(z, proof, label, reductions):
+    if z.num_error_terms <= MAXIMUM_GENERATORS:
+        return z, proof
+    before_low, before_high = z.concretize()
+    reduced, reduced_proof, witness = sound_reduce(
+        z, proof, MAXIMUM_GENERATORS, label)
+    checked = check_reduction_witness(
+        z, proof, reduced, reduced_proof, witness)
+    after_low, after_high = reduced.concretize()
+    reductions.append({
+        "operator": label, "count_before": z.num_error_terms,
+        "count_after": reduced.num_error_terms,
+        "retained": len(witness["retained_indices"]),
+        "absorbed": len(witness["dropped_indices"]),
+        "added_box_generators": witness["replacement_count"],
+        "support_inflation": checked["support_inflation"],
+        "range_inflation": float(torch.maximum(
+            before_low-after_low, after_high-before_high).max()),
+        "retained_ids": witness["retained_ids"],
+        "absorbed_ids": witness["dropped_ids"],
+        "replacement_ids": witness["replacement_ids"],
+        "selection_rule": witness["selection_rule"],
+        "ranking_sha256": witness["ranking_sha256"],
+    })
+    return reduced, reduced_proof
+
+
+def _maybe_reduce_pair(left, right, proof, label, reductions):
+    if left.num_error_terms <= MAXIMUM_GENERATORS:
+        return left, right, proof
+    reduced_left, reduced_right, reduced_proof, witness = sound_reduce_pair(
+        left, right, proof, MAXIMUM_GENERATORS, label)
+    # Both independent replacement obligations are replayed before use.
+    left_count = witness["left_witness"]["output_generator_count"]
+    right_count = witness["right_witness"]["output_generator_count"]
+    reductions.append({
+        "operator": label, "count_before": left.num_error_terms,
+        "count_after": reduced_left.num_error_terms,
+        "retained": witness["retained"], "absorbed": witness["dropped"],
+        "added_box_generators": witness["left_boxes"] + witness["right_boxes"],
+        "left_preunion_count": left_count,
+        "right_preunion_count": right_count,
+        "support_inflation": max(
+            witness["left_containment"]["support_inflation"],
+            witness["right_containment"]["support_inflation"]),
+        "range_inflation": max(
+            witness["left_containment"]["range_inflation"],
+            witness["right_containment"]["range_inflation"]),
+        "retained_ids": witness["retained_ids"],
+        "absorbed_ids": witness["dropped_ids"],
+        "left_replacement_ids": witness["left_witness"]["replacement_ids"],
+        "right_replacement_ids": witness["right_witness"]["replacement_ids"],
+        "selection_rule": witness["selection_rule"],
+        "ranking_sha256": witness["ranking_sha256"],
+    })
+    return reduced_left, reduced_right, reduced_proof
+
+
+def _recenter_sound(z, proof, label, measurements, reductions):
+    """Execute production's conditional recenter with embedded FP64 error."""
+    if z.error_term_range_low is None:
+        structural.attach_support(z, proof)
+        return z, proof, {"executed": False, "predicate": "ranges_absent"}
+    source = z
+    result = production._recenter_native_ranges(source)
+    structural.attach_support(result, proof)
+    operations = 2 * (source.num_error_terms + 1) + 2
+    result, result_proof = _inject(
+        result, proof, [source], label, operations, measurements,
+        reserve=_reserve_from_majorant(_absolute_hull(source), operations))
+    result, result_proof = _maybe_reduce(
+        result, result_proof, label, reductions)
+    return result, result_proof, {
+        "executed": True, "predicate": "explicit_ranges_present",
+        "input_range_count": int(source.num_error_terms),
+    }
+
+
+def run_block1_stage1(block0_path, output_path, device=None):
+    """Block-1 Q/K -> QK -> scaling -> softmax, then stop before A.V."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(block0_path, "CORET_SOUND_FP64_BLOCK0_STATE_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source, Zonotope, args, device)
+            checkpoint = prefix._load_checkpoint()
+            base = "bert.encoder.layer.1"
+            query = _parameter(checkpoint, base + ".attention.self.query", device)
+            key = _parameter(checkpoint, base + ".attention.self.key", device)
+            measurements, reductions = [], []
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._hidden = hidden_proof
+            delegate._qk_index = 1; delegate._softmax_index = 1
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            block_input = hidden
+            hidden, hidden_proof, recenter = _recenter_sound(
+                hidden, hidden_proof, "b1_pre_qk_recenter", measurements,
+                reductions)
+            delegate._hidden = hidden_proof
+            q, qp = _dense_sound(
+                hidden, hidden_proof, query, "b1_q_affine", measurements)
+            k, kp = _dense_sound(
+                hidden, hidden_proof, key, "b1_k_affine", measurements)
+            q, k, pair_proof = _align_states(q, qp, k, kp, "b1_qk_branches")
+            q = q.add_attention_heads_dim(4); k = k.add_attention_heads_dim(4)
+            structural.attach_support(q, pair_proof); structural.attach_support(k, pair_proof)
+            q, k, pair_proof = _maybe_reduce_pair(
+                q, k, pair_proof, "b1_pre_qk_pair", reductions)
+            delegate._hidden = pair_proof
+            raw_qk = dispatch.qk(q, k); raw_qk_proof = structural.get_support(raw_qk)
+            ops = 32 * (q.num_error_terms + 1) ** 2 * 16 + 4096
+            qk, qk_proof = _inject(
+                raw_qk, raw_qk_proof, [q, k], "b1_qk", ops, measurements,
+                reserve=_reserve_from_majorant(_bilinear_majorant(q, k), ops))
+            qk, qk_proof = _maybe_reduce(qk, qk_proof, "b1_qk", reductions)
+            scale = 1.0 / math.sqrt(32)
+            raw_scores = qk.multiply(scale); structural.attach_support(raw_scores, qk_proof)
+            reserve = _outward_positive(
+                _absolute_hull(qk) * abs(scale) * (2*_gamma(1)+FP64_U))
+            scores, score_proof = _inject(
+                raw_scores, qk_proof, [qk], "b1_score_scaling", 1,
+                measurements, reserve=reserve)
+            scores, score_proof = _maybe_reduce(
+                scores, score_proof, "b1_score_scaling", reductions)
+            delegate._score = score_proof
+            raw_probability = dispatch.softmax(scores, no_constraints=False)
+            raw_probability_proof = structural.get_support(raw_probability)
+            ops = 64 * (scores.num_error_terms + 1) + 8192
+            probability, probability_proof = _inject(
+                raw_probability, raw_probability_proof, [scores],
+                "b1_softmax", ops, measurements,
+                reserve=_reserve_from_majorant(_softmax_majorant(scores), ops))
+            probability, probability_proof = _maybe_reduce(
+                probability, probability_proof, "b1_softmax", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [
+                    _state_measurement("block1_input", block_input,
+                                       structural.get_support(block_input), 0.0),
+                    _state_measurement("block1_pre_qk", hidden,
+                                       hidden_proof, 0.0),
+                    _state_measurement("block1_qk", qk, qk_proof, 0.0),
+                    _state_measurement("block1_softmax", probability,
+                                       probability_proof, seconds)],
+                "recenter": recenter,
+                "injections": measurements, "reductions": reductions,
+                "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_STAGE1_V1",
+                {"hidden": (hidden, hidden_proof),
+                 "probability": (probability, probability_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_pre_qk(block0_path, output_path, device=None):
+    """Execute the exact Block-1 boundary recenter and stop before Q/K."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(block0_path, "CORET_SOUND_FP64_BLOCK0_STATE_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(source, Zonotope, args,
+                                                       device)
+            before = _state_measurement(
+                "block1_input", hidden, hidden_proof, 0.0)
+            measurements, reductions = [], []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            hidden, hidden_proof, recenter = _recenter_sound(
+                hidden, hidden_proof, "b1_pre_qk_recenter", measurements,
+                reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [before, _state_measurement(
+                    "block1_pre_qk", hidden, hidden_proof, seconds)],
+                "recenter": recenter, "injections": measurements,
+                "reductions": reductions, "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_PRE_QK_V1",
+                {"hidden": (hidden, hidden_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_qk_prepare(input_path, output_path, device=None):
+    """Build and align Q/K, stopping immediately before native precise QK."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_PRE_QK_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            checkpoint = prefix._load_checkpoint(); base = "bert.encoder.layer.1"
+            query = _parameter(checkpoint, base + ".attention.self.query", device)
+            key = _parameter(checkpoint, base + ".attention.self.key", device)
+            measurements, reductions = [], []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            q, qp = _dense_sound(
+                hidden, hidden_proof, query, "b1_q_affine", measurements)
+            k, kp = _dense_sound(
+                hidden, hidden_proof, key, "b1_k_affine", measurements)
+            q, k, proof = _align_states(q, qp, k, kp, "b1_qk_branches")
+            q = q.add_attention_heads_dim(4); k = k.add_attention_heads_dim(4)
+            structural.attach_support(q, proof); structural.attach_support(k, proof)
+            q, k, proof = _maybe_reduce_pair(
+                q, k, proof, "b1_pre_qk_pair", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {"injections": measurements, "reductions": reductions,
+                      "seconds": seconds}
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_QK_INPUT_V1",
+                {"hidden": (hidden, hidden_proof), "q": (q, proof),
+                 "k": (k, proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_qk_softmax(input_path, output_path, device=None):
+    """Native precise QK, scaling, and softmax from persisted aligned operands."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_QK_INPUT_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            q, proof = _state_from_payload(
+                source["states"]["q"], Zonotope, args, device)
+            k, k_proof = _state_from_payload(
+                source["states"]["k"], Zonotope, args, device)
+            if proof != k_proof:
+                raise RuntimeError("Q/K input proofs differ")
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._qk_index = 1; delegate._softmax_index = 1
+            delegate._hidden = proof
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            measurements, reductions = [], []
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
+            started = time.perf_counter()
+            raw_qk = dispatch.qk(q, k)
+            raw_qk_proof = structural.get_support(raw_qk)
+            ops = 32 * (q.num_error_terms + 1) ** 2 * 16 + 4096
+            qk, qk_proof = _inject(
+                raw_qk, raw_qk_proof, [q, k], "b1_qk", ops, measurements,
+                reserve=_reserve_from_majorant(_bilinear_majorant(q, k), ops))
+            qk, qk_proof = _maybe_reduce(qk, qk_proof, "b1_qk", reductions)
+            scale = 1.0 / math.sqrt(32)
+            raw_scores = qk.multiply(scale); structural.attach_support(raw_scores, qk_proof)
+            score_reserve = _outward_positive(
+                _absolute_hull(qk) * abs(scale) * (2*_gamma(1)+FP64_U))
+            scores, score_proof = _inject(
+                raw_scores, qk_proof, [qk], "b1_score_scaling", 1,
+                measurements, reserve=score_reserve)
+            scores, score_proof = _maybe_reduce(
+                scores, score_proof, "b1_score_scaling", reductions)
+            score_low, score_high = scores.concretize()
+            delegate._score = score_proof
+            raw_probability = dispatch.softmax(scores, no_constraints=False)
+            raw_probability_proof = structural.get_support(raw_probability)
+            softmax_ops = 64 * (scores.num_error_terms + 1) + 8192
+            probability, probability_proof = _inject(
+                raw_probability, raw_probability_proof, [scores],
+                "b1_softmax", softmax_ops, measurements,
+                reserve=_reserve_from_majorant(
+                    _softmax_majorant(scores), softmax_ops))
+            probability, probability_proof = _maybe_reduce(
+                probability, probability_proof, "b1_softmax", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [
+                    _state_measurement("block1_qk", qk, qk_proof, 0.0),
+                    _state_measurement("block1_softmax", probability,
+                                       probability_proof, seconds)],
+                "softmax_branch": {
+                    "no_constraints": False,
+                    "score_lower_min": float(score_low.min()),
+                    "score_upper_max": float(score_high.max()),
+                    "native_domain_checks_passed": True,
+                    "sum_equality_enabled": True,
+                },
+                "injections": measurements, "reductions": reductions,
+                "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+                "peak_allocated_bytes": int(torch.cuda.max_memory_allocated())
+                if device.type == "cuda" else 0,
+                "peak_reserved_bytes": int(torch.cuda.max_memory_reserved())
+                if device.type == "cuda" else 0,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_STAGE1_V1",
+                {"hidden": (hidden, hidden_proof),
+                 "probability": (probability, probability_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_qk_only(input_path, output_path, device=None):
+    """Native precise Block-1 QK with sound FP64 embedding."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_QK_INPUT_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            q, proof = _state_from_payload(
+                source["states"]["q"], Zonotope, args, device)
+            k, k_proof = _state_from_payload(
+                source["states"]["k"], Zonotope, args, device)
+            if proof != k_proof:
+                raise RuntimeError("Q/K input proofs differ")
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._qk_index = 1; delegate._hidden = proof
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            measurements, reductions = [], []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            raw = dispatch.qk(q, k); raw_proof = structural.get_support(raw)
+            ops = 32 * (q.num_error_terms + 1) ** 2 * 16 + 4096
+            qk, qk_proof = _inject(
+                raw, raw_proof, [q, k], "b1_qk", ops, measurements,
+                reserve=_reserve_from_majorant(_bilinear_majorant(q, k), ops))
+            qk, qk_proof = _maybe_reduce(qk, qk_proof, "b1_qk", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_qk", qk, qk_proof, seconds)],
+                "injections": measurements, "reductions": reductions,
+                "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_QK_V1",
+                {"hidden": (hidden, hidden_proof), "qk": (qk, qk_proof)},
+                report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_qk_compute(input_path, output_path, device=None):
+    """Native precise QK and FP64 reserve, stopping before order reduction."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_QK_INPUT_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            q, proof = _state_from_payload(
+                source["states"]["q"], Zonotope, args, device)
+            k, k_proof = _state_from_payload(
+                source["states"]["k"], Zonotope, args, device)
+            if proof != k_proof:
+                raise RuntimeError("Q/K input proofs differ")
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._qk_index = 1; delegate._hidden = proof
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            measurements = []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            raw = dispatch.qk(q, k); raw_proof = structural.get_support(raw)
+            ops = 32 * (q.num_error_terms + 1) ** 2 * 16 + 4096
+            qk, qk_proof = _inject(
+                raw, raw_proof, [q, k], "b1_qk", ops, measurements,
+                reserve=_reserve_from_majorant(_bilinear_majorant(q, k), ops))
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {"injections": measurements,
+                      "dispatch_counts": dict(dispatch.counts),
+                      "seconds": seconds}
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_QK_PRE_REDUCTION_V1",
+                {"hidden": (hidden, hidden_proof), "qk": (qk, qk_proof)},
+                report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_qk_reduce(input_path, output_path, device=None):
+    """Apply the normal 14k reduction to the persisted QK result."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(
+        input_path, "CORET_SOUND_FP64_BLOCK1_QK_PRE_REDUCTION_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            qk, qk_proof = _state_from_payload(
+                source["states"]["qk"], Zonotope, args, device)
+            reductions = []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            qk, qk_proof = _maybe_reduce(qk, qk_proof, "b1_qk", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_qk", qk, qk_proof, seconds)],
+                "reductions": reductions, "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_QK_V1",
+                {"hidden": (hidden, hidden_proof), "qk": (qk, qk_proof)},
+                report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_qk_native(input_path, output_path, device=None):
+    """Execute only the unchanged native precise QK transformer."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_QK_INPUT_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            q, proof = _state_from_payload(
+                source["states"]["q"], Zonotope, args, device)
+            k, k_proof = _state_from_payload(
+                source["states"]["k"], Zonotope, args, device)
+            if proof != k_proof:
+                raise RuntimeError("Q/K input proofs differ")
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._qk_index = 1; delegate._hidden = proof
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            raw = dispatch.qk(q, k); raw_proof = structural.get_support(raw)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {"dispatch_counts": dict(dispatch.counts),
+                      "seconds": seconds}
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_QK_NATIVE_V1",
+                {"raw_qk": (raw, raw_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_qk_reserve(input_path, output_path, device=None):
+    """Construct the analytic QK FP64 reserve without executing native QK."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_QK_INPUT_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            q, proof = _state_from_payload(
+                source["states"]["q"], Zonotope, args, device)
+            k, k_proof = _state_from_payload(
+                source["states"]["k"], Zonotope, args, device)
+            if proof != k_proof:
+                raise RuntimeError("Q/K input proofs differ")
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            operations = 32 * (q.num_error_terms + 1) ** 2 * 16 + 4096
+            reserve = _reserve_from_majorant(
+                _bilinear_majorant(q, k), operations)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            destination = Path(output_path)
+            torch.save({
+                "schema": "CORET_SOUND_FP64_BLOCK1_QK_RESERVE_V1",
+                "pinned_revision": PINNED_REVISION,
+                "reserve": reserve.detach().cpu(),
+                "operations": operations,
+                "q_weights_sha256": _tensor_sha(q.zonotope_w),
+                "k_weights_sha256": _tensor_sha(k.zonotope_w),
+                "seconds": seconds,
+            }, destination)
+            return {"seconds": seconds, "artifact": {
+                "path": str(destination),
+                "byte_count": destination.stat().st_size,
+                "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+            }}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_qk_inject(qk_input_path, native_path, reserve_path,
+                         output_path, device=None):
+    """Embed the authenticated analytic reserve in the native QK state."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    input_source = _load_artifact(
+        qk_input_path, "CORET_SOUND_FP64_BLOCK1_QK_INPUT_V1")
+    native_source = _load_artifact(
+        native_path, "CORET_SOUND_FP64_BLOCK1_QK_NATIVE_V1")
+    reserve_source = torch.load(
+        reserve_path, map_location="cpu", weights_only=False)
+    if (reserve_source.get("schema")
+            != "CORET_SOUND_FP64_BLOCK1_QK_RESERVE_V1"
+            or reserve_source.get("pinned_revision") != PINNED_REVISION):
+        raise RuntimeError("QK reserve artifact identity differs")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                input_source["states"]["hidden"], Zonotope, args, device)
+            q, q_proof = _state_from_payload(
+                input_source["states"]["q"], Zonotope, args, device)
+            k, k_proof = _state_from_payload(
+                input_source["states"]["k"], Zonotope, args, device)
+            if (_tensor_sha(q.zonotope_w) != reserve_source["q_weights_sha256"]
+                    or _tensor_sha(k.zonotope_w)
+                    != reserve_source["k_weights_sha256"]):
+                raise RuntimeError("QK reserve predecessor hash differs")
+            raw, raw_proof = _state_from_payload(
+                native_source["states"]["raw_qk"], Zonotope, args, device)
+            measurements = []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            qk, qk_proof = _inject(
+                raw, raw_proof, [q, k], "b1_qk",
+                int(reserve_source["operations"]), measurements,
+                reserve=reserve_source["reserve"].to(device))
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {"injections": measurements, "seconds": seconds}
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_QK_PRE_REDUCTION_V1",
+                {"hidden": (hidden, hidden_proof), "qk": (qk, qk_proof)},
+                report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_softmax_only(input_path, output_path, device=None):
+    """Score scaling and native relational softmax from persisted QK."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_QK_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            qk, qk_proof = _state_from_payload(
+                source["states"]["qk"], Zonotope, args, device)
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._softmax_index = 1; delegate._score = qk_proof
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            measurements, reductions = [], []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            scale = 1.0 / math.sqrt(32)
+            raw_scores = qk.multiply(scale); structural.attach_support(raw_scores, qk_proof)
+            reserve = _outward_positive(
+                _absolute_hull(qk) * abs(scale) * (2*_gamma(1)+FP64_U))
+            scores, score_proof = _inject(
+                raw_scores, qk_proof, [qk], "b1_score_scaling", 1,
+                measurements, reserve=reserve)
+            scores, score_proof = _maybe_reduce(
+                scores, score_proof, "b1_score_scaling", reductions)
+            score_low, score_high = scores.concretize()
+            delegate._score = score_proof
+            raw = dispatch.softmax(scores, no_constraints=False)
+            raw_proof = structural.get_support(raw)
+            ops = 64 * (scores.num_error_terms + 1) + 8192
+            probability, probability_proof = _inject(
+                raw, raw_proof, [scores], "b1_softmax", ops, measurements,
+                reserve=_reserve_from_majorant(_softmax_majorant(scores), ops))
+            probability, probability_proof = _maybe_reduce(
+                probability, probability_proof, "b1_softmax", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_softmax", probability, probability_proof,
+                    seconds)],
+                "softmax_branch": {
+                    "no_constraints": False,
+                    "score_lower_min": float(score_low.min()),
+                    "score_upper_max": float(score_high.max()),
+                    "native_domain_checks_passed": True,
+                    "sum_equality_enabled": True,
+                },
+                "injections": measurements, "reductions": reductions,
+                "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_STAGE1_V1",
+                {"hidden": (hidden, hidden_proof),
+                 "probability": (probability, probability_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage2(stage1_path, output_path, device=None):
+    """Block-1 V/A.V through post-attention LayerNorm."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(stage1_path, "CORET_SOUND_FP64_BLOCK1_STAGE1_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            probability, probability_proof = _state_from_payload(
+                source["states"]["probability"], Zonotope, args, device)
+            checkpoint = prefix._load_checkpoint(); base = "bert.encoder.layer.1"
+            value_parameter = _parameter(
+                checkpoint, base + ".attention.self.value", device)
+            output_parameter = _parameter(
+                checkpoint, base + ".attention.output.dense", device)
+            layernorm = _parameter(
+                checkpoint, base + ".attention.output.LayerNorm", device)
+            measurements, reductions, oracles = [], [], []
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._av_index = 1; delegate._layer_norm_index = 3
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            value, value_proof = _dense_sound(
+                hidden, hidden_proof, value_parameter, "b1_v_affine", measurements)
+            value = value.add_attention_heads_dim(4)
+            structural.attach_support(value, value_proof)
+            probability, value, av_proof = _align_states(
+                probability, probability_proof, value, value_proof,
+                "b1_av_branches")
+            probability, value, av_proof = _maybe_reduce_pair(
+                probability, value, av_proof, "b1_pre_av_pair", reductions)
+            delegate._probability = av_proof; delegate._value = av_proof
+            raw_context = dispatch.attention_value(probability, value)
+            raw_context_proof = structural.get_support(raw_context)
+            ops = (32 * (max(probability.num_error_terms,
+                             value.num_error_terms) + 1) ** 2 * 16 + 4096)
+            context, context_proof = _inject(
+                raw_context, raw_context_proof, [probability, value],
+                "b1_attention_value", ops, measurements,
+                reserve=_reserve_from_majorant(
+                    _bilinear_majorant(probability, value.t()), ops))
+            context, context_proof = _maybe_reduce(
+                context, context_proof, "b1_attention_value", reductions)
+            context_measure = _state_measurement(
+                "block1_attention_value", context, context_proof, 0.0)
+
+            context = context.remove_attention_heads_dim()
+            structural.attach_support(context, context_proof)
+            attention, attention_proof = _dense_sound(
+                context, context_proof, output_parameter,
+                "b1_attention_output_affine", measurements)
+            attention, attention_proof = _maybe_reduce(
+                attention, attention_proof, "b1_attention_output_affine",
+                reductions)
+            attention, aligned_hidden, residual_proof = _align_states(
+                attention, attention_proof, hidden, hidden_proof,
+                "b1_attention_residual")
+            attention, aligned_hidden, residual_proof = _maybe_reduce_pair(
+                attention, aligned_hidden, residual_proof,
+                "b1_pre_attention_residual_pair", reductions)
+            raw_residual = attention.add(aligned_hidden)
+            residual, residual_proof = _inject(
+                raw_residual, residual_proof, [attention, aligned_hidden],
+                "b1_attention_residual", 1, measurements,
+                reserve=_add_reserve(attention, aligned_hidden))
+            residual, residual_proof = _maybe_reduce(
+                residual, residual_proof, "b1_attention_residual", reductions)
+            width = residual.word_embedding_size
+            average = torch.ones((width, width), dtype=torch.float64,
+                                 device=device) / width
+            centered = residual.add(residual.matmul(average).multiply(-1.0))
+            variance = centered.square_and_sum_and_repeat().multiply(1.0/width)
+            variance_low, variance_high = variance.concretize()
+            if float(variance_low.min()) <= 0:
+                raise RuntimeError("Block-1 post-attention variance is nonpositive")
+            delegate._hidden = residual_proof
+            delegate._attention_output = residual_proof
+            raw_post = dispatch.layer_norm(residual, layernorm, "standard")
+            raw_post_proof = structural.get_support(raw_post)
+            ops = 16 * 128 * (residual.num_error_terms + 1) ** 2 + 4096
+            post, post_proof = _inject(
+                raw_post, raw_post_proof, [residual],
+                "b1_post_attention_layernorm", ops, measurements,
+                reserve=_reserve_from_majorant(
+                    _layernorm_majorant(residual, layernorm), ops))
+            post, post_proof = _maybe_reduce(
+                post, post_proof, "b1_post_attention_layernorm", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [context_measure, _state_measurement(
+                    "block1_post_attention_layernorm", post, post_proof,
+                    seconds)],
+                "variance_lower": float(variance_low.min()),
+                "variance_upper_min": float(variance_high.min()),
+                "injections": measurements, "reductions": reductions,
+                "oracles": oracles, "dispatch_counts": dict(dispatch.counts),
+                "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_V1",
+                {"post_attention": (post, post_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage2_av(stage1_path, output_path, device=None):
+    """Bounded Block-1 V/A.V segment only."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(stage1_path, "CORET_SOUND_FP64_BLOCK1_STAGE1_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            probability, probability_proof = _state_from_payload(
+                source["states"]["probability"], Zonotope, args, device)
+            checkpoint = prefix._load_checkpoint(); base = "bert.encoder.layer.1"
+            parameter = _parameter(
+                checkpoint, base + ".attention.self.value", device)
+            measurements, reductions = [], []
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._av_index = 1
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            value, value_proof = _dense_sound(
+                hidden, hidden_proof, parameter, "b1_v_affine", measurements)
+            value = value.add_attention_heads_dim(4)
+            structural.attach_support(value, value_proof)
+            probability, value, pair_proof = _align_states(
+                probability, probability_proof, value, value_proof,
+                "b1_av_branches")
+            probability, value, pair_proof = _maybe_reduce_pair(
+                probability, value, pair_proof, "b1_pre_av_pair", reductions)
+            delegate._probability = pair_proof; delegate._value = pair_proof
+            raw = dispatch.attention_value(probability, value)
+            raw_proof = structural.get_support(raw)
+            ops = 32 * (probability.num_error_terms + 1) ** 2 * 16 + 4096
+            context, context_proof = _inject(
+                raw, raw_proof, [probability, value], "b1_attention_value",
+                ops, measurements, reserve=_reserve_from_majorant(
+                    _bilinear_majorant(probability, value.t()), ops))
+            context, context_proof = _maybe_reduce(
+                context, context_proof, "b1_attention_value", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_attention_value", context, context_proof, seconds)],
+                "injections": measurements, "reductions": reductions,
+                "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_AV_V1",
+                {"hidden": (hidden, hidden_proof),
+                 "context": (context, context_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage2_prepare(stage1_path, output_path, device=None):
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(stage1_path, "CORET_SOUND_FP64_BLOCK1_STAGE1_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            probability, probability_proof = _state_from_payload(
+                source["states"]["probability"], Zonotope, args, device)
+            checkpoint = prefix._load_checkpoint()
+            parameter = _parameter(
+                checkpoint, "bert.encoder.layer.1.attention.self.value", device)
+            measurements, reductions = [], []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            value, value_proof = _dense_sound(
+                hidden, hidden_proof, parameter, "b1_v_affine", measurements)
+            value = value.add_attention_heads_dim(4)
+            structural.attach_support(value, value_proof)
+            probability, value, pair_proof = _align_states(
+                probability, probability_proof, value, value_proof,
+                "b1_av_branches")
+            probability, value, pair_proof = _maybe_reduce_pair(
+                probability, value, pair_proof, "b1_pre_av_pair", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {"injections": measurements, "reductions": reductions,
+                      "seconds": seconds}
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_AV_INPUT_V1",
+                {"hidden": (hidden, hidden_proof),
+                 "probability": (probability, pair_proof),
+                 "value": (value, pair_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage2_av_only(input_path, output_path, device=None):
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_AV_INPUT_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            probability, proof = _state_from_payload(
+                source["states"]["probability"], Zonotope, args, device)
+            value, value_proof = _state_from_payload(
+                source["states"]["value"], Zonotope, args, device)
+            if proof != value_proof:
+                raise RuntimeError("A.V input proof alignment differs")
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._av_index = 1; delegate._probability = proof
+            delegate._value = proof
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            measurements, reductions = [], []
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
+            started = time.perf_counter()
+            raw = dispatch.attention_value(probability, value)
+            raw_proof = structural.get_support(raw)
+            ops = 32 * (probability.num_error_terms + 1) ** 2 * 16 + 4096
+            context, context_proof = _inject(
+                raw, raw_proof, [probability, value], "b1_attention_value",
+                ops, measurements, reserve=_reserve_from_majorant(
+                    _bilinear_majorant(probability, value.t()), ops))
+            context, context_proof = _maybe_reduce(
+                context, context_proof, "b1_attention_value", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_attention_value", context, context_proof, seconds)],
+                "injections": measurements, "reductions": reductions,
+                "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+                "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(device))
+                if device.type == "cuda" else 0,
+                "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(device))
+                if device.type == "cuda" else 0,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_AV_V1",
+                {"hidden": (hidden, hidden_proof),
+                 "context": (context, context_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage2_post(input_path, output_path, device=None):
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_AV_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            context, context_proof = _state_from_payload(
+                source["states"]["context"], Zonotope, args, device)
+            checkpoint = prefix._load_checkpoint(); base = "bert.encoder.layer.1"
+            output_parameter = _parameter(
+                checkpoint, base + ".attention.output.dense", device)
+            layernorm = _parameter(
+                checkpoint, base + ".attention.output.LayerNorm", device)
+            measurements, reductions = [], []
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._layer_norm_index = 3
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
+            started = time.perf_counter()
+            context = context.remove_attention_heads_dim()
+            structural.attach_support(context, context_proof)
+            attention, attention_proof = _dense_sound(
+                context, context_proof, output_parameter,
+                "b1_attention_output_affine", measurements)
+            attention, attention_proof = _maybe_reduce(
+                attention, attention_proof, "b1_attention_output_affine",
+                reductions)
+            attention, aligned_hidden, residual_proof = _align_states(
+                attention, attention_proof, hidden, hidden_proof,
+                "b1_attention_residual")
+            attention, aligned_hidden, residual_proof = _maybe_reduce_pair(
+                attention, aligned_hidden, residual_proof,
+                "b1_pre_attention_residual_pair", reductions)
+            raw_residual = attention.add(aligned_hidden)
+            residual, residual_proof = _inject(
+                raw_residual, residual_proof, [attention, aligned_hidden],
+                "b1_attention_residual", 1, measurements,
+                reserve=_add_reserve(attention, aligned_hidden))
+            residual, residual_proof = _maybe_reduce(
+                residual, residual_proof, "b1_attention_residual", reductions)
+            width = residual.word_embedding_size
+            average = torch.ones((width, width), dtype=torch.float64,
+                                 device=device) / width
+            centered = residual.add(residual.matmul(average).multiply(-1.0))
+            variance = centered.square_and_sum_and_repeat().multiply(1.0/width)
+            variance_low, variance_high = variance.concretize()
+            if float(variance_low.min()) <= 0:
+                raise RuntimeError("Block-1 post-attention variance is nonpositive")
+            delegate._hidden = residual_proof; delegate._attention_output = residual_proof
+            raw_post = dispatch.layer_norm(residual, layernorm, "standard")
+            raw_post_proof = structural.get_support(raw_post)
+            ops = 16 * 128 * (residual.num_error_terms + 1) ** 2 + 4096
+            post, post_proof = _inject(
+                raw_post, raw_post_proof, [residual],
+                "b1_post_attention_layernorm", ops, measurements,
+                reserve=_reserve_from_majorant(
+                    _layernorm_majorant(residual, layernorm), ops))
+            post, post_proof = _maybe_reduce(
+                post, post_proof, "b1_post_attention_layernorm", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_post_attention_layernorm", post, post_proof,
+                    seconds)],
+                "variance_lower": float(variance_low.min()),
+                "variance_upper_min": float(variance_high.min()),
+                "injections": measurements, "reductions": reductions,
+                "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+                "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(device))
+                if device.type == "cuda" else 0,
+                "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(device))
+                if device.type == "cuda" else 0,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_POST_V1",
+                {"post_attention": (post, post_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage2_post_prepare(input_path, output_path, device=None):
+    """Head merge, output projection, and residual; stop before LayerNorm."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_AV_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            context, context_proof = _state_from_payload(
+                source["states"]["context"], Zonotope, args, device)
+            parameter = _parameter(
+                prefix._load_checkpoint(),
+                "bert.encoder.layer.1.attention.output.dense", device)
+            measurements, reductions = [], []
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
+            started = time.perf_counter()
+            context = context.remove_attention_heads_dim()
+            structural.attach_support(context, context_proof)
+            attention, attention_proof = _dense_sound(
+                context, context_proof, parameter,
+                "b1_attention_output_affine", measurements)
+            attention, attention_proof = _maybe_reduce(
+                attention, attention_proof, "b1_attention_output_affine",
+                reductions)
+            attention, aligned_hidden, residual_proof = _align_states(
+                attention, attention_proof, hidden, hidden_proof,
+                "b1_attention_residual")
+            attention, aligned_hidden, residual_proof = _maybe_reduce_pair(
+                attention, aligned_hidden, residual_proof,
+                "b1_pre_attention_residual_pair", reductions)
+            raw = attention.add(aligned_hidden)
+            residual, residual_proof = _inject(
+                raw, residual_proof, [attention, aligned_hidden],
+                "b1_attention_residual", 1, measurements,
+                reserve=_add_reserve(attention, aligned_hidden))
+            residual, residual_proof = _maybe_reduce(
+                residual, residual_proof, "b1_attention_residual", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_attention_residual", residual, residual_proof,
+                    seconds)],
+                "injections": measurements, "reductions": reductions,
+                "seconds": seconds,
+                "peak_allocated_bytes": int(torch.cuda.max_memory_allocated())
+                if device.type == "cuda" else 0,
+                "peak_reserved_bytes": int(torch.cuda.max_memory_reserved())
+                if device.type == "cuda" else 0,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_POST_RESIDUAL_V1",
+                {"residual": (residual, residual_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage2_projection(input_path, output_path, device=None):
+    """Head merge and attention output affine only."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_AV_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            context, context_proof = _state_from_payload(
+                source["states"]["context"], Zonotope, args, device)
+            parameter = _parameter(
+                prefix._load_checkpoint(),
+                "bert.encoder.layer.1.attention.output.dense", device)
+            measurements, reductions = [], []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            context = context.remove_attention_heads_dim()
+            structural.attach_support(context, context_proof)
+            attention, attention_proof = _dense_sound(
+                context, context_proof, parameter,
+                "b1_attention_output_affine", measurements)
+            attention, attention_proof = _maybe_reduce(
+                attention, attention_proof, "b1_attention_output_affine",
+                reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_attention_projection", attention,
+                    attention_proof, seconds)],
+                "injections": measurements, "reductions": reductions,
+                "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_ATTENTION_PROJECTION_V1",
+                {"attention": (attention, attention_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage2_residual(av_path, projection_path, output_path,
+                               device=None):
+    """Align attention projection with the original residual and add."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    av_source = _load_artifact(av_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_AV_V1")
+    projection_source = _load_artifact(
+        projection_path, "CORET_SOUND_FP64_BLOCK1_ATTENTION_PROJECTION_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                av_source["states"]["hidden"], Zonotope, args, device)
+            attention, attention_proof = _state_from_payload(
+                projection_source["states"]["attention"], Zonotope, args,
+                device)
+            measurements, reductions = [], []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            attention, aligned_hidden, residual_proof = _align_states(
+                attention, attention_proof, hidden, hidden_proof,
+                "b1_attention_residual")
+            attention, aligned_hidden, residual_proof = _maybe_reduce_pair(
+                attention, aligned_hidden, residual_proof,
+                "b1_pre_attention_residual_pair", reductions)
+            raw = attention.add(aligned_hidden)
+            residual, residual_proof = _inject(
+                raw, residual_proof, [attention, aligned_hidden],
+                "b1_attention_residual", 1, measurements,
+                reserve=_add_reserve(attention, aligned_hidden))
+            residual, residual_proof = _maybe_reduce(
+                residual, residual_proof, "b1_attention_residual", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_attention_residual", residual, residual_proof,
+                    seconds)],
+                "injections": measurements, "reductions": reductions,
+                "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_POST_RESIDUAL_V1",
+                {"residual": (residual, residual_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage2_residual_prepare(av_path, projection_path, output_path,
+                                       device=None):
+    """Persist the exact aligned/reduced operands of the attention residual."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    av_source = _load_artifact(av_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_AV_V1")
+    projection_source = _load_artifact(
+        projection_path, "CORET_SOUND_FP64_BLOCK1_ATTENTION_PROJECTION_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            hidden, hidden_proof = _state_from_payload(
+                av_source["states"]["hidden"], Zonotope, args, device)
+            attention, attention_proof = _state_from_payload(
+                projection_source["states"]["attention"], Zonotope, args,
+                device)
+            reductions = []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            attention, hidden, proof = _align_states(
+                attention, attention_proof, hidden, hidden_proof,
+                "b1_attention_residual")
+            attention, hidden, proof = _maybe_reduce_pair(
+                attention, hidden, proof,
+                "b1_pre_attention_residual_pair", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {"reductions": reductions, "seconds": seconds}
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_RESIDUAL_INPUT_V1",
+                {"attention": (attention, proof), "hidden": (hidden, proof)},
+                report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage2_residual_add(input_path, output_path, device=None):
+    """Add previously aligned attention/residual operands."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(
+        input_path, "CORET_SOUND_FP64_BLOCK1_RESIDUAL_INPUT_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            attention, proof = _state_from_payload(
+                source["states"]["attention"], Zonotope, args, device)
+            hidden, hidden_proof = _state_from_payload(
+                source["states"]["hidden"], Zonotope, args, device)
+            if proof != hidden_proof:
+                raise RuntimeError("attention residual input proofs differ")
+            measurements, reductions = [], []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            raw = attention.add(hidden)
+            residual, residual_proof = _inject(
+                raw, proof, [attention, hidden], "b1_attention_residual", 1,
+                measurements, reserve=_add_reserve(attention, hidden))
+            residual, residual_proof = _maybe_reduce(
+                residual, residual_proof, "b1_attention_residual", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_attention_residual", residual, residual_proof,
+                    seconds)],
+                "injections": measurements, "reductions": reductions,
+                "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_POST_RESIDUAL_V1",
+                {"residual": (residual, residual_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage2_post_ln(input_path, output_path, device=None):
+    """First Block-1 LayerNorm from a persisted attention residual."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(
+        input_path, "CORET_SOUND_FP64_BLOCK1_POST_RESIDUAL_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            residual, residual_proof = _state_from_payload(
+                source["states"]["residual"], Zonotope, args, device)
+            parameter = _parameter(
+                prefix._load_checkpoint(),
+                "bert.encoder.layer.1.attention.output.LayerNorm", device)
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._layer_norm_index = 3
+            delegate._hidden = residual_proof
+            delegate._attention_output = residual_proof
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            measurements, reductions = [], []
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
+            started = time.perf_counter()
+            width = residual.word_embedding_size
+            average = torch.ones((width, width), dtype=torch.float64,
+                                 device=device) / width
+            centered = residual.add(residual.matmul(average).multiply(-1.0))
+            variance = centered.square_and_sum_and_repeat().multiply(1.0/width)
+            variance_low, variance_high = variance.concretize()
+            if float(variance_low.min()) <= 0:
+                raise RuntimeError("Block-1 post-attention variance is nonpositive")
+            raw = dispatch.layer_norm(residual, parameter, "standard")
+            raw_proof = structural.get_support(raw)
+            ops = 16 * 128 * (residual.num_error_terms + 1) ** 2 + 4096
+            post, post_proof = _inject(
+                raw, raw_proof, [residual], "b1_post_attention_layernorm",
+                ops, measurements, reserve=_reserve_from_majorant(
+                    _layernorm_majorant(residual, parameter), ops))
+            post, post_proof = _maybe_reduce(
+                post, post_proof, "b1_post_attention_layernorm", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_post_attention_layernorm", post, post_proof,
+                    seconds)],
+                "variance_lower": float(variance_low.min()),
+                "variance_upper_min": float(variance_high.min()),
+                "branch_separation": {
+                    "sqrt_positive": float(variance_low.min()) > 0,
+                    "minimum_variance_lower": float(variance_low.min()),
+                },
+                "injections": measurements, "reductions": reductions,
+                "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+                "peak_allocated_bytes": int(torch.cuda.max_memory_allocated())
+                if device.type == "cuda" else 0,
+                "peak_reserved_bytes": int(torch.cuda.max_memory_reserved())
+                if device.type == "cuda" else 0,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_POST_V1",
+                {"post_attention": (post, post_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage3_ffn1(input_path, output_path, device=None):
+    """Block-1 first FFN affine and ReLU."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(
+        input_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_POST_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            post, post_proof = _state_from_payload(
+                source["states"]["post_attention"], Zonotope, args, device)
+            parameter = _parameter(
+                prefix._load_checkpoint(),
+                "bert.encoder.layer.1.intermediate.dense", device)
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._relu_index = 1
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            measurements, reductions = [], []
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
+            started = time.perf_counter()
+            affine, affine_proof = _dense_sound(
+                post, post_proof, parameter, "b1_ffn_first", measurements)
+            affine, affine_proof = _maybe_reduce(
+                affine, affine_proof, "b1_ffn_first", reductions)
+            lower, upper = affine.concretize()
+            active = lower >= 0
+            inactive = upper <= 0
+            crossing = ~(active | inactive)
+            delegate._post_attention = affine_proof
+            raw = dispatch.relu(affine)
+            raw_proof = structural.get_support(raw)
+            ops = 8 * (affine.num_error_terms + 1) + 128
+            relu, relu_proof = _inject(
+                raw, raw_proof, [affine], "b1_relu", ops, measurements,
+                condition=2.0)
+            relu, relu_proof = _maybe_reduce(
+                relu, relu_proof, "b1_relu", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            branch = {
+                "active": int(active.sum()), "inactive": int(inactive.sum()),
+                "crossing": int(crossing.sum()),
+                "minimum_active_lower": (float(lower[active].min())
+                    if bool(active.any()) else None),
+                "maximum_inactive_upper": (float(upper[inactive].max())
+                    if bool(inactive.any()) else None),
+            }
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_relu", relu, relu_proof, seconds)],
+                "branch_separation": branch,
+                "injections": measurements, "reductions": reductions,
+                "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+                "peak_allocated_bytes": int(torch.cuda.max_memory_allocated())
+                if device.type == "cuda" else 0,
+                "peak_reserved_bytes": int(torch.cuda.max_memory_reserved())
+                if device.type == "cuda" else 0,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_FFN1_V1",
+                {"relu": (relu, relu_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage3_ffn2(input_path, output_path, device=None):
+    """Block-1 second FFN affine."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(input_path, "CORET_SOUND_FP64_BLOCK1_FFN1_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            relu, relu_proof = _state_from_payload(
+                source["states"]["relu"], Zonotope, args, device)
+            parameter = _parameter(
+                prefix._load_checkpoint(),
+                "bert.encoder.layer.1.output.dense", device)
+            measurements, reductions = [], []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            ffn, ffn_proof = _dense_sound(
+                relu, relu_proof, parameter, "b1_ffn_second", measurements)
+            ffn, ffn_proof = _maybe_reduce(
+                ffn, ffn_proof, "b1_ffn_second", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_ffn_output", ffn, ffn_proof, seconds)],
+                "injections": measurements, "reductions": reductions,
+                "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_FFN2_V1",
+                {"ffn": (ffn, ffn_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage3_residual_prepare(post_path, ffn_path, output_path,
+                                       device=None):
+    """Align/reduce the FFN output and its post-attention residual."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    post_source = _load_artifact(
+        post_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_POST_V1")
+    ffn_source = _load_artifact(ffn_path, "CORET_SOUND_FP64_BLOCK1_FFN2_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            post, post_proof = _state_from_payload(
+                post_source["states"]["post_attention"], Zonotope, args,
+                device)
+            ffn, ffn_proof = _state_from_payload(
+                ffn_source["states"]["ffn"], Zonotope, args, device)
+            reductions = []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            ffn, post, proof = _align_states(
+                ffn, ffn_proof, post, post_proof, "b1_ffn_residual")
+            ffn, post, proof = _maybe_reduce_pair(
+                ffn, post, proof, "b1_pre_ffn_residual_pair", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {"reductions": reductions, "seconds": seconds}
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_FFN_RESIDUAL_INPUT_V1",
+                {"ffn": (ffn, proof), "post": (post, proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage3_residual_add(input_path, output_path, device=None):
+    """Add aligned FFN/residual branches."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(
+        input_path, "CORET_SOUND_FP64_BLOCK1_FFN_RESIDUAL_INPUT_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            ffn, proof = _state_from_payload(
+                source["states"]["ffn"], Zonotope, args, device)
+            post, post_proof = _state_from_payload(
+                source["states"]["post"], Zonotope, args, device)
+            if proof != post_proof:
+                raise RuntimeError("FFN residual input proofs differ")
+            measurements, reductions = [], []
+            if device.type == "cuda": torch.cuda.synchronize()
+            started = time.perf_counter()
+            raw = ffn.add(post)
+            residual, residual_proof = _inject(
+                raw, proof, [ffn, post], "b1_ffn_residual", 1,
+                measurements, reserve=_add_reserve(ffn, post))
+            residual, residual_proof = _maybe_reduce(
+                residual, residual_proof, "b1_ffn_residual", reductions)
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_ffn_residual", residual, residual_proof, seconds)],
+                "injections": measurements, "reductions": reductions,
+                "seconds": seconds,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_OUTPUT_RESIDUAL_V1",
+                {"residual": (residual, residual_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_block1_stage3_final_ln(input_path, output_path, device=None):
+    """Final Block-1 LayerNorm plus the actual pre-Block-2 recenter/reduction."""
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    source = _load_artifact(
+        input_path, "CORET_SOUND_FP64_BLOCK1_OUTPUT_RESIDUAL_V1")
+    prior_dtype = torch.get_default_dtype(); torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            residual, residual_proof = _state_from_payload(
+                source["states"]["residual"], Zonotope, args, device)
+            parameter = _parameter(
+                prefix._load_checkpoint(),
+                "bert.encoder.layer.1.output.LayerNorm", device)
+            delegate = structural.StructuralNativeSemanticOperators()
+            delegate._layer_norm_index = 4
+            delegate._post_attention = residual_proof
+            delegate._relu = residual_proof
+            dispatch = production.NativeProductionDispatch(delegate=delegate)
+            measurements, reductions, oracles = [], [], []
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
+            started = time.perf_counter()
+            width = residual.word_embedding_size
+            average = torch.ones((width, width), dtype=torch.float64,
+                                 device=device) / width
+            centered = residual.add(residual.matmul(average).multiply(-1.0))
+            variance = centered.square_and_sum_and_repeat().multiply(1.0/width)
+            variance_low, variance_high = variance.concretize()
+            if float(variance_low.min()) <= 0:
+                raise RuntimeError("Block-1 output variance is nonpositive")
+            raw = dispatch.layer_norm(residual, parameter, "standard")
+            raw_proof = structural.get_support(raw)
+            ops = 16 * 128 * (residual.num_error_terms + 1) ** 2 + 4096
+            output, output_proof = _inject(
+                raw, raw_proof, [residual], "b1_output_layernorm", ops,
+                measurements, reserve=_reserve_from_majorant(
+                    _layernorm_majorant(residual, parameter), ops))
+            output, output_proof = _maybe_reduce(
+                output, output_proof, "b1_output_layernorm", reductions)
+
+            # Actual production begins Block 2 with this conditional recenter.
+            output, output_proof, recenter = _recenter_sound(
+                output, output_proof, "b2_pre_qk_recenter", measurements,
+                reductions)
+            output, output_proof = _maybe_reduce(
+                output, output_proof, "b2_pre_qk_reduction", reductions)
+
+            values = centered.zonotope_w[0, 0].detach().cpu().tolist()
+            with _mp_context(gmpy2.RoundToNearest):
+                exact = sum((_mp(item) * _mp(item) for item in values),
+                            _mp(0)) / len(values)
+            machine = centered.zonotope_w[0, 0].square().sum() / len(values)
+            reserve = max(item["maximum_local_widening"]
+                          for item in measurements
+                          if item["label"] == "b1_output_layernorm")
+            oracles.append(_oracle_containment(
+                "block1_actual_layernorm_variance_nominal", exact, machine,
+                reserve))
+            low_value = variance_low[0, 0]
+            with _mp_context(gmpy2.RoundToNearest):
+                exact_root = gmpy2.sqrt(_mp(low_value))
+            oracles.append(_oracle_containment(
+                "block1_actual_layernorm_sqrt_lower", exact_root,
+                torch.sqrt(low_value), reserve))
+            if device.type == "cuda": torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+            report = {
+                "measurements": [_state_measurement(
+                    "block1_final_layernorm", output, output_proof, seconds)],
+                "variance_lower": float(variance_low.min()),
+                "variance_upper_min": float(variance_high.min()),
+                "branch_separation": {
+                    "sqrt_positive": float(variance_low.min()) > 0,
+                    "minimum_variance_lower": float(variance_low.min()),
+                    "recenter_executed": recenter["executed"],
+                },
+                "recenter": recenter,
+                "mpfr_spots": oracles, "injections": measurements,
+                "reductions": reductions,
+                "dispatch_counts": dict(dispatch.counts), "seconds": seconds,
+                "peak_allocated_bytes": int(torch.cuda.max_memory_allocated())
+                if device.type == "cuda" else 0,
+                "peak_reserved_bytes": int(torch.cuda.max_memory_reserved())
+                if device.type == "cuda" else 0,
+            }
+            artifact = _save_artifact(
+                output_path, "CORET_SOUND_FP64_BLOCK1_FINAL_V1",
+                {"pre_block2": (output, output_proof)}, report)
+            return {"report": report, "artifact": artifact}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_reduction_audit_from_artifact(path, device=None):
+    device = torch.device(
+        device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if (payload.get("schema") != "CORET_SOUND_FP64_BLOCK0_STATE_V1"
+            or payload.get("pinned_revision") != PINNED_REVISION):
+        raise RuntimeError("sound Block-0 reduction artifact identity differs")
+    prior_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        with pinned_zonotope() as Zonotope:
+            args = _args(device)
+            state = Zonotope(
+                args=args, p=100, eps=prefix.FIXTURE_RHO,
+                perturbed_word_index=prefix.FIXTURE_PERTURBED_TOKEN,
+                zonotope_w=payload["weights"].to(device),
+                error_term_range_low=payload["range_low"].to(device),
+                error_term_range_high=payload["range_high"].to(device),
+                clone=False)
+            raw = payload["proof"]
+            proof = structural.SupportProof(
+                tuple(raw["masks"]), tuple(raw["ids"]),
+                tuple(raw["reasons"]), int(raw["num_tokens"]))
+            structural.attach_support(state, proof)
+            reports = []
+            mutation_result = None
+            for cap in (12000, 10000):
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                started = time.perf_counter()
+                reduced, reduced_proof, witness = sound_reduce(
+                    state, proof, cap, f"forced_cap_{cap}")
+                checked = check_reduction_witness(
+                    state, proof, reduced, reduced_proof, witness)
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                elapsed = time.perf_counter() - started
+                if mutation_result is None:
+                    mutation_result = _reduction_mutations(
+                        state, proof, reduced, reduced_proof, witness)
+                low, high = reduced.concretize()
+                reports.append({
+                    "cap": cap, "generators_before": state.num_error_terms,
+                    "retained": len(witness["retained_indices"]),
+                    "dropped": len(witness["dropped_indices"]),
+                    "new_box_generators": witness["replacement_count"],
+                    "generators_after": reduced.num_error_terms,
+                    "protected": len(witness["protected_indices"]),
+                    "support_inflation": checked["support_inflation"],
+                    "range_inflation": checked["range_inflation"],
+                    "support_max": float((0.5*(high-low)).max()),
+                    "lower_min": float(low.min()),
+                    "upper_max": float(high.max()), "seconds": elapsed,
+                    "allocated_bytes": int(torch.cuda.memory_allocated(device))
+                    if device.type == "cuda" else 0,
+                    "reserved_bytes": int(torch.cuda.memory_reserved(device))
+                    if device.type == "cuda" else 0,
+                    "witness": witness, "checker": checked,
+                })
+            return {"forced_caps": reports, "mutations": mutation_result}
+    finally:
+        torch.set_default_dtype(prior_dtype)
+
+
+def run_sound_fp64(device=None, continuation=None):
     """Run Block 0 with every FP64 reserve embedded in the abstract state."""
     device = torch.device(
         device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
@@ -987,7 +3186,7 @@ def run_sound_fp64(device=None):
                 raw_probability=probability, value=value,
                 raw_context=raw_context, ffn_residual=ffn_residual,
                 centered=centered, variance=variance, reserves=reserves))
-            return {
+            result = {
                 "rows": rows,
                 "numerical_injections": measurements,
                 "second_layernorm_variance_lower": float(variance_low.min()),
@@ -1005,6 +3204,13 @@ def run_sound_fp64(device=None):
                     torch.cuda.max_memory_reserved(device)
                     if device.type == "cuda" else 0),
             }
+            if continuation is not None:
+                result["continuation"] = continuation(
+                    output, output_proof, {
+                        "checkpoint": checkpoint, "args": args,
+                        "Zonotope": Zonotope, "device": device,
+                    })
+            return result
     finally:
         torch.set_default_dtype(prior_dtype)
 
@@ -1013,6 +3219,127 @@ if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "plain"
     if mode == "sound":
         result = run_sound_fp64()
+    elif mode == "reduction":
+        result = run_reduction_audit()
+    elif mode == "export":
+        result = export_block0_state(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_block0.pt")
+    elif mode == "reduction-artifact":
+        result = run_reduction_audit_from_artifact(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_block0.pt")
+    elif mode == "block1-stage1":
+        result = run_block1_stage1(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_block0.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_stage1.pt")
+    elif mode == "block1-pre-qk":
+        result = run_block1_pre_qk(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_block0.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_pre_qk.pt")
+    elif mode == "block1-qk-prepare":
+        result = run_block1_qk_prepare(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_pre_qk.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_qk_input.pt")
+    elif mode == "block1-qk-softmax":
+        result = run_block1_qk_softmax(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_qk_input.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_stage1.pt")
+    elif mode == "block1-qk-only":
+        result = run_block1_qk_only(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_qk_input.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_qk.pt")
+    elif mode == "block1-qk-compute":
+        result = run_block1_qk_compute(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_qk_input.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_qk_pre_reduction.pt")
+    elif mode == "block1-qk-reduce":
+        result = run_block1_qk_reduce(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_qk_pre_reduction.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_qk.pt")
+    elif mode == "block1-qk-native":
+        result = run_block1_qk_native(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_qk_input.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_qk_native.pt")
+    elif mode == "block1-qk-reserve":
+        result = run_block1_qk_reserve(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_qk_input.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_qk_reserve.pt")
+    elif mode == "block1-qk-inject":
+        result = run_block1_qk_inject(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_qk_input.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_qk_native.pt",
+            sys.argv[4] if len(sys.argv) > 4 else "/tmp/coret_fp64_b1_qk_reserve.pt",
+            sys.argv[5] if len(sys.argv) > 5 else "/tmp/coret_fp64_b1_qk_pre_reduction.pt")
+    elif mode == "block1-softmax-only":
+        result = run_block1_softmax_only(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_qk.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_stage1.pt")
+    elif mode == "block1-stage2":
+        result = run_block1_stage2(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_stage1.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_stage2.pt")
+    elif mode == "block1-stage2-av":
+        result = run_block1_stage2_av(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_stage1.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_stage2_av.pt")
+    elif mode == "block1-stage2-prepare":
+        result = run_block1_stage2_prepare(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_stage1.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_av_input.pt")
+    elif mode == "block1-stage2-av-only":
+        result = run_block1_stage2_av_only(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_av_input.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_stage2_av.pt")
+    elif mode == "block1-stage2-post":
+        result = run_block1_stage2_post(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_stage2_av.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_stage2_post.pt")
+    elif mode == "block1-stage2-post-prepare":
+        result = run_block1_stage2_post_prepare(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_stage2_av.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_post_residual.pt")
+    elif mode == "block1-stage2-projection":
+        result = run_block1_stage2_projection(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_stage2_av.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_attention_projection.pt")
+    elif mode == "block1-stage2-residual":
+        result = run_block1_stage2_residual(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_stage2_av.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_attention_projection.pt",
+            sys.argv[4] if len(sys.argv) > 4 else "/tmp/coret_fp64_b1_post_residual.pt")
+    elif mode == "block1-stage2-residual-prepare":
+        result = run_block1_stage2_residual_prepare(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_stage2_av.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_attention_projection.pt",
+            sys.argv[4] if len(sys.argv) > 4 else "/tmp/coret_fp64_b1_residual_input.pt")
+    elif mode == "block1-stage2-residual-add":
+        result = run_block1_stage2_residual_add(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_residual_input.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_post_residual.pt")
+    elif mode == "block1-stage2-post-ln":
+        result = run_block1_stage2_post_ln(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_post_residual.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_stage2_post.pt")
+    elif mode == "block1-stage3-ffn1":
+        result = run_block1_stage3_ffn1(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_stage2_post.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_ffn1.pt")
+    elif mode == "block1-stage3-ffn2":
+        result = run_block1_stage3_ffn2(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_ffn1.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_ffn2.pt")
+    elif mode == "block1-stage3-residual-prepare":
+        result = run_block1_stage3_residual_prepare(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_stage2_post.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_ffn2.pt",
+            sys.argv[4] if len(sys.argv) > 4 else "/tmp/coret_fp64_b1_ffn_residual_input.pt")
+    elif mode == "block1-stage3-residual-add":
+        result = run_block1_stage3_residual_add(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_ffn_residual_input.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_output_residual.pt")
+    elif mode == "block1-stage3-final-ln":
+        result = run_block1_stage3_final_ln(
+            sys.argv[2] if len(sys.argv) > 2 else "/tmp/coret_fp64_b1_output_residual.pt",
+            sys.argv[3] if len(sys.argv) > 3 else "/tmp/coret_fp64_b1_final.pt")
     elif mode == "float32":
         result = run_plain_fp64(dtype=torch.float32)
     else:
