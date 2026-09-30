@@ -28,6 +28,11 @@ import run_sound_fp64_finish_3l_v1 as finish3l
 SCHEMA = "CORET_SOUND_FP64_3L_FIRST_CAMPAIGN_V1"
 RESULT_SCHEMA = "CORET_SOUND_FP64_3L_PROPERTY_RESULT_V1"
 AGGREGATE_SCHEMA = "CORET_SOUND_FP64_3L_CAMPAIGN_SUMMARY_V1"
+CANDIDATE_RADIUS_FIELD = "certified_lower_endpoint_binary64"
+CANDIDATE_RADIUS_HEX_FIELD = "certified_lower_endpoint_binary64_hex"
+CANDIDATE_RADIUS_SOURCE = (
+    "cached_DeepT_reference.certified_lower_endpoint_binary64"
+)
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -63,6 +68,40 @@ def _ordered_assignments(plan: dict, worker_id: int) -> list[dict]:
     return rows
 
 
+def _candidate_radius(row: dict) -> float:
+    reference = row.get("cached_DeepT_reference")
+    if not isinstance(reference, dict):
+        raise RuntimeError("cached DeepT reference is missing or malformed")
+    if CANDIDATE_RADIUS_FIELD not in reference:
+        raise RuntimeError(
+            "cached DeepT reference is missing authoritative candidate radius "
+            f"{CANDIDATE_RADIUS_FIELD}"
+        )
+
+    try:
+        candidate = float(reference[CANDIDATE_RADIUS_FIELD])
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("cached DeepT candidate radius is not binary64") from exc
+    if not math.isfinite(candidate) or candidate < 0.0:
+        raise RuntimeError(
+            "cached DeepT candidate radius must be finite and nonnegative"
+        )
+
+    if CANDIDATE_RADIUS_HEX_FIELD in reference:
+        try:
+            hexadecimal = float.fromhex(reference[CANDIDATE_RADIUS_HEX_FIELD])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "cached DeepT optional hexadecimal radius is malformed"
+            ) from exc
+        if hexadecimal != candidate:
+            raise RuntimeError(
+                "cached DeepT decimal and optional hexadecimal radii differ"
+            )
+
+    return candidate
+
+
 def preflight(artifact_root: Path) -> dict:
     cluster_common.verify_artifact_manifest(artifact_root)
     manifest = cluster_common.load_production_manifest(artifact_root)
@@ -76,12 +115,8 @@ def preflight(artifact_root: Path) -> dict:
     indexed = {row["property_id"]: row for row in manifest["properties"]}
     for property_id in ids:
         row = indexed[property_id]
-        candidate = float(row["cached_DeepT_reference"][
-            "certified_lower_endpoint_binary64"])
-        if (not math.isfinite(candidate) or candidate <= 0
-                or float.fromhex(row["cached_DeepT_reference"][
-                    "certified_lower_endpoint_binary64_hex"]) != candidate
-                or len(row.get("token_ids", ())) != row["sequence_length"]
+        _candidate_radius(row)
+        if (len(row.get("token_ids", ())) != row["sequence_length"]
                 or row["clean_label"] != row["nominal_prediction"]):
             raise RuntimeError(f"invalid frozen campaign property: {property_id}")
     return {
@@ -95,9 +130,7 @@ def preflight(artifact_root: Path) -> dict:
         "production_manifest_sha256":
             cluster_common.PRODUCTION_MANIFEST_SHA,
         "source_plan_sha256": plan["canonical_manifest_sha256"],
-        "candidate_radius_source": (
-            "properties[].cached_DeepT_reference."
-            "certified_lower_endpoint_binary64"),
+        "candidate_radius_source": CANDIDATE_RADIUS_SOURCE,
         "scientific_queries": 0,
     }
 
@@ -166,8 +199,7 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
         incomplete = directory / name
         if incomplete.exists():
             incomplete.unlink()
-    candidate = float(row["cached_DeepT_reference"][
-        "certified_lower_endpoint_binary64"])
+    candidate = _candidate_radius(row)
     workspace = result_root / "work" / property_id
     if workspace.exists():
         shutil.rmtree(workspace)
@@ -253,8 +285,7 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
             "token_position": int(row["token_position"]),
             "historical_candidate_radius": candidate,
             "historical_candidate_radius_hex": candidate.hex(),
-            "candidate_source": (
-                "cached_DeepT_reference.certified_lower_endpoint_binary64"),
+            "candidate_source": CANDIDATE_RADIUS_SOURCE,
             "clean_label": int(row["clean_label"]),
             "target_comparison": [int(row["clean_label"]),
                                   1 - int(row["clean_label"])],
@@ -294,8 +325,7 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
             "token_position": int(row["token_position"]),
             "historical_candidate_radius": candidate,
             "historical_candidate_radius_hex": candidate.hex(),
-            "candidate_source": (
-                "cached_DeepT_reference.certified_lower_endpoint_binary64"),
+            "candidate_source": CANDIDATE_RADIUS_SOURCE,
             "clean_label": int(row["clean_label"]),
             "target_comparison": [int(row["clean_label"]),
                                   1 - int(row["clean_label"])],

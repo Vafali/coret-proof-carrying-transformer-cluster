@@ -31,7 +31,6 @@ def _manifest_and_plan():
             "clean_label": 1, "nominal_prediction": 1,
             "cached_DeepT_reference": {
                 "certified_lower_endpoint_binary64": radius,
-                "certified_lower_endpoint_binary64_hex": radius.hex(),
             },
         })
     def assignment(row):
@@ -62,7 +61,56 @@ def test_preflight_finds_exact_frozen_population_and_split(monkeypatch, tmp_path
     assert result["property_count"] == 127
     assert result["worker_property_counts"] == [63, 64]
     assert len(set(sum(result["worker_property_ids"], []))) == 127
+    assert result["candidate_radius_source"] == (
+        "cached_DeepT_reference.certified_lower_endpoint_binary64")
     assert result["scientific_queries"] == 0
+
+
+@pytest.mark.parametrize("candidate", [0.125, 0.0])
+def test_candidate_radius_accepts_authoritative_decimal_including_zero(candidate):
+    row = {"cached_DeepT_reference": {
+        "certified_lower_endpoint_binary64": candidate,
+    }}
+    parsed = campaign._candidate_radius(row)
+    assert parsed == candidate
+    if candidate == 0.0:
+        assert parsed.hex() == "0x0.0p+0"
+
+
+def test_candidate_radius_rejects_missing_authoritative_decimal():
+    row = {"cached_DeepT_reference": {
+        "certified_lower_endpoint_binary64_hex": "0x1.0p-10",
+    }}
+    with pytest.raises(RuntimeError, match="missing authoritative"):
+        campaign._candidate_radius(row)
+
+
+@pytest.mark.parametrize("candidate", [float("nan"), float("inf"),
+                                         float("-inf"), -0.125])
+def test_candidate_radius_rejects_nonfinite_or_negative(candidate):
+    row = {"cached_DeepT_reference": {
+        "certified_lower_endpoint_binary64": candidate,
+    }}
+    with pytest.raises(RuntimeError, match="finite and nonnegative"):
+        campaign._candidate_radius(row)
+
+
+def test_candidate_radius_accepts_matching_optional_hex():
+    candidate = 0.000625
+    row = {"cached_DeepT_reference": {
+        "certified_lower_endpoint_binary64": candidate,
+        "certified_lower_endpoint_binary64_hex": candidate.hex(),
+    }}
+    assert campaign._candidate_radius(row) == candidate
+
+
+def test_candidate_radius_rejects_mismatching_optional_hex():
+    row = {"cached_DeepT_reference": {
+        "certified_lower_endpoint_binary64": 0.000625,
+        "certified_lower_endpoint_binary64_hex": (0.00125).hex(),
+    }}
+    with pytest.raises(RuntimeError, match="radii differ"):
+        campaign._candidate_radius(row)
 
 
 def test_property_source_is_scoped_and_restored():
@@ -110,4 +158,3 @@ def test_preflight_rejects_cross_worker_overlap(monkeypatch, tmp_path):
     monkeypatch.setattr(campaign.a40_fresh_common, "load_plan", lambda: plan)
     with pytest.raises(RuntimeError, match="does not cover"):
         campaign.preflight(tmp_path)
-
