@@ -317,7 +317,10 @@ def test_property_failure_is_atomic_fail_closed_and_not_retried(
             RuntimeError("synthetic domain failure")))
     result = campaign.execute_property(row, tmp_path, "cuda:0")
     assert result["terminal_status"] == "FAIL_CLOSED"
-    assert result["certified_at_historical_radius"] is False
+    assert result["certified_at_historical_radius"] is None
+    assert result["scientific_evaluation_complete"] is False
+    assert result["classification"] == "INFRASTRUCTURE_FAILURE"
+    assert result["failure_category"] == "RUNTIME_EXCEPTION"
     assert result["verifier_evaluations"] == 1
     assert result["binary_search_performed"] is False
     assert result["failure_stage"] == "block0"
@@ -325,6 +328,40 @@ def test_property_failure_is_atomic_fail_closed_and_not_retried(
     before = path.read_bytes()
     again = campaign.execute_property(row, tmp_path, "cuda:0")
     assert again == result and path.read_bytes() == before
+
+
+def test_campaign_status_counts_exclude_infrastructure_from_scientific_failure():
+    rows = [
+        {"scientific_evaluation_complete": True,
+         "certified_at_historical_radius": True},
+        {"scientific_evaluation_complete": True,
+         "certified_at_historical_radius": False},
+        {"scientific_evaluation_complete": False,
+         "certified_at_historical_radius": None},
+    ]
+    assert campaign._status_counts(rows) == {
+        "completed_sound_evaluations": 2,
+        "certified_at_historical_radius": 1,
+        "failed_at_historical_radius": 1,
+        "infrastructure_failures": 1,
+    }
+
+
+def test_failure_categories_distinguish_oom_and_adapter_errors():
+    assert campaign._failure_category(
+        RuntimeError("CUDA out of memory")) == "CUDA_OUT_OF_MEMORY"
+    assert campaign._failure_category(RuntimeError(
+        "pre-Block-2 hidden-state shape differs")) == \
+        "ADAPTER_STATE_TRANSFER"
+    assert campaign._failure_category(ValueError("other")) == \
+        "RUNTIME_EXCEPTION"
+
+
+def test_cpu_property_boundary_cleanup_never_enters_cuda(monkeypatch):
+    monkeypatch.setattr(
+        campaign.sound.torch.cuda, "is_available", lambda: False)
+    result = campaign._property_boundary_cleanup("cuda:0")
+    assert result["cuda_cache_trimmed"] is False
 
 
 def test_preflight_rejects_cross_worker_overlap(monkeypatch, tmp_path):

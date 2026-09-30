@@ -51,13 +51,16 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_state(state: dict) -> dict:
+def _validate_state(state: dict, expected_num_tokens: int = 4) -> dict:
+    if not isinstance(expected_num_tokens, int) or expected_num_tokens <= 0:
+        raise RuntimeError("expected pre-Block-2 token count is invalid")
     if set(state) != {"weights", "range_low", "range_high", "proof"}:
         raise RuntimeError("pre-Block-2 state field inventory differs")
     weights, low, high = state["weights"], state["range_low"], state["range_high"]
     if not all(isinstance(item, torch.Tensor) for item in (weights, low, high)):
         raise RuntimeError("pre-Block-2 state tensors missing")
-    if weights.ndim != 3 or tuple(weights.shape[1:]) != (4, 128):
+    if (weights.ndim != 3
+            or tuple(weights.shape[1:]) != (expected_num_tokens, 128)):
         raise RuntimeError("pre-Block-2 hidden-state shape differs")
     generators = int(weights.shape[0]) - 1
     if not 0 < generators <= sound.MAXIMUM_GENERATORS:
@@ -74,14 +77,15 @@ def _validate_state(state: dict) -> dict:
     proof = state["proof"]
     if set(proof) != {"masks", "ids", "reasons", "num_tokens"}:
         raise RuntimeError("pre-Block-2 provenance inventory differs")
-    if int(proof["num_tokens"]) != 4:
+    if int(proof["num_tokens"]) != expected_num_tokens:
         raise RuntimeError("pre-Block-2 token universe differs")
     if not (len(proof["masks"]) == len(proof["ids"])
             == len(proof["reasons"]) == generators):
         raise RuntimeError("pre-Block-2 provenance length differs")
     if len(set(proof["ids"])) != generators:
         raise RuntimeError("pre-Block-2 ordered generator IDs are not unique")
-    if not all(isinstance(mask, int) and 0 <= mask < 16
+    if not all(isinstance(mask, int)
+               and 0 <= mask < (1 << expected_num_tokens)
                for mask in proof["masks"]):
         raise RuntimeError("pre-Block-2 support masks are invalid")
     return {
@@ -96,7 +100,8 @@ def _validate_state(state: dict) -> dict:
 
 def authenticate(input_path: Path, report_path: Path,
                  expected_input_sha256: str = EXPECTED_INPUT_SHA256,
-                 expected_report_sha256: str = EXPECTED_REPORT_SHA256) -> dict:
+                 expected_report_sha256: str = EXPECTED_REPORT_SHA256,
+                 expected_num_tokens: int = 4) -> dict:
     input_sha, report_sha = _sha256(input_path), _sha256(report_path)
     if input_sha != expected_input_sha256:
         raise RuntimeError(
@@ -109,7 +114,8 @@ def authenticate(input_path: Path, report_path: Path,
     payload = sound._load_artifact(input_path, INPUT_SCHEMA)
     if set(payload.get("states", {})) != {"pre_block2"}:
         raise RuntimeError("Block-1 final state inventory differs")
-    identity = _validate_state(payload["states"]["pre_block2"])
+    identity = _validate_state(
+        payload["states"]["pre_block2"], expected_num_tokens)
     report = json.loads(report_path.read_text())
     if (report.get("schema") != INPUT_REPORT_SCHEMA
             or report.get("verdict") != "CORET_SOUND_FP64_BLOCK1_READY"
@@ -172,10 +178,13 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             output_report: Path, device_index: int,
             expected_input_sha256: str = EXPECTED_INPUT_SHA256,
             expected_report_sha256: str = EXPECTED_REPORT_SHA256,
-            run_representative_mpfr: bool = True) -> dict:
+            run_representative_mpfr: bool = True,
+            expected_num_tokens: int | None = None) -> dict:
+    if expected_num_tokens is None:
+        expected_num_tokens = len(prefix.FIXTURE_TOKEN_IDS)
     authenticated = authenticate(
         input_path, report_path, expected_input_sha256,
-        expected_report_sha256)
+        expected_report_sha256, expected_num_tokens)
     if output_path.exists() or output_report.exists():
         raise RuntimeError("refusing to overwrite 3-layer output")
     if not torch.cuda.is_available():

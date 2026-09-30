@@ -27,16 +27,18 @@ def _sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _fixture(tmp_path):
+def _fixture(tmp_path, num_tokens=4):
     generators = 2
     artifact = tmp_path / "block1.pt"
     state = {
-        "weights": torch.zeros(generators + 1, 4, 128, dtype=torch.float64),
+        "weights": torch.zeros(
+            generators + 1, num_tokens, 128, dtype=torch.float64),
         "range_low": -torch.ones(generators, dtype=torch.float64),
         "range_high": torch.ones(generators, dtype=torch.float64),
         "proof": {
             "masks": [2, 2], "ids": ["g0", "g1"],
-            "reasons": ["fixture", "fixture"], "num_tokens": 4,
+            "reasons": ["fixture", "fixture"],
+            "num_tokens": num_tokens,
         },
     }
     embedded = {
@@ -79,6 +81,18 @@ def test_preflight_authenticates_without_operator_execution(tmp_path, monkeypatc
     assert result["state_identity"]["generator_count"] == 2
     assert result["operator_calls"] == 0
     assert result["scientific_properties"] == result["bound_calls"] == 0
+
+
+def test_campaign_sequence_length_reaches_pre_block2_boundary(tmp_path):
+    artifact, report = _fixture(tmp_path, num_tokens=20)
+    with pytest.raises(RuntimeError, match="hidden-state shape differs"):
+        finish3l.authenticate(
+            artifact, report, _sha(artifact), _sha(report))
+    result = finish3l.authenticate(
+        artifact, report, _sha(artifact), _sha(report),
+        expected_num_tokens=20)
+    assert result["state_identity"]["shape"] == [3, 20, 128]
+    assert result["state_identity"]["generator_count"] == 2
 
 
 @pytest.mark.parametrize("field,value", [

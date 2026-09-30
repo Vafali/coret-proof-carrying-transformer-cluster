@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gc
 import json
 import math
 import os
@@ -63,7 +64,79 @@ def _verified_result(path: Path) -> dict:
                 or cluster_common.sha256(report)
                 != result.get("certificate_report_sha256")):
             raise RuntimeError(f"campaign certificate identity differs: {path}")
+        expected = ("CERTIFIED_AT_HISTORICAL_RADIUS"
+                    if result.get("certified_at_historical_radius") is True
+                    else "FAILED_AT_HISTORICAL_RADIUS")
+        if (result.get("scientific_evaluation_complete") is not True
+                or result.get("classification") != expected):
+            raise RuntimeError(f"completed campaign result status differs: {path}")
+    elif result.get("terminal_status") == "FAIL_CLOSED":
+        if (result.get("scientific_evaluation_complete") is not False
+                or result.get("certified_at_historical_radius") is not None
+                or result.get("classification") != "INFRASTRUCTURE_FAILURE"):
+            raise RuntimeError(f"failed campaign result status differs: {path}")
+    else:
+        raise RuntimeError(f"campaign terminal status differs: {path}")
     return result
+
+
+def _status_counts(rows: list[dict]) -> dict:
+    completed = [row for row in rows
+                 if row.get("scientific_evaluation_complete") is True]
+    infrastructure = [row for row in rows
+                      if row.get("scientific_evaluation_complete") is False]
+    certified = sum(
+        row.get("certified_at_historical_radius") is True for row in completed)
+    not_certified = sum(
+        row.get("certified_at_historical_radius") is False for row in completed)
+    return {
+        "completed_sound_evaluations": len(completed),
+        "certified_at_historical_radius": certified,
+        "failed_at_historical_radius": not_certified,
+        "infrastructure_failures": len(infrastructure),
+    }
+
+
+def _failure_category(error: Exception) -> str:
+    name, message = type(error).__name__, str(error).lower()
+    if name == "OutOfMemoryError" or "out of memory" in message:
+        return "CUDA_OUT_OF_MEMORY"
+    if "pre-block-2 hidden-state shape differs" in message:
+        return "ADAPTER_STATE_TRANSFER"
+    return "RUNTIME_EXCEPTION"
+
+
+def _cuda_memory_snapshot(device: str) -> dict:
+    torch = sound.torch
+    if not torch.cuda.is_available() or not str(device).startswith("cuda"):
+        return {"allocated": 0, "reserved": 0,
+                "max_allocated": 0, "max_reserved": 0}
+    target = torch.device(device)
+    return {
+        "allocated": int(torch.cuda.memory_allocated(target)),
+        "reserved": int(torch.cuda.memory_reserved(target)),
+        "max_allocated": int(torch.cuda.max_memory_allocated(target)),
+        "max_reserved": int(torch.cuda.max_memory_reserved(target)),
+    }
+
+
+def _property_boundary_cleanup(device: str) -> dict:
+    """Release only allocator state after an independent property is dead."""
+    collected = gc.collect()
+    torch = sound.torch
+    if not torch.cuda.is_available() or not str(device).startswith("cuda"):
+        return {"gc_collected": collected, "cuda_cache_trimmed": False}
+    target = torch.device(device)
+    with torch.cuda.device(target):
+        torch.cuda.synchronize(target)
+        before = int(torch.cuda.memory_reserved(target))
+        torch.cuda.empty_cache()
+        after = int(torch.cuda.memory_reserved(target))
+    return {
+        "gc_collected": collected, "cuda_cache_trimmed": True,
+        "reserved_before": before, "reserved_after": after,
+        "reserved_released": max(0, before - after),
+    }
 
 
 def _ordered_assignments(plan: dict, worker_id: int) -> list[dict]:
@@ -381,7 +454,8 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
                 int(device.split(":")[-1]),
                 cluster_common.sha256(paths[13]),
                 cluster_common.sha256(report_path),
-                run_representative_mpfr=False)
+                run_representative_mpfr=False,
+                expected_num_tokens=len(row["token_ids"]))
         if (report["clean_label"] != int(row["clean_label"])
                 or report["fixture_token_ids"] != row["token_ids"]
                 or report["fixture_rho_hex"] != candidate.hex()):
@@ -403,6 +477,7 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
             "final_sound_upper_margin": float(
                 report["final_sound_margin_upper"]),
             "certified_at_historical_radius": lower > 0,
+            "scientific_evaluation_complete": True,
             "classification": ("CERTIFIED_AT_HISTORICAL_RADIUS" if lower > 0
                                else "FAILED_AT_HISTORICAL_RADIUS"),
             "numerical_widening": float(report["numerical_widening"]),
@@ -423,6 +498,7 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
             "generic_fallback_count": 0,
         }
     except Exception as error:
+        memory = _cuda_memory_snapshot(device)
         for name in ("certificate.pt", "certificate_report.json"):
             candidate_path = directory / name
             if candidate_path.exists():
@@ -440,14 +516,18 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
             "target_comparison": [int(row["clean_label"]),
                                   1 - int(row["clean_label"])],
             "final_sound_lower_margin": None,
-            "certified_at_historical_radius": False,
-            "classification": "FAILED_AT_HISTORICAL_RADIUS",
+            "certified_at_historical_radius": None,
+            "scientific_evaluation_complete": False,
+            "classification": "INFRASTRUCTURE_FAILURE",
+            "failure_category": _failure_category(error),
             "numerical_widening": None,
             "max_numerical_native_ratio": None,
             "final_generator_count": None,
             "runtime_seconds": time.perf_counter() - started,
-            "peak_gpu_allocated_bytes": 0,
-            "peak_gpu_reserved_bytes": 0,
+            "peak_gpu_allocated_bytes": memory["max_allocated"],
+            "peak_gpu_reserved_bytes": memory["max_reserved"],
+            "failure_gpu_allocated_bytes": memory["allocated"],
+            "failure_gpu_reserved_bytes": memory["reserved"],
             "peak_cpu_rss_bytes": int(resource.getrusage(
                 resource.RUSAGE_SELF).ru_maxrss) * 1024,
             "failure_stage": stage,
@@ -475,17 +555,19 @@ def run_worker(worker_id: int, artifact_root: Path, result_root: Path,
     completed = []
     for assigned in assignments:
         row = properties[assigned["property_id"]]
-        completed.append(execute_property(
-            row, result_root, f"cuda:{device_index}"))
+        device = f"cuda:{device_index}"
+        _property_boundary_cleanup(device)
+        try:
+            completed.append(execute_property(row, result_root, device))
+        finally:
+            _property_boundary_cleanup(device)
+    counts = _status_counts(completed)
     summary = {
         "schema": SCHEMA, "worker_id": worker_id,
         "source_plan_sha256": identity["source_plan_sha256"],
         "property_count": len(assignments),
-        "complete_result_count": len(completed),
-        "certified_count": sum(
-            item["certified_at_historical_radius"] for item in completed),
-        "failed_count": sum(
-            not item["certified_at_historical_radius"] for item in completed),
+        "persisted_result_count": len(completed),
+        **counts,
         "wall_seconds": time.perf_counter() - started,
     }
     _atomic_json(result_root / f"worker_{worker_id}_summary.json", summary)
@@ -526,13 +608,17 @@ def aggregate(artifact_root: Path, worker_roots: list[Path],
               if row["max_numerical_native_ratio"] is not None]
     margins = [float(row["final_sound_lower_margin"]) for row in rows
                if row["final_sound_lower_margin"] is not None]
-    certified = sum(row["certified_at_historical_radius"] for row in rows)
+    counts = _status_counts(rows)
+    completed_count = counts["completed_sound_evaluations"]
     summary = {
         "schema": AGGREGATE_SCHEMA,
         "total_properties": 127,
-        "certified_at_historical_radius": certified,
-        "failed_at_historical_radius": 127 - certified,
-        "certification_rate": certified / 127,
+        **counts,
+        "campaign_status": ("COMPLETE" if not counts["infrastructure_failures"]
+                            else "INCOMPLETE_INFRASTRUCTURE_FAILURES"),
+        "certification_rate_among_completed": (
+            counts["certified_at_historical_radius"] / completed_count
+            if completed_count else None),
         "runtime_seconds": {
             "mean": statistics.fmean(runtimes),
             "median": statistics.median(runtimes),
