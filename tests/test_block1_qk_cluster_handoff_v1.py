@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+import torch
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -43,3 +44,34 @@ def test_rigorous_float32_checker_is_not_misreported_for_fp64():
     assert '"executed": False' in source
     assert "restricted to frozen float32 witnesses" in source
     assert "analytic_fp64_reserve_checked" in source
+
+
+def test_qk_4d_fresh_rows_use_generator_axis_one():
+    rows = torch.arange(
+        4 * (handoff.EXPECTED_INPUT_GENERATORS + handoff.EXPECTED_QK_FRESH),
+        dtype=torch.float64).reshape(
+            4, handoff.EXPECTED_INPUT_GENERATORS + handoff.EXPECTED_QK_FRESH,
+            1, 1)
+    # This is the previous bug: dimension zero is the four-head axis.
+    erroneous = rows[
+        handoff.EXPECTED_INPUT_GENERATORS:
+        handoff.EXPECTED_INPUT_GENERATORS + handoff.EXPECTED_QK_FRESH]
+    assert erroneous.numel() == 0
+
+    selected = handoff._select_native_fresh_rows(
+        rows, handoff.EXPECTED_INPUT_GENERATORS + handoff.EXPECTED_QK_FRESH)
+    assert selected.shape == (4, handoff.EXPECTED_QK_FRESH, 1, 1)
+    assert torch.equal(
+        selected, rows[:, handoff.EXPECTED_INPUT_GENERATORS:, :, :])
+
+
+def test_qk_fresh_row_selector_3d_fallback_and_fail_closed_checks():
+    total = handoff.EXPECTED_INPUT_GENERATORS + handoff.EXPECTED_QK_FRESH
+    rows = torch.arange(total, dtype=torch.float64).reshape(total, 1, 1)
+    selected = handoff._select_native_fresh_rows(rows, total)
+    assert selected.shape == (handoff.EXPECTED_QK_FRESH, 1, 1)
+    assert torch.equal(selected, rows[handoff.EXPECTED_INPUT_GENERATORS:])
+    with pytest.raises(RuntimeError, match="generator count differs"):
+        handoff._select_native_fresh_rows(rows, total - 1)
+    with pytest.raises(RuntimeError, match="unsupported QK generator-row rank"):
+        handoff._select_native_fresh_rows(torch.zeros(total, 1), total)

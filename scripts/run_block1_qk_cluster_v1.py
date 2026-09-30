@@ -106,6 +106,31 @@ def _mpfr_spot(q, k, raw_qk, reserve) -> dict:
         raw_qk.zonotope_w[0, 1, 0, 0], float(reserve.max()))
 
 
+def _select_native_fresh_rows(rows: torch.Tensor,
+                              native_generator_count: int) -> torch.Tensor:
+    expected_total = EXPECTED_INPUT_GENERATORS + EXPECTED_QK_FRESH
+    if native_generator_count != expected_total:
+        raise RuntimeError(
+            f"native QK generator count differs: {native_generator_count} "
+            f"!= {expected_total}")
+    start, stop = EXPECTED_INPUT_GENERATORS, expected_total
+    if rows.ndim == 3:
+        generator_axis = 0
+        selected = rows[start:stop, :, :]
+    elif rows.ndim == 4:
+        generator_axis = 1
+        selected = rows[:, start:stop, :, :]
+    else:
+        raise RuntimeError(f"unsupported QK generator-row rank: {rows.ndim}")
+    if selected.numel() == 0:
+        raise RuntimeError("native QK fresh-row selection is empty")
+    if selected.shape[generator_axis] != EXPECTED_QK_FRESH:
+        raise RuntimeError(
+            "native QK fresh-row selection count differs: "
+            f"{selected.shape[generator_axis]} != {EXPECTED_QK_FRESH}")
+    return selected
+
+
 def execute(input_path: Path, output_path: Path, report_path: Path,
             expected_sha256: str, device_index: int) -> dict:
     if output_path.exists() or report_path.exists():
@@ -171,9 +196,8 @@ def execute(input_path: Path, output_path: Path, report_path: Path,
                 * (2 * sound._gamma(1) + sound.FP64_U))
             score_low = qk_low * scale - scale_reserve
             score_high = qk_high * scale + scale_reserve
-            native_fresh_rows = sound._generator_rows(raw_qk)[
-                EXPECTED_INPUT_GENERATORS:
-                EXPECTED_INPUT_GENERATORS + EXPECTED_QK_FRESH]
+            native_fresh_rows = _select_native_fresh_rows(
+                sound._generator_rows(raw_qk), raw_qk.num_error_terms)
             minimum_native_fresh_radius = float(native_fresh_rows.min())
             all_finite = bool(
                 torch.isfinite(qk.zonotope_w).all()
