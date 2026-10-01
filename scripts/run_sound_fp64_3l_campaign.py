@@ -70,6 +70,19 @@ def _verified_result(path: Path) -> dict:
         if (result.get("scientific_evaluation_complete") is not True
                 or result.get("classification") != expected):
             raise RuntimeError(f"completed campaign result status differs: {path}")
+    elif result.get("terminal_status") == "UNCERTIFIED_DOMAIN_FAILURE":
+        diagnostic = result.get("domain_failure_diagnostic")
+        if (result.get("scientific_evaluation_complete") is not True
+                or result.get("certified_at_historical_radius") is not False
+                or result.get("classification") !=
+                "FAILED_AT_HISTORICAL_RADIUS"
+                or result.get("failure_category") !=
+                "SOUND_LAYERNORM_DOMAIN_FAILURE"
+                or result.get("generic_fallback_count") != 0
+                or not isinstance(diagnostic, dict)
+                or diagnostic.get("reason_code") !=
+                finish3l.LAYERNORM_DOMAIN_REASON):
+            raise RuntimeError(f"domain-failed campaign result status differs: {path}")
     elif result.get("terminal_status") == "FAIL_CLOSED":
         if (result.get("scientific_evaluation_complete") is not False
                 or result.get("certified_at_historical_radius") is not None
@@ -460,43 +473,90 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
                 or report["fixture_token_ids"] != row["token_ids"]
                 or report["fixture_rho_hex"] != candidate.hex()):
             raise RuntimeError("property/model/source identity differs at output")
-        lower = float(report["final_sound_margin"])
-        record = {
-            "schema": RESULT_SCHEMA, "terminal_status": "COMPLETE",
-            "property_id": property_id,
-            "benchmark_ordinal": int(row["benchmark_ordinal"]),
-            "sentence_ordinal": int(row["sentence_ordinal"]),
-            "token_position": int(row["token_position"]),
-            "historical_candidate_radius": candidate,
-            "historical_candidate_radius_hex": candidate.hex(),
-            "candidate_source": CANDIDATE_RADIUS_SOURCE,
-            "clean_label": int(row["clean_label"]),
-            "target_comparison": [int(row["clean_label"]),
-                                  1 - int(row["clean_label"])],
-            "final_sound_lower_margin": lower,
-            "final_sound_upper_margin": float(
-                report["final_sound_margin_upper"]),
-            "certified_at_historical_radius": lower > 0,
-            "scientific_evaluation_complete": True,
-            "classification": ("CERTIFIED_AT_HISTORICAL_RADIUS" if lower > 0
-                               else "FAILED_AT_HISTORICAL_RADIUS"),
-            "numerical_widening": float(report["numerical_widening"]),
-            "max_numerical_native_ratio": float(
-                report["max_numerical_native_ratio"]),
-            "final_generator_count": int(report["final_generator_count"]),
-            "runtime_seconds": time.perf_counter() - started,
-            "peak_gpu_allocated_bytes": int(report["peak_allocated_bytes"]),
-            "peak_gpu_reserved_bytes": int(report["peak_reserved_bytes"]),
-            "peak_cpu_rss_bytes": int(resource.getrusage(
-                resource.RUSAGE_SELF).ru_maxrss) * 1024,
-            "failure_stage": None, "failure_reason": None,
-            "certificate_sha256": cluster_common.sha256(certificate),
-            "certificate_report_sha256": cluster_common.sha256(
-                certificate_report),
-            "binary_search_performed": False,
-            "verifier_evaluations": 1,
-            "generic_fallback_count": 0,
-        }
+        if (report.get("verdict") ==
+                "CORET_SOUND_FP64_3L_UNCERTIFIED_DOMAIN_FAILURE"):
+            diagnostic = report.get("domain_failure")
+            if (not isinstance(diagnostic, dict)
+                    or diagnostic.get("reason_code") !=
+                    finish3l.LAYERNORM_DOMAIN_REASON
+                    or diagnostic.get("domain_admissible") is not False
+                    or report.get("generic_fallback_count") != 0):
+                raise RuntimeError("LayerNorm domain-failure evidence differs")
+            record = {
+                "schema": RESULT_SCHEMA,
+                "terminal_status": "UNCERTIFIED_DOMAIN_FAILURE",
+                "property_id": property_id,
+                "benchmark_ordinal": int(row["benchmark_ordinal"]),
+                "sentence_ordinal": int(row["sentence_ordinal"]),
+                "token_position": int(row["token_position"]),
+                "historical_candidate_radius": candidate,
+                "historical_candidate_radius_hex": candidate.hex(),
+                "candidate_source": CANDIDATE_RADIUS_SOURCE,
+                "clean_label": int(row["clean_label"]),
+                "target_comparison": [int(row["clean_label"]),
+                                      1 - int(row["clean_label"])],
+                "final_sound_lower_margin": None,
+                "certified_at_historical_radius": False,
+                "scientific_evaluation_complete": True,
+                "classification": "FAILED_AT_HISTORICAL_RADIUS",
+                "failure_category": "SOUND_LAYERNORM_DOMAIN_FAILURE",
+                "domain_failure_diagnostic": diagnostic,
+                "numerical_widening": None,
+                "max_numerical_native_ratio": None,
+                "final_generator_count": int(
+                    report["final_generator_count"]),
+                "runtime_seconds": time.perf_counter() - started,
+                "peak_gpu_allocated_bytes": int(
+                    report["peak_allocated_bytes"]),
+                "peak_gpu_reserved_bytes": int(
+                    report["peak_reserved_bytes"]),
+                "peak_cpu_rss_bytes": int(resource.getrusage(
+                    resource.RUSAGE_SELF).ru_maxrss) * 1024,
+                "failure_stage": stage,
+                "failure_reason": finish3l.LAYERNORM_DOMAIN_REASON,
+                "binary_search_performed": False,
+                "verifier_evaluations": 1,
+                "generic_fallback_count": 0,
+            }
+        else:
+            lower = float(report["final_sound_margin"])
+            record = {
+                "schema": RESULT_SCHEMA, "terminal_status": "COMPLETE",
+                "property_id": property_id,
+                "benchmark_ordinal": int(row["benchmark_ordinal"]),
+                "sentence_ordinal": int(row["sentence_ordinal"]),
+                "token_position": int(row["token_position"]),
+                "historical_candidate_radius": candidate,
+                "historical_candidate_radius_hex": candidate.hex(),
+                "candidate_source": CANDIDATE_RADIUS_SOURCE,
+                "clean_label": int(row["clean_label"]),
+                "target_comparison": [int(row["clean_label"]),
+                                      1 - int(row["clean_label"])],
+                "final_sound_lower_margin": lower,
+                "final_sound_upper_margin": float(
+                    report["final_sound_margin_upper"]),
+                "certified_at_historical_radius": lower > 0,
+                "scientific_evaluation_complete": True,
+                "classification": ("CERTIFIED_AT_HISTORICAL_RADIUS"
+                                   if lower > 0 else
+                                   "FAILED_AT_HISTORICAL_RADIUS"),
+                "numerical_widening": float(report["numerical_widening"]),
+                "max_numerical_native_ratio": float(
+                    report["max_numerical_native_ratio"]),
+                "final_generator_count": int(report["final_generator_count"]),
+                "runtime_seconds": time.perf_counter() - started,
+                "peak_gpu_allocated_bytes": int(report["peak_allocated_bytes"]),
+                "peak_gpu_reserved_bytes": int(report["peak_reserved_bytes"]),
+                "peak_cpu_rss_bytes": int(resource.getrusage(
+                    resource.RUSAGE_SELF).ru_maxrss) * 1024,
+                "failure_stage": None, "failure_reason": None,
+                "certificate_sha256": cluster_common.sha256(certificate),
+                "certificate_report_sha256": cluster_common.sha256(
+                    certificate_report),
+                "binary_search_performed": False,
+                "verifier_evaluations": 1,
+                "generic_fallback_count": 0,
+            }
     except Exception as error:
         memory = _cuda_memory_snapshot(device)
         for name in ("certificate.pt", "certificate_report.json"):
@@ -520,6 +580,7 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
             "scientific_evaluation_complete": False,
             "classification": "INFRASTRUCTURE_FAILURE",
             "failure_category": _failure_category(error),
+            "domain_failure_diagnostic": None,
             "numerical_widening": None,
             "max_numerical_native_ratio": None,
             "final_generator_count": None,

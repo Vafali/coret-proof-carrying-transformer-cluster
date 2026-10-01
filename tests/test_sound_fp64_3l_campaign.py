@@ -330,6 +330,40 @@ def test_property_failure_is_atomic_fail_closed_and_not_retried(
     assert again == result and path.read_bytes() == before
 
 
+def test_layernorm_domain_failure_is_scientific_noncertification(
+        monkeypatch, tmp_path):
+    manifest, _, historical, identity = _manifest_and_plan()
+    row = campaign._resolve_campaign_input(
+        manifest["properties"][0], historical, identity)
+    diagnostic = {
+        "reason_code": campaign.finish3l.LAYERNORM_DOMAIN_REASON,
+        "label": "block2_post_attention",
+        "minimum_token_index": 1,
+        "minimum_coordinate_index": 7,
+        "sound_variance_lower": -0.125,
+        "domain_admissible": False,
+    }
+    path = tmp_path / "properties" / row["property_id"] / "result.json"
+    campaign._atomic_json(path, {
+        "schema": campaign.RESULT_SCHEMA,
+        "terminal_status": "UNCERTIFIED_DOMAIN_FAILURE",
+        "scientific_evaluation_complete": True,
+        "certified_at_historical_radius": False,
+        "classification": "FAILED_AT_HISTORICAL_RADIUS",
+        "failure_category": "SOUND_LAYERNORM_DOMAIN_FAILURE",
+        "domain_failure_diagnostic": diagnostic,
+        "generic_fallback_count": 0,
+    })
+    result = campaign._verified_result(path)
+    assert result["terminal_status"] == "UNCERTIFIED_DOMAIN_FAILURE"
+    assert result["scientific_evaluation_complete"] is True
+    assert result["certified_at_historical_radius"] is False
+    assert result["classification"] == "FAILED_AT_HISTORICAL_RADIUS"
+    assert result["failure_category"] == "SOUND_LAYERNORM_DOMAIN_FAILURE"
+    assert result["domain_failure_diagnostic"] == diagnostic
+    assert result["generic_fallback_count"] == 0
+
+
 def test_campaign_status_counts_exclude_infrastructure_from_scientific_failure():
     rows = [
         {"scientific_evaluation_complete": True,

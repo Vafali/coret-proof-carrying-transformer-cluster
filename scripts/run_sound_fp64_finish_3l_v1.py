@@ -41,6 +41,165 @@ EXPECTED_INPUT_SHA256 = (
 EXPECTED_REPORT_SHA256 = (
     "cc6d644a551dfc0beee8284a5c1ee5b94f12d9453d9a700e813735fa35565f74")
 LAYER_NORM_EPSILON = 1e-12
+LAYERNORM_DOMAIN_REASON = "SOUND_FP64_LAYERNORM_VARIANCE_DOMAIN_FAILURE"
+
+
+def _layernorm_variance_state(residual, proof, label: str):
+    """Build the exact native pre-sqrt variance and audit its domain.
+
+    Diagnostics never replace DeepT's relational square transformer and never
+    participate in the domain decision.
+    """
+    weights = residual.zonotope_w
+    if weights.ndim != 3 or weights.shape[-1] != 128:
+        raise RuntimeError(f"{label}: malformed LayerNorm input shape")
+    token_count, width = int(weights.shape[1]), int(weights.shape[2])
+    if (int(proof.num_tokens) != token_count
+            or len(proof.ids) != residual.num_error_terms
+            or len(proof.masks) != residual.num_error_terms
+            or len(proof.reasons) != residual.num_error_terms):
+        raise RuntimeError(f"{label}: malformed LayerNorm provenance")
+    if not bool(torch.isfinite(weights).all()):
+        raise RuntimeError(f"{label}: malformed nonfinite LayerNorm input")
+    low_ranges, high_ranges = sound._ranges(residual)
+    if (tuple(low_ranges.shape) != (residual.num_error_terms,)
+            or tuple(high_ranges.shape) != (residual.num_error_terms,)
+            or not bool(torch.isfinite(low_ranges).all()
+                        and torch.isfinite(high_ranges).all())
+            or bool((low_ranges > high_ranges).any())):
+        raise RuntimeError(f"{label}: malformed LayerNorm ranges")
+    structural.validate_support(residual, proof, token_axis=1)
+
+    average = torch.ones((width, width), dtype=torch.float64,
+                         device=residual.device) / width
+    centered = residual.add(residual.matmul(average).multiply(-1.0))
+    variance = centered.square_and_sum_and_repeat().multiply(1.0 / width)
+    variance_low, variance_high = variance.concretize()
+    variance_center = variance.zonotope_w[0]
+    expected_shape = (token_count, width)
+    if (tuple(variance_low.shape) != expected_shape
+            or tuple(variance_high.shape) != expected_shape
+            or tuple(variance_center.shape) != expected_shape
+            or not bool(torch.isfinite(variance_low).all()
+                        and torch.isfinite(variance_high).all()
+                        and torch.isfinite(variance_center).all())
+            or bool((variance_low > variance_high).any())):
+        raise RuntimeError(f"{label}: malformed LayerNorm variance enclosure")
+
+    flat_index = int(torch.argmin(variance_low).item())
+    token_index, coordinate_index = divmod(flat_index, width)
+    variance_min = float(variance_low[token_index, coordinate_index])
+    center_at_min = float(variance_center[token_index, coordinate_index])
+
+    diagnostics = {
+        "reason_code": LAYERNORM_DOMAIN_REASON,
+        "label": label,
+        "input_shape": list(weights.shape),
+        "token_count": token_count,
+        "hidden_dimension": width,
+        "generator_count": int(residual.num_error_terms),
+        "minimum_token_index": token_index,
+        "minimum_coordinate_index": coordinate_index,
+        "nominal_centered_second_moment": float(
+            centered.zonotope_w[0, token_index].square().mean()),
+        "variance_affine_center": center_at_min,
+        "variance_lower_support": center_at_min - variance_min,
+        "variance_upper_support": (
+            float(variance_high[token_index, coordinate_index])
+            - center_at_min),
+        "sound_variance_lower": variance_min,
+        "sound_variance_upper_at_minimum": float(
+            variance_high[token_index, coordinate_index]),
+        "layernorm_epsilon": LAYER_NORM_EPSILON,
+        "sqrt_input_lower": variance_min + LAYER_NORM_EPSILON,
+        "native_sqrt_threshold": LAYER_NORM_EPSILON,
+        "sqrt_safety_margin": variance_min,
+        "domain_admissible": variance_min > 0,
+    }
+    if variance_min <= 0:
+        # This independent interval decomposition is diagnostic only. It
+        # bounds the exact centered variance attributable to explicit FP64
+        # generators; the authoritative domain remains the relational lower.
+        numerical_reasons = {
+            "fp64_roundoff_coordinate_box",
+            "sound_fp64_coordinate_box_replacement_with_numerical",
+        }
+        rows = centered.zonotope_w[1:, token_index, :]
+        native_indices = [
+            index for index, reason in enumerate(proof.reasons)
+            if reason not in numerical_reasons]
+        numerical_indices = [
+            index for index, reason in enumerate(proof.reasons)
+            if reason in numerical_reasons]
+
+        def contribution(indices):
+            if not indices:
+                zero = torch.zeros_like(centered.zonotope_w[0, token_index])
+                return zero, zero
+            index = torch.tensor(
+                indices, dtype=torch.long, device=residual.device)
+            selected = rows.index_select(0, index)
+            selected_low = low_ranges.index_select(
+                0, index).reshape(-1, 1)
+            selected_high = high_ranges.index_select(
+                0, index).reshape(-1, 1)
+            return (torch.minimum(selected * selected_low,
+                                  selected * selected_high).sum(dim=0),
+                    torch.maximum(selected * selected_low,
+                                  selected * selected_high).sum(dim=0))
+
+        native_delta_low, native_delta_high = contribution(native_indices)
+        numerical_delta_low, numerical_delta_high = contribution(
+            numerical_indices)
+        centered_center = centered.zonotope_w[0, token_index]
+        plain_low = centered_center + native_delta_low
+        plain_high = centered_center + native_delta_high
+        plain_square_lower = torch.where(
+            (plain_low <= 0) & (plain_high >= 0),
+            torch.zeros_like(plain_low),
+            torch.minimum(plain_low.square(), plain_high.square()))
+        plain_abs = torch.maximum(plain_low.abs(), plain_high.abs())
+        numerical_abs = torch.maximum(
+            numerical_delta_low.abs(), numerical_delta_high.abs())
+        diagnostics.update({
+            "plain_relational_variance_lower_bound": float(
+                plain_square_lower.mean()),
+            "plain_relational_bound_method": (
+                "coordinate_interval_lower_bound_from_non_numerical_generators"),
+            "numerical_variance_widening_upper_bound": float((
+                2.0 * plain_abs * numerical_abs
+                + numerical_abs.square()).mean()),
+            "native_generator_count": len(native_indices),
+            "numerical_generator_count": len(numerical_indices),
+        })
+    return centered, variance, diagnostics
+
+
+def _domain_failure_report(authenticated, clean_label, nominal_logits,
+                           diagnostics, rows, reductions, dispatch,
+                           total_started):
+    """Return a controlled, non-certificate outcome for a valid domain miss."""
+    return {
+        "schema": SCHEMA,
+        "verdict": "CORET_SOUND_FP64_3L_UNCERTIFIED_DOMAIN_FAILURE",
+        "authenticated_input": authenticated,
+        "fixture_token_ids": list(prefix.FIXTURE_TOKEN_IDS),
+        "fixture_rho_hex": float(prefix.FIXTURE_RHO).hex(),
+        "clean_label": clean_label,
+        "nominal_logits": nominal_logits,
+        "domain_failure": diagnostics,
+        "stages": rows,
+        "reductions": reductions,
+        "dispatch_counts_before_domain_failure": dict(dispatch.counts),
+        "generic_fallback_count": 0,
+        "final_sound_margin": None,
+        "final_generator_count": diagnostics["generator_count"],
+        "total_seconds": time.perf_counter() - total_started,
+        "peak_allocated_bytes": int(torch.cuda.max_memory_allocated()),
+        "peak_reserved_bytes": int(torch.cuda.max_memory_reserved()),
+        "scientific_properties": 0,
+        "bound_calls": 0,
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -369,14 +528,19 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             residual, residual_proof = sound._maybe_reduce(
                 residual, residual_proof, "b2_attention_residual", reductions)
             width = residual.word_embedding_size
-            average = torch.ones((width, width), dtype=torch.float64,
-                                 device=device) / width
-            centered = residual.add(residual.matmul(average).multiply(-1.0))
-            variance = centered.square_and_sum_and_repeat().multiply(1.0 / width)
+            if dispatch.generic_family_invocations != 0:
+                raise RuntimeError(
+                    "generic fallback reached before Block-2 LayerNorm")
+            centered, variance, variance_diagnostics = \
+                _layernorm_variance_state(
+                    residual, residual_proof, "block2_post_attention")
             variance_low, variance_high = variance.concretize()
-            variance_min = float(variance_low.min())
-            if variance_min <= 0:
-                raise RuntimeError("Block-2 post-attention variance is nonpositive")
+            variance_min = variance_diagnostics["sound_variance_lower"]
+            if not variance_diagnostics["domain_admissible"]:
+                return _domain_failure_report(
+                    authenticated, clean_label, nominal_logits,
+                    variance_diagnostics, rows, reductions, dispatch,
+                    total_started)
             delegate._hidden = residual_proof
             delegate._attention_output = residual_proof
             raw_post = dispatch.layer_norm(
@@ -418,6 +582,7 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 "sqrt_domain_margin": variance_min + LAYER_NORM_EPSILON,
                 "generator_count": row["generator_count"],
                 "numerical_native_ratio": row["numerical_native_ratio"],
+                "variance_diagnostics": variance_diagnostics,
             }
 
             # FFN, ReLU, residual, and final LayerNorm.
@@ -456,13 +621,19 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 reserve=sound._add_reserve(ffn, post_aligned))
             output_input, output_input_proof = sound._maybe_reduce(
                 output_input, output_input_proof, "b2_ffn_residual", reductions)
-            centered = output_input.add(
-                output_input.matmul(average).multiply(-1.0))
-            variance = centered.square_and_sum_and_repeat().multiply(1.0 / width)
+            if dispatch.generic_family_invocations != 0:
+                raise RuntimeError(
+                    "generic fallback reached before Block-2 LayerNorm")
+            centered, variance, variance_diagnostics = \
+                _layernorm_variance_state(
+                    output_input, output_input_proof, "block2_output")
             variance_low, variance_high = variance.concretize()
-            variance_min = float(variance_low.min())
-            if variance_min <= 0:
-                raise RuntimeError("Block-2 output variance is nonpositive")
+            variance_min = variance_diagnostics["sound_variance_lower"]
+            if not variance_diagnostics["domain_admissible"]:
+                return _domain_failure_report(
+                    authenticated, clean_label, nominal_logits,
+                    variance_diagnostics, rows, reductions, dispatch,
+                    total_started)
             delegate._layer_norm_index = 6
             delegate._post_attention = output_input_proof
             delegate._relu = output_input_proof
@@ -508,6 +679,7 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 "sqrt_domain_margin": variance_min + LAYER_NORM_EPSILON,
                 "generator_count": row["generator_count"],
                 "numerical_native_ratio": row["numerical_native_ratio"],
+                "variance_diagnostics": variance_diagnostics,
             }
 
             # Exact frozen pooler and direct classifier margin.
