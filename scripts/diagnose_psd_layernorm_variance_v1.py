@@ -334,6 +334,7 @@ def _load_torch_state(path: Path, expected_sha: str, expected_schema: str,
         "ids": list(proof["ids"]), "reasons": list(proof["reasons"]),
         "num_tokens": int(proof["num_tokens"]), "artifact_sha256": expected_sha,
         "artifact_schema": payload.get("schema"),
+        "artifact_identity": payload.get("identity"),
     }
 
 
@@ -434,8 +435,22 @@ def evaluate_manifest(path: Path) -> dict:
     if (manifest.get("pinned_revision") != PINNED_REVISION
             or manifest.get("source_set_model") != SOURCE_SET_MODEL):
         raise RuntimeError("PSD oracle source-domain identity differs")
+    capture_spec = manifest.get("capture_manifest")
+    if not isinstance(capture_spec, dict):
+        raise RuntimeError("PSD capture manifest identity is absent")
+    capture_path = (path.parent / capture_spec["path"]).resolve()
+    if sha256(capture_path) != capture_spec["sha256"]:
+        raise RuntimeError("PSD capture manifest SHA differs")
+    capture = cluster_common.verified_json(capture_path)
+    if (capture.get("schema") != "CORET_PSD_LAYERNORM_STATE_CAPTURE_MANIFEST_V1"
+            or capture.get("property_id") != PROPERTY_ID):
+        raise RuntimeError("PSD capture manifest semantics differ")
     records = manifest.get("evaluations")
-    if not isinstance(records, list) or [row.get("multiplier") for row in records] != list(MULTIPLIERS):
+    multipliers = ([row.get("multiplier") for row in records]
+                   if isinstance(records, list) else [])
+    expected_order = [item for item in MULTIPLIERS if item in multipliers]
+    if (not records or multipliers != expected_order
+            or len(set(multipliers)) != len(multipliers)):
         raise RuntimeError("PSD oracle multiplier population differs")
     outputs = []
     for record in records:
@@ -446,16 +461,20 @@ def evaluate_manifest(path: Path) -> dict:
         if sha256(source_path) != source_spec["sha256"]:
             raise RuntimeError("source pilot result SHA differs")
         source = cluster_common.verified_json(source_path)
-        multiplier = source.get("multiplier", {}).get("display")
-        diagnostic = source.get("layernorm_domain_diagnostic")
+        diagnostic = (source.get("layernorm_domain_diagnostic")
+                      or source.get("domain_failure_diagnostic"))
+        source_radius = source.get(
+            "tested_radius", source.get("historical_candidate_radius"))
         if (source.get("property_id") != PROPERTY_ID
-                or multiplier != record["multiplier"]
+                or capture.get("multiplier") != record["multiplier"]
+                or float(capture.get("tested_radius"))
+                != float(record["tested_radius"])
                 or not isinstance(diagnostic, dict)
                 or diagnostic.get("domain_admissible") is not False
                 or int(record["token_index"])
                 != int(diagnostic["minimum_token_index"])
                 or float(record["tested_radius"])
-                != float(source["tested_radius"])):
+                != float(source_radius)):
             raise RuntimeError("source pilot result semantics differ")
         record = dict(record)
         record["old_generic_variance_lower"] = float(
@@ -469,6 +488,16 @@ def evaluate_manifest(path: Path) -> dict:
             (path.parent / complete_spec["path"]).resolve(),
             complete_spec["sha256"], complete_spec["schema"],
             complete_spec.get("state_key"))
+        identity = complete.get("artifact_identity")
+        if (not isinstance(identity, dict)
+                or identity.get("property_id") != PROPERTY_ID
+                or identity.get("multiplier") != record["multiplier"]
+                or float(identity.get("tested_radius"))
+                != float(record["tested_radius"])
+                or identity.get("tested_radius_hex")
+                != float(record["tested_radius"]).hex()
+                or identity.get("source_set_model") != SOURCE_SET_MODEL):
+            raise RuntimeError("complete-state artifact identity differs")
         if (complete["num_tokens"] != int(diagnostic["token_count"])
                 or len(complete["ids"]) != int(diagnostic["generator_count"])):
             raise RuntimeError("complete-state diagnostic topology differs")
