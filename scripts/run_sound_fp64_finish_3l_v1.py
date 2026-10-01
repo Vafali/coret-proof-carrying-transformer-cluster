@@ -177,7 +177,7 @@ def _layernorm_variance_state(residual, proof, label: str):
 
 def _domain_failure_report(authenticated, clean_label, nominal_logits,
                            diagnostics, rows, reductions, dispatch,
-                           total_started):
+                           total_started, experimental_layernorm=None):
     """Return a controlled, non-certificate outcome for a valid domain miss."""
     return {
         "schema": SCHEMA,
@@ -199,6 +199,7 @@ def _domain_failure_report(authenticated, clean_label, nominal_logits,
         "peak_reserved_bytes": int(torch.cuda.max_memory_reserved()),
         "scientific_properties": 0,
         "bound_calls": 0,
+        "experimental_psd_layernorm": experimental_layernorm,
     }
 
 
@@ -338,7 +339,8 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             expected_input_sha256: str = EXPECTED_INPUT_SHA256,
             expected_report_sha256: str = EXPECTED_REPORT_SHA256,
             run_representative_mpfr: bool = True,
-            expected_num_tokens: int | None = None) -> dict:
+            expected_num_tokens: int | None = None,
+            experimental_post_attention_layernorm=None) -> dict:
     if expected_num_tokens is None:
         expected_num_tokens = len(prefix.FIXTURE_TOKEN_IDS)
     authenticated = authenticate(
@@ -389,6 +391,7 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             dispatch = production.NativeProductionDispatch(delegate=delegate)
             measurements, reductions, rows, spots = [], [], [], []
             layernorms = {}
+            experimental_layernorm = None
             block_input, block_input_proof = hidden, hidden_proof
 
             # Q/K and precise attention scores.
@@ -537,19 +540,37 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             variance_low, variance_high = variance.concretize()
             variance_min = variance_diagnostics["sound_variance_lower"]
             if not variance_diagnostics["domain_admissible"]:
-                return _domain_failure_report(
-                    authenticated, clean_label, nominal_logits,
-                    variance_diagnostics, rows, reductions, dispatch,
-                    total_started)
-            delegate._hidden = residual_proof
-            delegate._attention_output = residual_proof
-            raw_post = dispatch.layer_norm(
-                residual, parameters["attention_ln"], "standard")
-            raw_post_proof = structural.get_support(raw_post)
+                if experimental_post_attention_layernorm is None:
+                    return _domain_failure_report(
+                        authenticated, clean_label, nominal_logits,
+                        variance_diagnostics, rows, reductions, dispatch,
+                        total_started)
+                experiment = experimental_post_attention_layernorm(
+                    residual=residual, proof=residual_proof,
+                    normalizer=parameters["attention_ln"], delegate=delegate,
+                    diagnostics=variance_diagnostics)
+                required = {"output", "proof", "reserve", "certificate"}
+                if not isinstance(experiment, dict) or not required <= set(experiment):
+                    raise RuntimeError(
+                        "experimental LayerNorm result fields differ")
+                raw_post = experiment["output"]
+                raw_post_proof = experiment["proof"]
+                ln_reserve = experiment["reserve"]
+                experimental_layernorm = experiment["certificate"]
+                dispatch.counts["LayerNorm"] += 1
+                dispatch.certificates.append(experimental_layernorm)
+            else:
+                delegate._hidden = residual_proof
+                delegate._attention_output = residual_proof
+                raw_post = dispatch.layer_norm(
+                    residual, parameters["attention_ln"], "standard")
+                raw_post_proof = structural.get_support(raw_post)
+                ln_reserve = None
             ln_ops = 16 * 128 * (residual.num_error_terms + 1) ** 2 + 4096
-            ln_reserve = sound._reserve_from_majorant(
-                sound._layernorm_majorant(residual, parameters["attention_ln"]),
-                ln_ops)
+            if ln_reserve is None:
+                ln_reserve = sound._reserve_from_majorant(
+                    sound._layernorm_majorant(
+                        residual, parameters["attention_ln"]), ln_ops)
             post, post_proof = sound._inject(
                 raw_post, raw_post_proof, [residual],
                 "b2_post_attention_layernorm", ln_ops, measurements,
@@ -578,11 +599,19 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 "block2_post_attention_layernorm", post, post_proof, started,
                 rows)
             layernorms["post_attention"] = {
-                "sound_variance_lower": variance_min,
-                "sqrt_domain_margin": variance_min + LAYER_NORM_EPSILON,
+                "sound_variance_lower": (
+                    experimental_layernorm["minimum_psd_lower"]
+                    if experimental_layernorm is not None else variance_min),
+                "generic_sound_variance_lower": variance_min,
+                "sqrt_domain_margin": (
+                    experimental_layernorm["minimum_psd_lower"]
+                    + LAYER_NORM_EPSILON
+                    if experimental_layernorm is not None
+                    else variance_min + LAYER_NORM_EPSILON),
                 "generator_count": row["generator_count"],
                 "numerical_native_ratio": row["numerical_native_ratio"],
                 "variance_diagnostics": variance_diagnostics,
+                "experimental_psd_certificate": experimental_layernorm,
             }
 
             # FFN, ReLU, residual, and final LayerNorm.
@@ -633,7 +662,7 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 return _domain_failure_report(
                     authenticated, clean_label, nominal_logits,
                     variance_diagnostics, rows, reductions, dispatch,
-                    total_started)
+                    total_started, experimental_layernorm)
             delegate._layer_norm_index = 6
             delegate._post_attention = output_input_proof
             delegate._relu = output_input_proof
@@ -789,6 +818,7 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                     run_representative_mpfr,
                 "dispatch_counts": dict(dispatch.counts),
                 "generic_fallback_count": 0,
+                "experimental_psd_layernorm": experimental_layernorm,
                 "total_seconds": total_seconds,
                 "peak_allocated_bytes": int(torch.cuda.max_memory_allocated()),
                 "peak_reserved_bytes": int(torch.cuda.max_memory_reserved()),
