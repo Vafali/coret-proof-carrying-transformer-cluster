@@ -5,6 +5,7 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -27,6 +28,9 @@ def load(name, path):
 CAPTURE = load("psd_capture", "scripts/run_sound_fp64_3l_psd_state_capture_v1.py")
 ORACLE = load("psd_oracle_capture_test",
               "scripts/diagnose_psd_layernorm_variance_v1.py")
+RUNNER = load(
+    "psd_next_layernorm_capture_runner_test",
+    "scripts/run_sound_fp64_3l_psd_layernorm_experiment_v1.py")
 
 
 def state_payload(generators=2):
@@ -250,3 +254,89 @@ def test_tests_do_not_call_scientific_evaluator(monkeypatch, tmp_path):
     state = state_payload(1)
     CAPTURE.validate_snapshot(state)
     assert CAPTURE._state_hashes(state)["generator_count"] == 1
+
+
+def test_next_layernorm_capture_is_oracle_compatible_and_hash_bound(tmp_path):
+    payload = state_payload(2)
+    state = SimpleNamespace(
+        zonotope_w=payload["weights"],
+        error_term_range_low=payload["range_low"],
+        error_term_range_high=payload["range_high"],
+        num_error_terms=2, num_words=1, word_embedding_size=128,
+        device=torch.device("cpu"))
+    proof = RUNNER.experiment.structural.SupportProof(
+        tuple(payload["proof"]["masks"]), tuple(payload["proof"]["ids"]),
+        tuple(payload["proof"]["reasons"]), 1)
+    diagnostic = {
+        "reason_code": RUNNER.finish3l.LAYERNORM_DOMAIN_REASON,
+        "label": RUNNER.NEXT_STAGE,
+        "domain_admissible": False,
+        "minimum_token_index": 0,
+        "minimum_coordinate_index": 0,
+        "token_count": 1,
+        "hidden_dimension": 128,
+        "generator_count": 2,
+        "native_generator_count": 1,
+        "numerical_generator_count": 1,
+        "nominal_centered_second_moment": 1.0,
+        "variance_affine_center": 0.5,
+        "variance_lower_support": 2.5,
+        "variance_upper_support": 2.5,
+        "sound_variance_lower": -2.0,
+        "sound_variance_upper_at_minimum": 3.0,
+        "layernorm_epsilon": 1e-12,
+        "sqrt_input_lower": -2.0,
+        "native_sqrt_threshold": 1e-12,
+        "sqrt_safety_margin": -2.0,
+        "plain_relational_variance_lower_bound": 0.1,
+        "numerical_variance_widening_upper_bound": 2.1,
+    }
+    captured = RUNNER.NextLayerNormFailureCapture()
+    captured(
+        state=state, proof=proof, label=RUNNER.NEXT_STAGE,
+        layernorm_index=RUNNER.NEXT_LAYERNORM_INDEX,
+        diagnostics=diagnostic, pre_reduction_state=state,
+        pre_reduction_proof=proof,
+        reduction_label=RUNNER.NEXT_REDUCTION_LABEL)
+    result_path = tmp_path / "scientific_execution" / "properties" / \
+        RUNNER.PROPERTY_ID / "result.json"
+    result_path.parent.mkdir(parents=True)
+    write_json(result_path, {
+        "schema": RUNNER.campaign.RESULT_SCHEMA,
+        "terminal_status": "UNCERTIFIED_DOMAIN_FAILURE",
+        "property_id": RUNNER.PROPERTY_ID,
+        "historical_candidate_radius": RUNNER.TESTED_RADIUS,
+        "scientific_evaluation_complete": True,
+        "certified_at_historical_radius": False,
+        "classification": "FAILED_AT_HISTORICAL_RADIUS",
+        "failure_category": "SOUND_LAYERNORM_DOMAIN_FAILURE",
+        "failure_stage": "block2_to_margin",
+        "failure_reason": RUNNER.finish3l.LAYERNORM_DOMAIN_REASON,
+        "generic_fallback_count": 0,
+        "domain_failure_diagnostic": diagnostic,
+    })
+    source = {
+        "pinned_deept_revision": ORACLE.PINNED_REVISION,
+        "scientific_manifest_sha256":
+            RUNNER.cluster_common.SCIENTIFIC_MANIFEST_SHA,
+        "production_manifest_sha256":
+            RUNNER.cluster_common.PRODUCTION_MANIFEST_SHA,
+        "source_set_model": ORACLE.SOURCE_SET_MODEL,
+    }
+    record = RUNNER._persist_next_capture(
+        tmp_path, captured, source, result_path)
+    assert record["verified_identity"]["stage_label"] == "block2_output"
+    report = ORACLE.evaluate_manifest(Path(record["oracle_input_path"]))
+    assert [row["variant"] for row in report["results"]] == [
+        "complete", "native_only", "authenticated_pre_reduction"]
+    assert all(row["stage_label"] == "block2_output"
+               and row["layernorm_index"] == 6
+               for row in report["results"])
+
+    manifest_path = Path(record["manifest_path"])
+    manifest = RUNNER.cluster_common.verified_json(manifest_path)
+    manifest.pop("record_sha256")
+    manifest["layernorm_index"] = 5
+    write_json(manifest_path, manifest)
+    with pytest.raises(RuntimeError, match="identity"):
+        RUNNER._verify_next_capture(manifest_path)

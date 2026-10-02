@@ -247,6 +247,127 @@ def test_exception_trace_and_message_persist(tmp_path, monkeypatch):
 def test_production_callback_default_remains_none():
     assert inspect.signature(FINISH.execute).parameters[
         "experimental_post_attention_layernorm"].default is None
+    assert inspect.signature(FINISH.execute).parameters[
+        "experimental_layernorm_failure_capture"].default is None
+
+
+def test_finish_hook_binds_v3_and_later_failure_capture(monkeypatch):
+    harness, _state, _support = _harness(monkeypatch)
+    later = object()
+    observed = {}
+
+    def fake_execute(*_args, **kwargs):
+        observed.update(kwargs)
+        return "unchanged"
+
+    monkeypatch.setattr(RUNNER.finish3l, "execute", fake_execute)
+    with RUNNER._installed_finish_hook(harness, later):
+        assert RUNNER.finish3l.execute() == "unchanged"
+    assert observed["experimental_post_attention_layernorm"] is harness
+    assert observed["experimental_layernorm_failure_capture"] is later
+
+
+class CaptureState:
+    def __init__(self, generators=2):
+        self.zonotope_w = torch.zeros(
+            generators + 1, 1, 128, dtype=torch.float64)
+        self.zonotope_w[0, 0, 0] = 2.0
+        self.zonotope_w[0, 0, 1] = -2.0
+        if generators:
+            self.zonotope_w[1, 0, 0] = 1.5
+            self.zonotope_w[1, 0, 1] = -1.5
+        self.error_term_range_low = torch.full(
+            (generators,), -1.0, dtype=torch.float64)
+        self.error_term_range_high = torch.ones(
+            generators, dtype=torch.float64)
+        self.num_error_terms = generators
+        self.num_words = 1
+        self.word_embedding_size = 128
+        self.device = torch.device("cpu")
+
+
+def capture_proof(generators=2):
+    return RUNNER.experiment.structural.SupportProof(
+        tuple([1] * generators),
+        tuple(f"g{index}" for index in range(generators)),
+        tuple(["native_semantic"] * generators), 1)
+
+
+def next_diagnostic(generators=2):
+    return {
+        "reason_code": FINISH.LAYERNORM_DOMAIN_REASON,
+        "label": RUNNER.NEXT_STAGE,
+        "input_shape": [generators + 1, 1, 128],
+        "token_count": 1,
+        "hidden_dimension": 128,
+        "generator_count": generators,
+        "minimum_token_index": 0,
+        "minimum_coordinate_index": 0,
+        "nominal_centered_second_moment": 1.0,
+        "variance_affine_center": 0.5,
+        "variance_lower_support": 1.5,
+        "variance_upper_support": 1.5,
+        "sound_variance_lower": -1.0,
+        "sound_variance_upper_at_minimum": 2.0,
+        "layernorm_epsilon": 1e-12,
+        "sqrt_input_lower": -1.0,
+        "native_sqrt_threshold": 1e-12,
+        "sqrt_safety_margin": -1.0,
+        "domain_admissible": False,
+        "plain_relational_variance_lower_bound": 0.1,
+        "numerical_variance_widening_upper_bound": 1.1,
+        "native_generator_count": generators,
+        "numerical_generator_count": 0,
+    }
+
+
+def test_next_failure_capture_is_exactly_later_stage_and_authenticates_state():
+    state, support = CaptureState(), capture_proof()
+    captured = RUNNER.NextLayerNormFailureCapture()
+    captured(
+        state=state, proof=support, label=RUNNER.NEXT_STAGE,
+        layernorm_index=RUNNER.NEXT_LAYERNORM_INDEX,
+        diagnostics=next_diagnostic(), pre_reduction_state=state,
+        pre_reduction_proof=support,
+        reduction_label=RUNNER.NEXT_REDUCTION_LABEL)
+    materialized = captured.materialize()
+    assert materialized["stage_label"] == "block2_output"
+    assert materialized["layernorm_index"] == 6
+    assert materialized["reduction_label"] == "b2_ffn_residual"
+    assert torch.equal(
+        materialized["post_last_reduction"]["weights"], state.zonotope_w)
+    assert materialized["post_last_reduction"]["proof"]["ids"] == ["g0", "g1"]
+
+
+@pytest.mark.parametrize(
+    "label,index,reduction",
+    [("block2_post_attention", 5, "b2_attention_residual"),
+     ("block2_output", 5, "b2_ffn_residual"),
+     ("block2_output", 6, "wrong_reduction")])
+def test_next_failure_capture_rejects_wrong_boundary(label, index, reduction):
+    state, support = CaptureState(), capture_proof()
+    captured = RUNNER.NextLayerNormFailureCapture()
+    with pytest.raises(RuntimeError, match="stage/index|semantics"):
+        captured(
+            state=state, proof=support, label=label,
+            layernorm_index=index, diagnostics=next_diagnostic(),
+            pre_reduction_state=state, pre_reduction_proof=support,
+            reduction_label=reduction)
+
+
+def test_next_failure_capture_rejects_malformed_topology():
+    state, support = CaptureState(), capture_proof()
+    captured = RUNNER.NextLayerNormFailureCapture()
+    diagnostic = next_diagnostic()
+    diagnostic["generator_count"] = 3
+    captured(
+        state=state, proof=support, label=RUNNER.NEXT_STAGE,
+        layernorm_index=RUNNER.NEXT_LAYERNORM_INDEX,
+        diagnostics=diagnostic, pre_reduction_state=state,
+        pre_reduction_proof=support,
+        reduction_label=RUNNER.NEXT_REDUCTION_LABEL)
+    with pytest.raises(RuntimeError, match="topology"):
+        captured.materialize()
 
 
 def test_certified_sqrt_range_remains_positive_when_generic_hull_is_negative():

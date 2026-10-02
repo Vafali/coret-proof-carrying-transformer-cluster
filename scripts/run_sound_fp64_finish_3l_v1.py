@@ -340,7 +340,8 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             expected_report_sha256: str = EXPECTED_REPORT_SHA256,
             run_representative_mpfr: bool = True,
             expected_num_tokens: int | None = None,
-            experimental_post_attention_layernorm=None) -> dict:
+            experimental_post_attention_layernorm=None,
+            experimental_layernorm_failure_capture=None) -> dict:
     if expected_num_tokens is None:
         expected_num_tokens = len(prefix.FIXTURE_TOKEN_IDS)
     authenticated = authenticate(
@@ -541,6 +542,15 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             variance_min = variance_diagnostics["sound_variance_lower"]
             if not variance_diagnostics["domain_admissible"]:
                 if experimental_post_attention_layernorm is None:
+                    if experimental_layernorm_failure_capture is not None:
+                        experimental_layernorm_failure_capture(
+                            state=residual, proof=residual_proof,
+                            label="block2_post_attention",
+                            layernorm_index=delegate._layer_norm_index,
+                            diagnostics=variance_diagnostics,
+                            pre_reduction_state=raw_residual,
+                            pre_reduction_proof=residual_proof,
+                            reduction_label="b2_attention_residual")
                     return _domain_failure_report(
                         authenticated, clean_label, nominal_logits,
                         variance_diagnostics, rows, reductions, dispatch,
@@ -648,6 +658,8 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 raw_output_input, output_proof, [ffn, post_aligned],
                 "b2_ffn_residual", 1, measurements,
                 reserve=sound._add_reserve(ffn, post_aligned))
+            pre_output_reduction = output_input
+            pre_output_reduction_proof = output_input_proof
             output_input, output_input_proof = sound._maybe_reduce(
                 output_input, output_input_proof, "b2_ffn_residual", reductions)
             if dispatch.generic_family_invocations != 0:
@@ -659,6 +671,15 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             variance_low, variance_high = variance.concretize()
             variance_min = variance_diagnostics["sound_variance_lower"]
             if not variance_diagnostics["domain_admissible"]:
+                if experimental_layernorm_failure_capture is not None:
+                    experimental_layernorm_failure_capture(
+                        state=output_input, proof=output_input_proof,
+                        label="block2_output",
+                        layernorm_index=delegate._layer_norm_index,
+                        diagnostics=variance_diagnostics,
+                        pre_reduction_state=pre_output_reduction,
+                        pre_reduction_proof=pre_output_reduction_proof,
+                        reduction_label="b2_ffn_residual")
                 return _domain_failure_report(
                     authenticated, clean_label, nominal_logits,
                     variance_diagnostics, rows, reductions, dispatch,

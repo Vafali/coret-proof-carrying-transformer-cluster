@@ -28,6 +28,11 @@ MULTIPLIER = "0.75"
 TESTED_RADIUS = 0.00060791015625
 TESTED_RADIUS_HEX = "0x1.3eb851eb851ecp-11"
 TRACE_SCHEMA = "CORET_PSD_LAYERNORM_INVOCATION_TRACE_V2"
+NEXT_CAPTURE_SCHEMA = "CORET_PSD_NEXT_LAYERNORM_STATE_CAPTURE_V1"
+NEXT_MANIFEST_SCHEMA = "CORET_PSD_NEXT_LAYERNORM_CAPTURE_MANIFEST_V1"
+NEXT_STAGE = "block2_output"
+NEXT_LAYERNORM_INDEX = 6
+NEXT_REDUCTION_LABEL = "b2_ffn_residual"
 
 
 def _atomic_json(path: Path, value: dict) -> dict:
@@ -255,12 +260,277 @@ class LayerNormExperimentHarness:
         }
 
 
+class NextLayerNormFailureCapture:
+    """Semantically passive reference capture for the next domain failure."""
+
+    def __init__(self):
+        self.encounters = 0
+        self.pre_reduction = None
+        self.complete = None
+        self.diagnostics = None
+        self.layernorm_index = None
+        self.reduction_label = None
+
+    def __call__(self, *, state, proof, label, layernorm_index, diagnostics,
+                 pre_reduction_state, pre_reduction_proof, reduction_label):
+        self.encounters += 1
+        if self.encounters != 1:
+            raise RuntimeError("next LayerNorm failure captured more than once")
+        if label != NEXT_STAGE or int(layernorm_index) != NEXT_LAYERNORM_INDEX:
+            raise RuntimeError("next LayerNorm failure stage/index differs")
+        if (reduction_label != NEXT_REDUCTION_LABEL
+                or diagnostics.get("label") != NEXT_STAGE
+                or diagnostics.get("domain_admissible") is not False):
+            raise RuntimeError("next LayerNorm failure semantics differ")
+        self.pre_reduction = (pre_reduction_state, pre_reduction_proof)
+        self.complete = (state, proof)
+        self.diagnostics = dict(diagnostics)
+        self.layernorm_index = int(layernorm_index)
+        self.reduction_label = reduction_label
+
+    def materialize(self) -> dict:
+        if (self.encounters != 1 or self.pre_reduction is None
+                or self.complete is None or self.diagnostics is None):
+            raise RuntimeError("next LayerNorm failure was not captured")
+        pre = capture._snapshot(*self.pre_reduction)
+        post = capture._snapshot(*self.complete)
+        if (self.diagnostics["generator_count"]
+                != int(post["weights"].shape[0] - 1)):
+            raise RuntimeError("next LayerNorm diagnostic topology differs")
+        return {
+            "pre_last_reduction": pre,
+            "post_last_reduction": post,
+            "complete_layernorm_input_alias": "post_last_reduction",
+            "stage_label": NEXT_STAGE,
+            "layernorm_index": NEXT_LAYERNORM_INDEX,
+            "reduction_label": NEXT_REDUCTION_LABEL,
+            "diagnostics": self.diagnostics,
+        }
+
+
+def _relative(path: Path, root: Path) -> str:
+    return os.path.relpath(path.resolve(), root.resolve())
+
+
+def _persist_next_capture(output_root: Path,
+                          captured: NextLayerNormFailureCapture,
+                          source_capture: dict, result_path: Path) -> dict:
+    materialized = captured.materialize()
+    states = {
+        "pre_last_reduction": materialized["pre_last_reduction"],
+        "post_last_reduction": materialized["post_last_reduction"],
+    }
+    identity = {
+        "property_id": PROPERTY_ID,
+        "multiplier": MULTIPLIER,
+        "tested_radius": TESTED_RADIUS,
+        "tested_radius_hex": TESTED_RADIUS_HEX,
+        "stage_label": NEXT_STAGE,
+        "layernorm_index": NEXT_LAYERNORM_INDEX,
+        "pinned_deept_revision": source_capture["pinned_deept_revision"],
+        "scientific_manifest_sha256": source_capture[
+            "scientific_manifest_sha256"],
+        "production_manifest_sha256": source_capture[
+            "production_manifest_sha256"],
+        "source_set_model": source_capture["source_set_model"],
+    }
+    artifact_path = output_root / "next_layernorm_states.pt"
+    capture._write_torch_atomic(artifact_path, {
+        "schema": NEXT_CAPTURE_SCHEMA,
+        "pinned_revision": source_capture["pinned_deept_revision"],
+        "identity": identity,
+        "states": states,
+        "complete_layernorm_input_alias": "post_last_reduction",
+        "reduction_label": NEXT_REDUCTION_LABEL,
+        "diagnostics": materialized["diagnostics"],
+    })
+    variants = []
+    for name, key in (
+            ("pre_last_reduction", "pre_last_reduction"),
+            ("post_last_reduction", "post_last_reduction"),
+            ("complete_layernorm_input", "post_last_reduction")):
+        variants.append({
+            "capture_variant": name, "state_key": key,
+            **capture._state_hashes(states[key]),
+        })
+    manifest_path = output_root / "next_layernorm_capture_manifest.json"
+    manifest = _atomic_json(manifest_path, {
+        "schema": NEXT_MANIFEST_SCHEMA,
+        **identity,
+        "tensor_artifact_path": _relative(artifact_path, output_root),
+        "tensor_artifact_sha256": cluster_common.sha256(artifact_path),
+        "artifact_identity": identity,
+        "result_path": _relative(result_path, output_root),
+        "result_sha256": cluster_common.sha256(result_path),
+        "reduction_label": NEXT_REDUCTION_LABEL,
+        "reduction_applied": (
+            int(states["pre_last_reduction"]["weights"].shape[0])
+            != int(states["post_last_reduction"]["weights"].shape[0])),
+        "diagnostics": materialized["diagnostics"],
+        "variants": variants,
+    })
+    oracle_path = output_root / "next_layernorm_psd_oracle_input.json"
+    oracle_input = _atomic_json(oracle_path, {
+        "schema": "CORET_PSD_LAYERNORM_VARIANCE_INPUT_V1",
+        "property_id": PROPERTY_ID,
+        "pinned_revision": source_capture["pinned_deept_revision"],
+        "source_set_model": source_capture["source_set_model"],
+        "capture_manifest": {
+            "path": _relative(manifest_path, output_root),
+            "sha256": cluster_common.sha256(manifest_path),
+        },
+        "evaluations": [{
+            "property_id": PROPERTY_ID,
+            "multiplier": MULTIPLIER,
+            "tested_radius": TESTED_RADIUS,
+            "stage_label": NEXT_STAGE,
+            "layernorm_index": NEXT_LAYERNORM_INDEX,
+            "token_index": int(materialized["diagnostics"][
+                "minimum_token_index"]),
+            "source_result": {
+                "path": _relative(result_path, output_root),
+                "sha256": cluster_common.sha256(result_path),
+            },
+            "complete_state": {
+                "path": _relative(artifact_path, output_root),
+                "sha256": cluster_common.sha256(artifact_path),
+                "schema": NEXT_CAPTURE_SCHEMA,
+                "state_key": "post_last_reduction",
+            },
+            "pre_reduction_state": {
+                "path": _relative(artifact_path, output_root),
+                "sha256": cluster_common.sha256(artifact_path),
+                "schema": NEXT_CAPTURE_SCHEMA,
+                "state_key": "pre_last_reduction",
+            },
+        }],
+    })
+    verified = _verify_next_capture(manifest_path)
+    return {
+        "artifact_path": str(artifact_path),
+        "artifact_sha256": cluster_common.sha256(artifact_path),
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": cluster_common.sha256(manifest_path),
+        "manifest_record_sha256": manifest["record_sha256"],
+        "oracle_input_path": str(oracle_path),
+        "oracle_input_sha256": cluster_common.sha256(oracle_path),
+        "oracle_input_record_sha256": oracle_input["record_sha256"],
+        "diagnostics": materialized["diagnostics"],
+        "pre_generator_count": int(
+            states["pre_last_reduction"]["weights"].shape[0] - 1),
+        "post_generator_count": int(
+            states["post_last_reduction"]["weights"].shape[0] - 1),
+        "verified_identity": verified,
+    }
+
+
+def _validate_next_failure_result(result: dict) -> dict:
+    diagnostic = result.get("domain_failure_diagnostic")
+    if (result.get("terminal_status") != "UNCERTIFIED_DOMAIN_FAILURE"
+            or result.get("scientific_evaluation_complete") is not True
+            or result.get("certified_at_historical_radius") is not False
+            or result.get("classification") != "FAILED_AT_HISTORICAL_RADIUS"
+            or result.get("failure_category") !=
+            "SOUND_LAYERNORM_DOMAIN_FAILURE"
+            or result.get("failure_stage") != "block2_to_margin"
+            or result.get("failure_reason") != finish3l.LAYERNORM_DOMAIN_REASON
+            or result.get("generic_fallback_count") != 0
+            or not isinstance(diagnostic, dict)
+            or diagnostic.get("reason_code") != finish3l.LAYERNORM_DOMAIN_REASON
+            or diagnostic.get("label") != NEXT_STAGE
+            or diagnostic.get("domain_admissible") is not False):
+        raise RuntimeError("next LayerNorm campaign result semantics differ")
+    return diagnostic
+
+
+def _verify_next_capture(manifest_path: Path) -> dict:
+    manifest = cluster_common.verified_json(manifest_path)
+    if (manifest.get("schema") != NEXT_MANIFEST_SCHEMA
+            or manifest.get("property_id") != PROPERTY_ID
+            or manifest.get("multiplier") != MULTIPLIER
+            or manifest.get("tested_radius") != TESTED_RADIUS
+            or manifest.get("tested_radius_hex") != TESTED_RADIUS_HEX
+            or manifest.get("stage_label") != NEXT_STAGE
+            or manifest.get("layernorm_index") != NEXT_LAYERNORM_INDEX
+            or manifest.get("reduction_label") != NEXT_REDUCTION_LABEL
+            or manifest.get("pinned_deept_revision") !=
+            capture.prefix.PINNED_REVISION
+            or manifest.get("scientific_manifest_sha256") !=
+            cluster_common.SCIENTIFIC_MANIFEST_SHA
+            or manifest.get("production_manifest_sha256") !=
+            cluster_common.PRODUCTION_MANIFEST_SHA
+            or manifest.get("source_set_model") != capture.SOURCE_SET_MODEL):
+        raise RuntimeError("next LayerNorm capture manifest identity differs")
+    artifact_path = (manifest_path.parent
+                     / manifest["tensor_artifact_path"]).resolve()
+    if cluster_common.sha256(artifact_path) != manifest["tensor_artifact_sha256"]:
+        raise RuntimeError("next LayerNorm capture artifact SHA differs")
+    payload = capture.sound.torch.load(
+        artifact_path, map_location="cpu", weights_only=False)
+    if (payload.get("schema") != NEXT_CAPTURE_SCHEMA
+            or payload.get("pinned_revision") !=
+            manifest.get("pinned_deept_revision")
+            or payload.get("identity") != manifest.get("artifact_identity")
+            or payload.get("complete_layernorm_input_alias") !=
+            "post_last_reduction"
+            or payload.get("reduction_label") != NEXT_REDUCTION_LABEL):
+        raise RuntimeError("next LayerNorm capture artifact identity differs")
+    states = payload.get("states")
+    if set(states or {}) != {"pre_last_reduction", "post_last_reduction"}:
+        raise RuntimeError("next LayerNorm capture state inventory differs")
+    variants = manifest.get("variants")
+    expected = (
+        ("pre_last_reduction", "pre_last_reduction"),
+        ("post_last_reduction", "post_last_reduction"),
+        ("complete_layernorm_input", "post_last_reduction"),
+    )
+    if (not isinstance(variants, list) or len(variants) != len(expected)
+            or [(row.get("capture_variant"), row.get("state_key"))
+                for row in variants] != list(expected)):
+        raise RuntimeError("next LayerNorm capture variant inventory differs")
+    for variant, (_name, key) in zip(variants, expected):
+        actual = capture._state_hashes(states[key])
+        for field, value in actual.items():
+            if variant.get(field) != value:
+                raise RuntimeError(
+                    f"next LayerNorm capture hash differs: {key}/{field}")
+    pre_count = int(states["pre_last_reduction"]["weights"].shape[0] - 1)
+    post_count = int(states["post_last_reduction"]["weights"].shape[0] - 1)
+    if manifest.get("reduction_applied") is not (pre_count != post_count):
+        raise RuntimeError("next LayerNorm reduction predicate differs")
+    result_path = (manifest_path.parent / manifest["result_path"]).resolve()
+    if cluster_common.sha256(result_path) != manifest["result_sha256"]:
+        raise RuntimeError("next LayerNorm result SHA differs")
+    result = campaign._verified_result(result_path)
+    diagnostic = _validate_next_failure_result(result)
+    if (manifest.get("diagnostics") != diagnostic
+            or payload.get("diagnostics") != diagnostic
+            or int(diagnostic.get("generator_count", -1)) != post_count
+            or int(diagnostic.get("native_generator_count", -1))
+            + int(diagnostic.get("numerical_generator_count", -1))
+            != post_count):
+        raise RuntimeError("next LayerNorm diagnostic/state identity differs")
+    return {
+        "schema": NEXT_MANIFEST_SCHEMA,
+        "property_id": PROPERTY_ID,
+        "stage_label": NEXT_STAGE,
+        "layernorm_index": NEXT_LAYERNORM_INDEX,
+        "reduction_label": NEXT_REDUCTION_LABEL,
+        "pre_generator_count": pre_count,
+        "post_generator_count": post_count,
+        "tensor_artifact_sha256": manifest["tensor_artifact_sha256"],
+        "result_sha256": manifest["result_sha256"],
+    }
+
+
 @contextlib.contextmanager
-def _installed_finish_hook(harness: LayerNormExperimentHarness):
+def _installed_finish_hook(harness: LayerNormExperimentHarness,
+                           next_capture=None):
     original = finish3l.execute
 
     def wrapped(*args, **kwargs):
         kwargs["experimental_post_attention_layernorm"] = harness
+        kwargs["experimental_layernorm_failure_capture"] = next_capture
         try:
             return original(*args, **kwargs)
         except Exception as error:
@@ -331,13 +601,14 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
         raise
     harness = LayerNormExperimentHarness(
         PROPERTY_ID, TESTED_RADIUS, expected_state_identity, oracle_identity)
+    next_capture = NextLayerNormFailureCapture()
     execution_root = output_root / "scientific_execution"
     device = f"cuda:{device_index}"
     campaign._property_boundary_cleanup(device)
     campaign_error = None
     result = None
     try:
-        with _installed_finish_hook(harness):
+        with _installed_finish_hook(harness, next_capture):
             result = campaign.execute_property(row, execution_root, device)
     except Exception as error:
         campaign_error = error
@@ -383,6 +654,9 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
     if not result_path.is_file():
         raise RuntimeError("PSD experiment property result is absent")
     result = cluster_common.verified_json(result_path)
+    _validate_next_failure_result(result)
+    next_capture_record = _persist_next_capture(
+        output_root, next_capture, capture_identity, result_path)
     return _atomic_json(output_root / "experiment_report.json", {
         "schema": SCHEMA,
         "verdict": "CORET_PSD_LAYERNORM_EXPERIMENT_COMPLETE",
@@ -412,6 +686,7 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
         "next_failure_stage": result.get("failure_stage"),
         "next_failure_reason": result.get("failure_reason"),
         "generic_fallback_count": result.get("generic_fallback_count"),
+        "next_layernorm_capture": next_capture_record,
         "scientific_queries": 1,
         "bound_calls": 1,
     })

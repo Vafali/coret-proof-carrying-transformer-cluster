@@ -33,6 +33,13 @@ INVENTORY_SCHEMA = "CORET_PSD_LAYERNORM_VARIANCE_INVENTORY_V1"
 PROPERTY_ID = "deept_table7_stdln3_s001_line1794_tok11"
 PINNED_REVISION = "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf"
 SOURCE_SET_MODEL = "p100_linf_shared_generator_ids_cartesian_ranges"
+CAPTURE_MANIFEST_SCHEMAS = {
+    "CORET_PSD_LAYERNORM_STATE_CAPTURE_MANIFEST_V1",
+    "CORET_PSD_NEXT_LAYERNORM_CAPTURE_MANIFEST_V1",
+}
+NEXT_CAPTURE_MANIFEST_SCHEMA = "CORET_PSD_NEXT_LAYERNORM_CAPTURE_MANIFEST_V1"
+NEXT_STAGE = "block2_output"
+NEXT_LAYERNORM_INDEX = 6
 MULTIPLIERS = ("0.95", "0.90", "0.75", "0.50", "0.25")
 NUMERICAL_REASONS = {
     "fp64_roundoff_coordinate_box",
@@ -386,6 +393,8 @@ def evaluate_variant(record: dict, name: str, state: dict,
     header = {
         "property_id": record["property_id"], "multiplier": record["multiplier"],
         "variant": name, "token_index": token,
+        "stage_label": record.get("stage_label"),
+        "layernorm_index": record.get("layernorm_index"),
         "state_artifact_sha256": state["artifact_sha256"],
         "generator_ids_sha256": hashlib.sha256(json.dumps(
             variant["ids"], separators=(",", ":")).encode()).hexdigest(),
@@ -442,9 +451,16 @@ def evaluate_manifest(path: Path) -> dict:
     if sha256(capture_path) != capture_spec["sha256"]:
         raise RuntimeError("PSD capture manifest SHA differs")
     capture = cluster_common.verified_json(capture_path)
-    if (capture.get("schema") != "CORET_PSD_LAYERNORM_STATE_CAPTURE_MANIFEST_V1"
+    capture_schema = capture.get("schema")
+    if (capture_schema not in CAPTURE_MANIFEST_SCHEMAS
             or capture.get("property_id") != PROPERTY_ID):
         raise RuntimeError("PSD capture manifest semantics differ")
+    if capture_schema == NEXT_CAPTURE_MANIFEST_SCHEMA:
+        if (capture.get("stage_label") != NEXT_STAGE
+                or int(capture.get("layernorm_index", -1)) !=
+                NEXT_LAYERNORM_INDEX
+                or capture.get("reduction_label") != "b2_ffn_residual"):
+            raise RuntimeError("next LayerNorm capture identity differs")
     records = manifest.get("evaluations")
     multipliers = ([row.get("multiplier") for row in records]
                    if isinstance(records, list) else [])
@@ -477,6 +493,15 @@ def evaluate_manifest(path: Path) -> dict:
                 != float(source_radius)):
             raise RuntimeError("source pilot result semantics differ")
         record = dict(record)
+        if capture_schema == NEXT_CAPTURE_MANIFEST_SCHEMA:
+            if (record.get("stage_label") != NEXT_STAGE
+                    or int(record.get("layernorm_index", -1)) !=
+                    NEXT_LAYERNORM_INDEX
+                    or diagnostic.get("label") != NEXT_STAGE):
+                raise RuntimeError("next LayerNorm oracle record differs")
+        else:
+            record.setdefault("stage_label", capture.get("stage_label"))
+            record.setdefault("layernorm_index", capture.get("layernorm_index"))
         record["old_generic_variance_lower"] = float(
             diagnostic["sound_variance_lower"])
         record["old_sound_variance_lower"] = float(
@@ -496,7 +521,11 @@ def evaluate_manifest(path: Path) -> dict:
                 != float(record["tested_radius"])
                 or identity.get("tested_radius_hex")
                 != float(record["tested_radius"]).hex()
-                or identity.get("source_set_model") != SOURCE_SET_MODEL):
+                or identity.get("source_set_model") != SOURCE_SET_MODEL
+                or (capture_schema == NEXT_CAPTURE_MANIFEST_SCHEMA
+                    and (identity.get("stage_label") != NEXT_STAGE
+                         or int(identity.get("layernorm_index", -1)) !=
+                         NEXT_LAYERNORM_INDEX))):
             raise RuntimeError("complete-state artifact identity differs")
         if (complete["num_tokens"] != int(diagnostic["token_count"])
                 or len(complete["ids"]) != int(diagnostic["generator_count"])):
