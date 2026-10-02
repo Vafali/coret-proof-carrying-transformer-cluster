@@ -447,7 +447,9 @@ def propose_farkas(problem: ReluCancellationProblem,
 
 
 def solve_exact_relu_milp(problem: ReluCancellationProblem,
-                          timeout: float) -> tuple[object, dict]:
+                          timeout: float,
+                          excluded_patterns: list[list[bool]] | None = None
+                          ) -> tuple[object, dict]:
     started = time.perf_counter()
     n, u = problem.n, len(problem.unstable)
     total = n + u + u
@@ -469,6 +471,19 @@ def solve_exact_relu_milp(problem: ReluCancellationProblem,
         columns.extend((n + local, n + u + local)); values.extend((1.0, -float(problem.lower_exact[neuron])))
         lower.append(-np.inf); upper.append(
             problem.h["center"][neuron] - float(problem.lower_exact[neuron]))
+    for pattern in excluded_patterns or []:
+        if len(pattern) != problem.m:
+            raise RuntimeError("excluded activation pattern length differs")
+        # sum(active a)-sum(inactive a) <= number_active-1 excludes exactly
+        # this binary pattern while retaining every other pattern.
+        row = len(lower)
+        active_count = 0
+        for local, neuron in enumerate(problem.unstable):
+            active = bool(pattern[neuron])
+            rows.append(row); columns.append(n + u + local)
+            values.append(1.0 if active else -1.0)
+            active_count += int(active)
+        lower.append(-np.inf); upper.append(float(active_count - 1))
     nonlinear = coo_matrix((values, (rows, columns)), shape=(len(lower), total)).tocsr()
     equality = hstack((csr_matrix(problem.E), csr_matrix((127, u))), format="csr")
     constraints = LinearConstraint(
@@ -488,6 +503,7 @@ def solve_exact_relu_milp(problem: ReluCancellationProblem,
         "solver_status": int(result.status), "solver_message": str(result.message),
         "runtime_seconds": time.perf_counter() - started,
         "activation_pattern_sha256": None,
+        "excluded_pattern_count": len(excluded_patterns or []),
     }
 
 
@@ -496,17 +512,218 @@ def _ratios(items) -> list[Fraction]:
             for item in items]
 
 
-def exact_fixed_pattern_witness(problem: ReluCancellationProblem,
-                                candidate: np.ndarray, pattern: list[bool],
-                                output: Path, timeout: float) -> tuple[dict | None, dict]:
+def fixed_pattern_interior_candidate(
+        problem: ReluCancellationProblem, pattern: list[bool]) -> tuple[np.ndarray | None, dict]:
+    """Maximize deterministic normalized box/sign slack for one pattern."""
     model = problem.fixed_pattern_model(pattern)
     exact_problem = model.problem()
-    certificate, status = zero.construct_exact_zero_certificate(
-        exact_problem, candidate, 127, variant_name="exact_relu_fixed_pattern",
-        solve_timeout_seconds=timeout)
-    if certificate is None:
+    Aeq, beq = exact_problem["A"], -exact_problem["b"]
+    n = problem.n
+    rows, columns, values, rhs = [], [], [], []
+    widths = problem.source["high"] - problem.source["low"]
+    source_scales = np.where(widths > 0.0, widths, 0.0)
+    for index, (low, high, scale) in enumerate(zip(
+            problem.source["low"], problem.source["high"], source_scales)):
+        row = len(rhs); rows.extend((row, row)); columns.extend((index, n))
+        values.extend((-1.0, float(scale))); rhs.append(-float(low))
+        row = len(rhs); rows.extend((row, row)); columns.extend((index, n))
+        values.extend((1.0, float(scale))); rhs.append(float(high))
+    bound_widths = np.array([
+        float(upper - lower) for lower, upper in
+        zip(problem.lower_exact, problem.upper_exact)])
+    for neuron, active in enumerate(pattern):
+        scale = max(bound_widths[neuron], np.finfo(np.float64).tiny)
+        nz = np.flatnonzero(problem.h["generators"][:, neuron])
+        row = len(rhs); rows.extend([row] * len(nz)); columns.extend(nz.tolist())
+        if active:
+            values.extend((-problem.h["generators"][nz, neuron]).tolist())
+            rows.append(row); columns.append(n); values.append(scale)
+            rhs.append(float(problem.h["center"][neuron]))
+        else:
+            values.extend(problem.h["generators"][nz, neuron].tolist())
+            rows.append(row); columns.append(n); values.append(scale)
+            rhs.append(-float(problem.h["center"][neuron]))
+    Aub = coo_matrix((values, (rows, columns)),
+                     shape=(len(rhs), n + 1)).tocsr()
+    E = hstack((csr_matrix(Aeq), csr_matrix((Aeq.shape[0], 1))), format="csr")
+    objective = np.zeros(n + 1); objective[-1] = -1.0
+    started = time.perf_counter()
+    result = linprog(
+        objective, A_ub=Aub, b_ub=np.asarray(rhs), A_eq=E, b_eq=beq,
+        bounds=list(zip(problem.source["low"], problem.source["high"]))
+        + [(None, 1.0)], method="highs", options={"presolve": True})
+    candidate = (np.asarray(result.x[:n]) if result.success else None)
+    if result.success:
+        source_lower_slack = candidate - problem.source["low"]
+        source_upper_slack = problem.source["high"] - candidate
+        h_value = problem.h["center"] + candidate @ problem.h["generators"]
+        sign_slack = np.where(np.asarray(pattern), h_value, -h_value)
+        source_violation = max(
+            0.0,
+            -float(source_lower_slack.min()) if source_lower_slack.size else 0.0,
+            -float(source_upper_slack.min()) if source_upper_slack.size else 0.0)
+        sign_violation = max(0.0, -float(sign_slack.min()))
+    else:
+        source_lower_slack = source_upper_slack = sign_slack = np.array([])
+        source_violation = sign_violation = None
+    metrics = {
+        "solver_backend": "scipy.optimize.linprog/highs_max_common_slack",
+        "feasible": bool(result.success), "solver_status": int(result.status),
+        "solver_message": str(result.message),
+        "runtime_seconds": time.perf_counter() - started,
+        "best_common_slack_t": float(result.x[-1]) if result.success else None,
+        "maximum_numerical_equality_residual": (
+            float(np.abs(Aeq @ candidate - beq).max(initial=0.0))
+            if result.success else None),
+        "minimum_source_box_slack": (float(np.minimum(
+            source_lower_slack, source_upper_slack).min())
+            if result.success and source_lower_slack.size else None),
+        "maximum_source_box_violation": source_violation,
+        "minimum_activation_sign_slack": (
+            float(sign_slack.min()) if result.success else None),
+        "maximum_activation_sign_violation": sign_violation,
+    }
+    return candidate, metrics
+
+
+def _basis_candidates(problem: ReluCancellationProblem,
+                      model_problem: dict, candidate: np.ndarray,
+                      pattern: list[bool], maximum: int = 32) -> list[np.ndarray]:
+    A = model_problem["A"]
+    widths = problem.source["high"] - problem.source["low"]
+    box_slack = np.where(
+        widths > 0.0,
+        np.minimum(candidate - problem.source["low"],
+                   problem.source["high"] - candidate) / widths,
+        0.0)
+    h = (problem.h["center"]
+         + candidate @ problem.h["generators"])
+    sign_margin = np.maximum(
+        np.where(np.asarray(pattern), h, -h), 0.0)
+    scale = np.maximum(
+        np.array([float(upper - lower) for lower, upper in
+                  zip(problem.lower_exact, problem.upper_exact)]),
+        np.finfo(np.float64).tiny)
+    normalized_margin = sign_margin / scale
+    sensitivity = np.abs(problem.h["generators"]) @ (
+        1.0 / np.maximum(normalized_margin, 2.0 ** -40))
+    sign_quality = 1.0 / (1.0 + sensitivity * np.maximum(widths, 0.0))
+    quality = np.maximum(box_slack, 0.0) * sign_quality
+    free = np.flatnonzero(widths > 0.0)
+    if not len(free):
+        return [np.empty(0, dtype=np.int64)]
+    bases, seen = [], set()
+    exponents = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0)
+    for attempt in range(maximum * 2):
+        exponent = exponents[attempt % len(exponents)]
+        jitter = 1.0 + 1e-6 * np.sin(
+            (free.astype(np.float64) + 1.0) * (attempt + 1.0))
+        weights = np.maximum(quality[free], 2.0 ** -40) ** exponent * jitter
+        _q, r, pivots = qr(
+            A[:, free] * weights[None, :], mode="economic", pivoting=True)
+        threshold = (max(A.shape) * np.finfo(np.float64).eps
+                     * (abs(r[0, 0]) if r.size else 0.0))
+        rank = int(np.sum(np.abs(np.diag(r)) > threshold))
+        columns = free[np.asarray(pivots[:rank], dtype=np.int64)]
+        key = tuple(sorted(int(value) for value in columns))
+        if key not in seen:
+            seen.add(key); bases.append(columns)
+        if len(bases) >= maximum:
+            break
+    return bases
+
+
+def _attempt_exact_basis(problem: ReluCancellationProblem, model,
+                         candidate: np.ndarray, pattern: list[bool],
+                         columns: np.ndarray, timeout: float) -> tuple[list[Fraction] | None, dict]:
+    exact_problem = model.problem()
+    A = exact_problem["A"]
+    rank = len(columns)
+    if rank == 0:
+        selected_rows = np.empty(0, dtype=np.int64)
+    else:
+        _q, _r, pivots = qr(A[:, columns].T, mode="economic", pivoting=True)
+        selected_rows = np.asarray(pivots[:rank], dtype=np.int64)
+    values = [_fraction(value) for value in candidate]
+    residual = exact_problem["exact_residual"](values)
+    integer_rows, integer_rhs = [], []
+    try:
+        for row in selected_rows:
+            rhs = -residual[int(row)] + sum(
+                (exact_problem["exact_coefficient"](int(row), int(column))
+                 * values[int(column)] for column in columns), Fraction(0))
+            coefficients = [exact_problem["exact_coefficient"](
+                int(row), int(column)) for column in columns]
+            integers, _metadata = zero._dyadic_row_to_integers(
+                [*coefficients, rhs])
+            integer_rows.append(integers[:-1]); integer_rhs.append(integers[-1])
+        if rank:
+            solution, solver = zero._solve_exact_integer_system(
+                integer_rows, integer_rhs, timeout, "relu_fixed_pattern_basis")
+            for column, value in zip(columns, solution):
+                values[int(column)] = value
+        else:
+            solver = {"solver_api": "empty_exact_correction_system",
+                      "selected_system_shape": [0, 0]}
+        outside = [index for index, value in enumerate(values)
+                   if not (_fraction(problem.source["low"][index]) <= value
+                           <= _fraction(problem.source["high"][index]))]
+        if outside:
+            return None, {"failure_reason": "SOURCE_BOX_VIOLATION",
+                          "outside_count": len(outside),
+                          "first_outside": outside[0], **solver}
+        problem.verify_pattern(values, pattern)
+        replay = model.exact_replay(values)
+        return values, {"verified": True, **solver, **replay}
+    except Exception as error:
+        return None, {"failure_reason": f"{type(error).__name__}: {error}"}
+
+
+def exact_fixed_pattern_witness(problem: ReluCancellationProblem,
+                                candidate: np.ndarray, pattern: list[bool],
+                                output: Path, timeout: float,
+                                maximum_bases: int = 32,
+                                basis_override=None) -> tuple[dict | None, dict]:
+    model = problem.fixed_pattern_model(pattern)
+    model_problem = model.problem()
+    bases = (list(basis_override) if basis_override is not None else
+             _basis_candidates(problem, model_problem, candidate, pattern,
+                               maximum_bases))
+    attempts = []
+    values = None
+    deadline = time.perf_counter() + timeout
+    for ordinal, columns in enumerate(bases[:maximum_bases]):
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0.0:
+            attempts.append({"ordinal": ordinal,
+                             "failure_reason": "EXACT_RECOVERY_TIMEOUT"})
+            break
+        recovered, evidence = _attempt_exact_basis(
+            problem, model, candidate, pattern,
+            np.asarray(columns, dtype=np.int64), remaining)
+        attempts.append({
+            "ordinal": ordinal,
+            "selected_column_count": len(columns),
+            "selected_columns_sha256": _sha_json(
+                [int(value) for value in columns]),
+            **evidence,
+        })
+        if recovered is not None:
+            values = recovered
+            break
+    status = {
+        "attempted_basis_count": len(attempts), "basis_attempts": attempts,
+        "verified": values is not None,
+        "failure_reasons": [row.get("failure_reason") for row in attempts
+                            if row.get("failure_reason")],
+        "best_failed_basis": (attempts[-1] if attempts and values is None
+                              else None),
+        "terminal_recovery_status": (
+            "EXACT_AUTHENTICATED_RELU_WITNESS_VERIFIED" if values is not None
+            else "FIXED_PATTERN_EXACT_WITNESS_NOT_FOUND"),
+    }
+    if values is None:
         return None, status
-    values = _ratios(certificate["xi_rationals"])
     signs = problem.verify_pattern(values, pattern)
     replay = model.exact_replay(values)
     witness = {
@@ -514,7 +731,9 @@ def exact_fixed_pattern_witness(problem: ReluCancellationProblem,
         "problem_sha256": problem.identity_sha256,
         "activation_pattern": pattern,
         "activation_pattern_sha256": _sha_json(pattern),
-        "xi_rationals": certificate["xi_rationals"],
+        "xi_rationals": [
+            {"numerator": str(value.numerator),
+             "denominator": str(value.denominator)} for value in values],
         "source_ids_sha256": _sha_json(problem.source["ids"]),
         "source_box_check": True, **signs, **replay,
     }
@@ -546,7 +765,8 @@ def verify_exact_relu_witness(problem: ReluCancellationProblem,
 
 def execute(manifest: Path, output: Path, certificate_dir: Path,
             lp_timeout: float, milp_timeout: float,
-            exact_timeout: float) -> dict:
+            exact_timeout: float, maximum_patterns: int = 8,
+            maximum_bases: int = 32) -> dict:
     started = time.perf_counter()
     payload, identity, token = frontier._load_capture(manifest)
     weight, bias, parameter_identity = frontier._load_ffn_second_parameters(identity)
@@ -560,7 +780,8 @@ def execute(manifest: Path, output: Path, certificate_dir: Path,
                  "exact_farkas_verified": False,
                  "certificate_path": None, "certificate_sha256": None})
     milp_record = {"attempted": False, "solver_status": None,
-                   "runtime_seconds": 0.0, "activation_pattern_sha256": None}
+                   "runtime_seconds": 0.0, "activation_pattern_sha256": None,
+                   "patterns": [], "alternative_pattern_fallback": True}
     witness_record = {"attempted": False, "verified": False,
                       "maximum_exact_residual": None,
                       "source_box_check": None, "activation_sign_check": None,
@@ -582,25 +803,60 @@ def execute(manifest: Path, output: Path, certificate_dir: Path,
                          "certificate_sha256": cluster_common.sha256(path)})
             final_status = FINAL_HULL_EXCLUDED
     else:
-        result, milp_record = solve_exact_relu_milp(problem, milp_timeout)
-        if result.success:
+        excluded_patterns = []
+        first_milp_infeasible = False
+        final_status = FINAL_INCONCLUSIVE
+        total_bases = 0
+        failure_reasons = []
+        best_common_slack = None
+        best_failed_basis = None
+        for pattern_ordinal in range(maximum_patterns):
+            result, current_milp = solve_exact_relu_milp(
+                problem, milp_timeout, excluded_patterns)
+            milp_record["attempted"] = True
+            milp_record["solver_status"] = current_milp["solver_status"]
+            milp_record["solver_message"] = current_milp["solver_message"]
+            milp_record["runtime_seconds"] += current_milp["runtime_seconds"]
+            if not result.success:
+                first_milp_infeasible = (pattern_ordinal == 0
+                                         and int(result.status) == 2)
+                break
             pattern = [False] * problem.m
             for index in problem.active: pattern[index] = True
             for local, index in enumerate(problem.unstable):
                 pattern[index] = bool(round(result.x[problem.n + len(problem.unstable) + local]))
-            milp_record["activation_pattern_sha256"] = _sha_json(pattern)
+            pattern_sha = _sha_json(pattern)
+            milp_record["activation_pattern_sha256"] = pattern_sha
+            candidate, fixed_lp = fixed_pattern_interior_candidate(problem, pattern)
+            pattern_row = {
+                "ordinal": pattern_ordinal,
+                "activation_pattern_sha256": pattern_sha,
+                "fixed_pattern_lp": fixed_lp,
+            }
+            if fixed_lp["best_common_slack_t"] is not None:
+                best_common_slack = max(
+                    best_common_slack if best_common_slack is not None else -math.inf,
+                    fixed_lp["best_common_slack_t"])
             witness_record["attempted"] = True
-            path = certificate_dir / "exact_relu_cancellation_witness.json"
-            try:
-                witness, status = exact_fixed_pattern_witness(
-                    problem, np.asarray(result.x[:problem.n]), pattern,
-                    path, exact_timeout)
-            except RuntimeError as error:
-                witness, status = None, {"reason": str(error)}
-            witness_record["exact_reconstruction"] = status
-            if witness is None:
-                final_status = FINAL_INCONCLUSIVE
-            else:
+            witness = None
+            status = {"verified": False, "failure_reasons": [
+                "FIXED_PATTERN_NUMERICAL_LP_INFEASIBLE"]}
+            if candidate is not None:
+                path = certificate_dir / "exact_relu_cancellation_witness.json"
+                try:
+                    witness, status = exact_fixed_pattern_witness(
+                        problem, candidate, pattern, path, exact_timeout,
+                        maximum_bases=maximum_bases)
+                except RuntimeError as error:
+                    witness, status = None, {"verified": False,
+                                             "failure_reasons": [str(error)]}
+            pattern_row["exact_reconstruction"] = status
+            milp_record["patterns"].append(pattern_row)
+            total_bases += int(status.get("attempted_basis_count", 0))
+            failure_reasons.extend(status.get("failure_reasons", []))
+            if status.get("best_failed_basis") is not None:
+                best_failed_basis = status["best_failed_basis"]
+            if witness is not None:
                 witness_record.update({
                     "verified": True, "maximum_exact_residual": "0",
                     "source_box_check": True, "activation_sign_check": True,
@@ -608,10 +864,36 @@ def execute(manifest: Path, output: Path, certificate_dir: Path,
                     "witness_sha256": cluster_common.sha256(path),
                 })
                 final_status = FINAL_EXACT_FEASIBLE
-        elif int(result.status) == 2:
+                break
+            excluded_patterns.append(pattern)
+        if first_milp_infeasible:
             final_status = FINAL_MILP_UNCERTIFIED
-        else:
-            final_status = FINAL_INCONCLUSIVE
+        witness_record.update({
+            "number_of_patterns_attempted": len(milp_record["patterns"]),
+            "number_of_bases_attempted": total_bases,
+            "numerical_fixed_pattern_lp_feasible": any(
+                row["fixed_pattern_lp"]["feasible"]
+                for row in milp_record["patterns"]),
+            "best_common_slack_t": best_common_slack,
+            "best_failed_basis": best_failed_basis,
+            "failure_reasons": failure_reasons,
+            "maximum_numerical_equality_residual": min(
+                (row["fixed_pattern_lp"]["maximum_numerical_equality_residual"]
+                 for row in milp_record["patterns"]
+                 if row["fixed_pattern_lp"]["feasible"]), default=None),
+            "minimum_source_box_violation": min(
+                (row["fixed_pattern_lp"]["maximum_source_box_violation"]
+                 for row in milp_record["patterns"]
+                 if row["fixed_pattern_lp"]["feasible"]), default=None),
+            "minimum_activation_sign_violation": min(
+                (row["fixed_pattern_lp"]["maximum_activation_sign_violation"]
+                 for row in milp_record["patterns"]
+                 if row["fixed_pattern_lp"]["feasible"]), default=None),
+            "terminal_recovery_status": (
+                "EXACT_AUTHENTICATED_RELU_WITNESS_VERIFIED"
+                if witness_record["verified"] else
+                "FIXED_PATTERN_EXACT_WITNESS_NOT_FOUND"),
+        })
     interpretations = {
         FINAL_HULL_EXCLUDED: "RELU_RELAXATION_CAUSALLY_RESPONSIBLE",
         FINAL_EXACT_FEASIBLE: "RELU_RELAXATION_EXONERATED_SEND_SEARCH_UPSTREAM",
@@ -649,12 +931,15 @@ def main() -> int:
     parser.add_argument("--lp-timeout-seconds", type=float, default=300.0)
     parser.add_argument("--milp-timeout-seconds", type=float, default=600.0)
     parser.add_argument("--exact-solve-timeout-seconds", type=float, default=180.0)
+    parser.add_argument("--maximum-patterns", type=int, default=8)
+    parser.add_argument("--maximum-bases", type=int, default=32)
     args = parser.parse_args()
     report = execute(args.manifest.resolve(), args.output.resolve(),
                      args.certificate_dir.resolve(),
                      args.lp_timeout_seconds,
                      args.milp_timeout_seconds,
-                     args.exact_solve_timeout_seconds)
+                     args.exact_solve_timeout_seconds,
+                     args.maximum_patterns, args.maximum_bases)
     print(json.dumps(report, indent=2, sort_keys=True), flush=True)
     return 0
 
