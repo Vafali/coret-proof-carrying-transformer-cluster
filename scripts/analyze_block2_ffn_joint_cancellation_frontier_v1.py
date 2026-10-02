@@ -17,6 +17,7 @@ import json
 import math
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 import io
@@ -53,6 +54,17 @@ EXPECTED_MANIFEST_SCHEMA = "CORET_BLOCK2_FFN_FRONTIER_MANIFEST_V1"
 EXPECTED_ARTIFACT_SCHEMA = "CORET_BLOCK2_FFN_FRONTIER_CAPTURE_V1"
 FFN_SECOND_PARAMETER = "bert.encoder.layer.2.output.dense"
 NUMERICAL_REASONS = zero.oracle.NUMERICAL_REASONS
+DEFAULT_PARAMETER_SOURCE = {
+    "kind": "pinned_deept_git_objects",
+    "pinned_revision": zero.oracle.PINNED_REVISION,
+    "scientific_manifest_sha256": cluster_common.SCIENTIFIC_MANIFEST_SHA,
+    "production_manifest_sha256": cluster_common.PRODUCTION_MANIFEST_SHA,
+    "checkpoint_git_path": stagea.CHECKPOINT_GIT_PATH,
+    "checkpoint_sha256": stagea.CHECKPOINT_SHA256,
+    "config_git_path": stagea.CONFIG_GIT_PATH,
+    "config_sha256":
+        "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523",
+}
 
 
 def _fraction(value) -> Fraction:
@@ -202,6 +214,11 @@ def _load_capture(manifest_path: Path) -> tuple[dict, dict, int]:
     identity = {
         "schema": EXPECTED_MANIFEST_SCHEMA,
         "property_id": manifest["property_id"],
+        "pinned_deept_revision": manifest["pinned_deept_revision"],
+        "scientific_manifest_sha256": manifest[
+            "scientific_manifest_sha256"],
+        "production_manifest_sha256": manifest[
+            "production_manifest_sha256"],
         "state_count": len(payload["states"]),
         "shared_pair_identity_verified": True,
         "manifest_path": str(manifest_path.resolve()),
@@ -215,24 +232,75 @@ def _load_capture(manifest_path: Path) -> tuple[dict, dict, int]:
     return payload, identity, token
 
 
-def _load_ffn_second_parameters() -> tuple[np.ndarray, np.ndarray, dict]:
-    raw = stagea._git_blob(adapter.DEEPT_REPOSITORY, stagea.CHECKPOINT_GIT_PATH)
-    if hashlib.sha256(raw).hexdigest() != stagea.CHECKPOINT_SHA256:
-        raise RuntimeError("frozen checkpoint identity differs")
-    checkpoint = torch.load(io.BytesIO(raw), map_location="cpu",
+def _git_blob_at_revision(revision: str, path: str) -> bytes:
+    return subprocess.check_output([
+        "git", "-C", str(adapter.DEEPT_REPOSITORY), "show",
+        f"{revision}:{path}"])
+
+
+def _load_ffn_second_parameters(
+        capture_identity: dict, *, source: dict | None = None,
+        blob_loader=None) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Load W2/b2 from the exact Git objects authenticated by the capture."""
+    source = dict(DEFAULT_PARAMETER_SOURCE if source is None else source)
+    blob_loader = blob_loader or _git_blob_at_revision
+    identity_fields = {
+        "pinned_deept_revision": "pinned_revision",
+        "scientific_manifest_sha256": "scientific_manifest_sha256",
+        "production_manifest_sha256": "production_manifest_sha256",
+    }
+    for capture_field, source_field in identity_fields.items():
+        if capture_identity.get(capture_field) != source.get(source_field):
+            raise RuntimeError(
+                "capture/parameter source identity differs: "
+                f"{capture_field}")
+    checkpoint_raw = blob_loader(
+        source["pinned_revision"], source["checkpoint_git_path"])
+    config_raw = blob_loader(
+        source["pinned_revision"], source["config_git_path"])
+    if hashlib.sha256(checkpoint_raw).hexdigest() != source[
+            "checkpoint_sha256"]:
+        raise RuntimeError("authenticated checkpoint artifact SHA differs")
+    if hashlib.sha256(config_raw).hexdigest() != source["config_sha256"]:
+        raise RuntimeError("authenticated config artifact SHA differs")
+    config = json.loads(config_raw)
+    if (config.get("num_hidden_layers") != 3
+            or not isinstance(config.get("hidden_size"), int)
+            or not isinstance(config.get("intermediate_size"), int)
+            or config.get("hidden_size") <= 0
+            or config.get("intermediate_size") <= 0):
+        raise RuntimeError("authenticated Block-2 architecture differs")
+    checkpoint = torch.load(io.BytesIO(checkpoint_raw), map_location="cpu",
                             weights_only=False)
     weight = checkpoint[f"{FFN_SECOND_PARAMETER}.weight"].detach().cpu().to(
         dtype=torch.float64).contiguous().numpy()
     bias = checkpoint[f"{FFN_SECOND_PARAMETER}.bias"].detach().cpu().to(
         dtype=torch.float64).contiguous().numpy()
-    if (weight.shape != (128, 512) or bias.shape != (128,)
+    expected_weight_shape = (
+        config["hidden_size"], config["intermediate_size"])
+    expected_bias_shape = (config["hidden_size"],)
+    if (weight.shape != expected_weight_shape or bias.shape != expected_bias_shape
             or not np.isfinite(weight).all() or not np.isfinite(bias).all()):
-        raise RuntimeError("frozen Block-2 FFN second affine differs")
+        raise RuntimeError("authenticated Block-2 FFN second affine differs")
     return weight, bias, {
+        "parameter_source": (
+            f"git:{adapter.DEEPT_REPOSITORY}@{source['pinned_revision']}:"
+            f"{source['checkpoint_git_path']}") ,
         "parameter": FFN_SECOND_PARAMETER,
-        "checkpoint_sha256": stagea.CHECKPOINT_SHA256,
+        "pinned_revision": source["pinned_revision"],
+        "scientific_manifest_sha256": source[
+            "scientific_manifest_sha256"],
+        "production_manifest_sha256": source[
+            "production_manifest_sha256"],
+        "checkpoint_git_path": source["checkpoint_git_path"],
+        "checkpoint_sha256": source["checkpoint_sha256"],
+        "config_git_path": source["config_git_path"],
+        "config_sha256": source["config_sha256"],
+        "weight_shape": list(weight.shape),
+        "bias_shape": list(bias.shape),
         "weight_sha256": _array_sha(weight),
         "bias_sha256": _array_sha(bias),
+        "parameter_identity_authenticated": True,
     }
 
 
@@ -611,7 +679,7 @@ def execute(manifest_path: Path, output_path: Path, certificate_dir: Path,
             exact_timeout: float) -> dict:
     started = time.perf_counter()
     payload, identity, token = _load_capture(manifest_path)
-    weight, bias, parameter_identity = _load_ffn_second_parameters()
+    weight, bias, parameter_identity = _load_ffn_second_parameters(identity)
     models = _state_models(payload, token, weight, bias)
     rows = {}
     partial_path = output_path.with_suffix(".partial.json")
