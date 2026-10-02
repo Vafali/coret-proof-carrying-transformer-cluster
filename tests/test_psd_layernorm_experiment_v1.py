@@ -122,7 +122,7 @@ def test_layernorm_index_guard_rejects_non_target_transition():
     with pytest.raises(RuntimeError, match="non-target LayerNorm"):
         PSD._native_layernorm_with_semantic_lower(
             state, proof(), SimpleNamespace(),
-            SimpleNamespace(_layer_norm_index=4), [0.5])
+            SimpleNamespace(_layer_norm_index=4), [0.5], {}, {})
 
 
 def _harness(monkeypatch, callback=None):
@@ -136,7 +136,10 @@ def _harness(monkeypatch, callback=None):
     if callback is None:
         callback = lambda **_kwargs: {
             "output": object(), "proof": object(), "reserve": object(),
-            "certificate": {"state_identity": identity}}
+            "certificate": {
+                "state_identity": identity,
+                "native_transition": {"semantic_range_certificate": {
+                    "schema": "fixture"}}}}
     monkeypatch.setattr(
         RUNNER.experiment, "execute_experimental_layernorm", callback)
     return harness, state, support
@@ -244,3 +247,70 @@ def test_exception_trace_and_message_persist(tmp_path, monkeypatch):
 def test_production_callback_default_remains_none():
     assert inspect.signature(FINISH.execute).parameters[
         "experimental_post_attention_layernorm"].default is None
+
+
+def test_certified_sqrt_range_remains_positive_when_generic_hull_is_negative():
+    # The negative value represents the unconstrained affine sqrt-state hull;
+    # the semantic upper here comes from the positive sqrt input enclosure.
+    generic_sqrt_affine_lower = -3.797071565049
+    lower, upper, evidence = PSD._semantic_sqrt_range(
+        [0.15825795751263716],
+        torch.full((1, 2), 4.0, dtype=torch.float64))
+    assert generic_sqrt_affine_lower < 0
+    assert float(lower.min()) > 0
+    assert float(upper.max()) >= 2.0
+    assert evidence[0]["sqrt_output_lower_binary64_hex"] == float(
+        lower[0, 0]).hex()
+
+
+def test_reciprocal_semantic_relaxation_contains_dense_exact_points():
+    lower = torch.tensor([0.4], dtype=torch.float64)
+    upper = torch.tensor([2.0], dtype=torch.float64)
+    slope, center, radius = PSD.reciprocal_relaxation_coefficients(
+        lower, upper)
+    for value in torch.linspace(0.4, 2.0, 1001, dtype=torch.float64):
+        affine = slope[0] * value + center[0]
+        exact = value.reciprocal()
+        assert float(affine - radius[0]) <= float(exact) + 1e-15
+        assert float(affine + radius[0]) >= float(exact) - 1e-15
+
+
+def test_bypassing_reciprocal_assert_without_valid_range_is_rejected():
+    with pytest.raises(RuntimeError, match="reciprocal semantic range"):
+        PSD.reciprocal_relaxation_coefficients(
+            torch.tensor([-3.797], dtype=torch.float64),
+            torch.tensor([2.0], dtype=torch.float64))
+
+
+def test_directed_sqrt_lower_is_outward():
+    value = 0.15825795751263716
+    lower, decimal = PSD._directed_sqrt_binary64(value, False)
+    assert decimal
+    assert lower > 0
+    # A downward square-root result cannot square above its exact binary input.
+    assert lower * lower <= value
+
+
+def test_invocation_trace_distinguishes_partial_range_progress(monkeypatch):
+    def partial(*, milestones, **_kwargs):
+        milestones.update({
+            "psd_variance_certificate_authenticated": True,
+            "psd_variance_lower_consumed": True,
+            "sqrt_semantic_lower_constructed": True,
+            "reciprocal_semantic_range_consumed": False,
+            "full_psd_layernorm_completed": False,
+        })
+        raise AssertionError("synthetic reciprocal domain")
+
+    harness, state, support = _harness(monkeypatch, partial)
+    with pytest.raises(AssertionError, match="synthetic reciprocal"):
+        harness(
+            residual=state, proof=support, normalizer=object(),
+            delegate=SimpleNamespace(_layer_norm_index=5),
+            diagnostics={"label": RUNNER.experiment.TARGET_LABEL})
+    entry = harness.trace[-1]
+    assert entry["psd_variance_certificate_authenticated"] is True
+    assert entry["psd_variance_lower_consumed"] is True
+    assert entry["sqrt_semantic_lower_constructed"] is True
+    assert entry["reciprocal_semantic_range_consumed"] is False
+    assert entry["full_psd_layernorm_completed"] is False

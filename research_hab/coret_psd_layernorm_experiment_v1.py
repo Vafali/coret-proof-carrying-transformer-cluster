@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,19 @@ def _tensor_hash(tensor: torch.Tensor) -> str:
 def _json_hash(value) -> str:
     return hashlib.sha256(json.dumps(
         value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def variance_certificate_hash(certificate: dict) -> str:
+    fields = (
+        "schema", "target_label", "state_identity",
+        "generic_negative_token_indices", "token_certificates",
+        "variance_semantics", "optimizer_trusted",
+        "independent_checker_accepts", "minimum_psd_lower",
+        "semantic_variance_lower_by_token", "checked_token_certificates",
+        "coefficient_clamping_used")
+    if not all(field in certificate for field in fields):
+        raise RuntimeError("variance certificate hash fields differ")
+    return _json_hash({field: certificate[field] for field in fields})
 
 
 def state_identity(state, proof) -> dict:
@@ -79,6 +93,105 @@ def _witness_from_hex(values) -> np.ndarray:
     except (TypeError, ValueError) as error:
         raise RuntimeError("PSD witness encoding differs") from error
     return result
+
+
+def _directed_sqrt_binary64(value: float, upward: bool) -> tuple[float, dict]:
+    """Tight directed binary64 sqrt, certified by exact rational squares."""
+    if not math.isfinite(value) or value <= 0.0:
+        raise RuntimeError("semantic sqrt range input is nonpositive")
+    exact = Fraction.from_float(float(value))
+    result = math.sqrt(value)
+    direction = math.inf if upward else -math.inf
+    predicate = ((lambda square: square >= exact) if upward
+                 else (lambda square: square <= exact))
+    while not predicate(Fraction.from_float(result) ** 2):
+        result = math.nextafter(result, direction)
+    opposite = -math.inf if upward else math.inf
+    adjacent = math.nextafter(result, opposite)
+    # Tightness is useful audit evidence: the adjacent float toward the exact
+    # root must violate the selected directed relation unless sqrt is exact.
+    result_square = Fraction.from_float(result) ** 2
+    adjacent_square = Fraction.from_float(adjacent) ** 2
+    exact_result = result_square == exact
+    adjacent_excluded = (exact_result or not predicate(adjacent_square))
+    if not adjacent_excluded:
+        raise RuntimeError("semantic sqrt directed result is not tight")
+    return result, {
+        "input_binary64_hex": float(value).hex(),
+        "output_binary64_hex": result.hex(),
+        "direction": "upward" if upward else "downward",
+        "exact_rational_square_relation": (
+            "output^2>=input" if upward else "output^2<=input"),
+        "relation_verified": True,
+        "adjacent_toward_exact_excluded": True,
+    }
+
+
+def _semantic_sqrt_range(variance_lower_by_token, generic_sqrt_input_high):
+    """Certify sqrt-result ranges without modifying its affine coefficients."""
+    if generic_sqrt_input_high.ndim != 2:
+        raise RuntimeError("semantic sqrt upper shape differs")
+    tokens, width = generic_sqrt_input_high.shape
+    if len(variance_lower_by_token) != tokens:
+        raise RuntimeError("semantic variance token count differs")
+    lower_values, upper_values, evidence = [], [], []
+    for token in range(tokens):
+        row = generic_sqrt_input_high[token]
+        if not torch.equal(row, row[0].expand_as(row)):
+            raise RuntimeError("native repeated variance upper differs by feature")
+        variance_lower = float(variance_lower_by_token[token])
+        # nextafter-down makes the binary64 addition itself a lower bound on
+        # the exact sum of the already outward-safe variance lower and epsilon.
+        sqrt_input_lower = math.nextafter(
+            variance_lower + EPSILON, -math.inf)
+        sqrt_input_upper = float(row[0])
+        lower, lower_rounding = _directed_sqrt_binary64(
+            sqrt_input_lower, False)
+        upper, upper_rounding = _directed_sqrt_binary64(
+            sqrt_input_upper, True)
+        if lower <= EPSILON or lower > upper:
+            raise RuntimeError("certified sqrt semantic range is invalid")
+        lower_values.append(lower)
+        upper_values.append(upper)
+        evidence.append({
+            "token_index": token,
+            "variance_lower_binary64_hex": variance_lower.hex(),
+            "sqrt_input_lower_binary64_hex": sqrt_input_lower.hex(),
+            "sqrt_input_upper_binary64_hex": sqrt_input_upper.hex(),
+            "sqrt_output_lower_binary64_hex": lower.hex(),
+            "sqrt_output_upper_binary64_hex": upper.hex(),
+            "sqrt_output_lower_rounding_proof": lower_rounding,
+            "sqrt_output_upper_rounding_proof": upper_rounding,
+        })
+    device, dtype = generic_sqrt_input_high.device, generic_sqrt_input_high.dtype
+    lower_tensor = torch.tensor(
+        lower_values, device=device, dtype=dtype).reshape(tokens, 1).expand(
+            tokens, width)
+    upper_tensor = torch.tensor(
+        upper_values, device=device, dtype=dtype).reshape(tokens, 1).expand(
+            tokens, width)
+    return lower_tensor, upper_tensor, evidence
+
+
+def reciprocal_relaxation_coefficients(lower: torch.Tensor,
+                                        upper: torch.Tensor):
+    """Pinned DeepT original reciprocal formula over an authenticated hull."""
+    if (lower.shape != upper.shape or not bool(torch.isfinite(lower).all())
+            or not bool(torch.isfinite(upper).all())
+            or bool((lower <= EPSILON).any()) or bool((lower > upper).any())):
+        raise RuntimeError("reciprocal semantic range is invalid")
+    lambdas = -1.0 / (upper * upper)
+    bottom = 1.0 / upper - lambdas * upper
+    top = 1.0 / lower - lambdas * lower
+    constants = 0.5 * (top + bottom)
+    fresh = 0.5 * (top - bottom)
+    if (not bool(torch.isfinite(lambdas).all()
+                 and torch.isfinite(constants).all()
+                 and torch.isfinite(fresh).all())
+            or bool((fresh < -1e-4).any())
+            or bool((lambdas > 0).any())):
+        raise RuntimeError("reciprocal semantic relaxation is malformed")
+    return lambdas, constants, fresh
 
 
 def build_certificate(state, proof, generic_variance_low: torch.Tensor) -> dict:
@@ -172,7 +285,9 @@ def verify_certificate(state, proof, generic_variance_low: torch.Tensor,
 
 
 def _native_layernorm_with_semantic_lower(state, proof, normalizer, delegate,
-                                          semantic_lower_by_token):
+                                          semantic_lower_by_token,
+                                          variance_certificate: dict,
+                                          milestones: dict):
     """Run pinned native formulas, changing only sqrt's witnessed domain hull."""
     if delegate._layer_norm_index != TARGET_LAYER_NORM_INDEX:
         raise RuntimeError("PSD experiment reached a non-target LayerNorm")
@@ -196,14 +311,18 @@ def _native_layernorm_with_semantic_lower(state, proof, normalizer, delegate,
         for token in range(n))
     sqrt_input = variance.add(EPSILON)
     generic_low, generic_high = sqrt_input.concretize()
-    witnessed = torch.tensor(
-        semantic_lower_by_token, dtype=generic_low.dtype,
+    witnessed_input_values = [
+        math.nextafter(float(value) + EPSILON, -math.inf)
+        for value in semantic_lower_by_token]
+    witnessed_input = torch.tensor(
+        witnessed_input_values, dtype=generic_low.dtype,
         device=generic_low.device).reshape(n, 1).expand_as(generic_low)
-    semantic_low = torch.maximum(generic_low, witnessed + EPSILON)
+    semantic_low = torch.maximum(generic_low, witnessed_input)
     if (not bool(torch.isfinite(semantic_low).all())
             or bool((semantic_low <= EPSILON).any())
             or bool((semantic_low > generic_high).any())):
         raise RuntimeError("PSD LayerNorm witnessed sqrt interval is invalid")
+    milestones["psd_variance_lower_consumed"] = True
     sqrt_predicate = semantic_low != generic_high
     sqrt_masks, sqrt_flat = structural._native_boolean_membership(
         sqrt_predicate, n, d, affected, "sqrt")
@@ -220,12 +339,44 @@ def _native_layernorm_with_semantic_lower(state, proof, normalizer, delegate,
         raise RuntimeError("PSD LayerNorm concretize restoration failed")
     if sqrt_state.num_error_terms - sqrt_input.num_error_terms != len(sqrt_flat):
         raise RuntimeError("PSD LayerNorm sqrt allocation differs")
-    reciprocal_low, reciprocal_high = sqrt_state.concretize()
+    reciprocal_low, reciprocal_high, range_evidence = _semantic_sqrt_range(
+        semantic_lower_by_token, generic_high)
+    milestones["sqrt_semantic_lower_constructed"] = True
+    semantic_range_certificate = {
+        "schema": "CORET_PSD_LAYERNORM_SEMANTIC_RANGE_V1",
+        "state_identity": variance_certificate["state_identity"],
+        "target_label": TARGET_LABEL,
+        "layernorm_index": TARGET_LAYER_NORM_INDEX,
+        "variance_certificate_sha256": variance_certificate_hash(
+            variance_certificate),
+        "psd_witnesses_sha256": _json_hash([
+            row["witness_binary64_hex"]
+            for row in variance_certificate["token_certificates"]]),
+        "variance_lower_by_token_binary64_hex": [
+            float(value).hex() for value in semantic_lower_by_token],
+        "directed_range_evidence": range_evidence,
+        "sqrt_affine_coefficients_modified": False,
+        "reciprocal_affine_input_coefficients_modified": False,
+        "reciprocal_formula": "pinned_original_implementation_lambda=-1/u^2",
+    }
+    milestones["semantic_range_certificate"] = semantic_range_certificate
+    # Audit the exact formula before invoking pinned DeepT.  The temporary
+    # concretize override below supplies this same authenticated range to every
+    # interval-dependent reciprocal operation, not merely its domain assert.
+    reciprocal_relaxation_coefficients(reciprocal_low, reciprocal_high)
     reciprocal_predicate = reciprocal_low != reciprocal_high
     reciprocal_masks, reciprocal_flat = structural._native_boolean_membership(
         reciprocal_predicate, n, d, affected, "reciprocal")
-    reciprocal = sqrt_state.reciprocal(
-        original_implementation=True, y_positive_constraint=False)
+    original_sqrt_concretize = sqrt_state.concretize
+    sqrt_state.concretize = lambda: (reciprocal_low, reciprocal_high)
+    milestones["reciprocal_semantic_range_consumed"] = True
+    try:
+        reciprocal = sqrt_state.reciprocal(
+            original_implementation=True, y_positive_constraint=False)
+    finally:
+        del sqrt_state.concretize
+    if sqrt_state.concretize.__func__ is not original_sqrt_concretize.__func__:
+        raise RuntimeError("PSD reciprocal concretize restoration failed")
     if reciprocal.num_error_terms - sqrt_state.num_error_terms != len(
             reciprocal_flat):
         raise RuntimeError("PSD LayerNorm reciprocal allocation differs")
@@ -262,6 +413,9 @@ def _native_layernorm_with_semantic_lower(state, proof, normalizer, delegate,
         "output_generator_count": int(output.num_error_terms),
         "sqrt_interval_lower_min": float(semantic_low.min()),
         "sqrt_interval_upper_max": float(generic_high.max()),
+        "reciprocal_semantic_lower_min": float(reciprocal_low.min()),
+        "reciprocal_semantic_upper_max": float(reciprocal_high.max()),
+        "semantic_range_certificate": semantic_range_certificate,
     }
 
 
@@ -270,9 +424,10 @@ def _majorant_with_semantic_lower(source, normalizer,
     x = sound._absolute_hull(source).double()
     centered = x + x.mean(dim=-1, keepdim=True)
     variance_upper = centered.square().mean(dim=-1, keepdim=True) + EPSILON
-    lower = torch.tensor(
-        semantic_lower_by_token, dtype=torch.float64,
-        device=source.device).reshape(source.num_words, 1) + EPSILON
+    lower = torch.tensor([
+        math.nextafter(float(value) + EPSILON, -math.inf)
+        for value in semantic_lower_by_token], dtype=torch.float64,
+        device=source.device).reshape(source.num_words, 1)
     reciprocal = lower.rsqrt().expand_as(centered)
     normalized = centered * reciprocal
     output = (normalized * normalizer.weight.abs().double()
@@ -282,7 +437,15 @@ def _majorant_with_semantic_lower(source, normalizer,
 
 
 def execute_experimental_layernorm(*, residual, proof, normalizer, delegate,
-                                   diagnostics) -> dict:
+                                   diagnostics, milestones=None) -> dict:
+    milestones = {} if milestones is None else milestones
+    milestones.update({
+        "psd_variance_certificate_authenticated": False,
+        "psd_variance_lower_consumed": False,
+        "sqrt_semantic_lower_constructed": False,
+        "reciprocal_semantic_range_consumed": False,
+        "full_psd_layernorm_completed": False,
+    })
     if diagnostics.get("label") != TARGET_LABEL:
         raise RuntimeError("PSD experiment may only handle Block-2 post-attention")
     d = residual.word_embedding_size
@@ -293,14 +456,17 @@ def execute_experimental_layernorm(*, residual, proof, normalizer, delegate,
     generic_low, _ = variance.concretize()
     certificate = build_certificate(residual, proof, generic_low)
     checked = verify_certificate(residual, proof, generic_low, certificate)
+    milestones["psd_variance_certificate_authenticated"] = True
     # Use only the independently returned bounds, never optimizer output.
     lower_by_token = checked["semantic_variance_lower_by_token"]
     output, output_proof, transition = _native_layernorm_with_semantic_lower(
-        residual, proof, normalizer, delegate, lower_by_token)
+        residual, proof, normalizer, delegate, lower_by_token, certificate,
+        milestones)
     operations = 16 * 128 * (residual.num_error_terms + 1) ** 2 + 4096
     reserve = sound._reserve_from_majorant(
         _majorant_with_semantic_lower(residual, normalizer, lower_by_token),
         operations)
+    milestones["full_psd_layernorm_completed"] = True
     certificate.update({
         "minimum_psd_lower": checked["minimum_psd_lower"],
         "semantic_variance_lower_by_token": lower_by_token,
@@ -310,6 +476,7 @@ def execute_experimental_layernorm(*, residual, proof, normalizer, delegate,
         "experimental_trace_parametric_constraint": True,
         "generic_semantic_remainder_used": False,
         "reserve_max": float(reserve.max()),
+        "milestones": dict(milestones),
     })
     return {"output": output, "proof": output_proof,
             "reserve": reserve, "certificate": certificate}

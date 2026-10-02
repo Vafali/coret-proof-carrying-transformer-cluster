@@ -98,6 +98,17 @@ class LayerNormExperimentHarness:
         self.psd_certificate_rejections = 0
         self.evaluator_exception = None
 
+    def _bind_range_certificate(self, certificate: dict) -> None:
+        certificate.pop("canonical_certificate_sha256", None)
+        certificate.update({
+            "property_id": self.property_id,
+            "tested_radius": self.radius,
+            "tested_radius_hex": self.radius.hex(),
+            "oracle_report_sha256": self.oracle_identity["sha256"],
+        })
+        certificate["canonical_certificate_sha256"] = (
+            experiment._json_hash(certificate))
+
     def __call__(self, *, residual, proof, normalizer, delegate,
                  diagnostics, original_layernorm=None):
         self.total_callback_invocations += 1
@@ -117,6 +128,12 @@ class LayerNormExperimentHarness:
             "target_state_match": False,
             "psd_applied": False,
             "reject_reason": None,
+            "psd_variance_certificate_authenticated": False,
+            "psd_variance_lower_consumed": False,
+            "sqrt_semantic_lower_constructed": False,
+            "reciprocal_semantic_range_consumed": False,
+            "full_psd_layernorm_completed": False,
+            "semantic_range_certificate": None,
         }
         if entry["matched_stage"]:
             self.target_stage_encounters += 1
@@ -149,9 +166,11 @@ class LayerNormExperimentHarness:
                 entry["reject_reason"] = "DUPLICATE_AUTHENTICATED_TARGET"
                 self.psd_certificate_rejections += 1
                 raise RuntimeError("PSD LayerNorm target state visited twice")
+            milestones = {}
             result = experiment.execute_experimental_layernorm(
                 residual=residual, proof=proof, normalizer=normalizer,
-                delegate=delegate, diagnostics=diagnostics)
+                delegate=delegate, diagnostics=diagnostics,
+                milestones=milestones)
             certificate = result.get("certificate")
             if not isinstance(certificate, dict):
                 entry["reject_reason"] = "PSD_CERTIFICATE_ABSENT"
@@ -161,6 +180,13 @@ class LayerNormExperimentHarness:
                 entry["reject_reason"] = "PSD_CERTIFICATE_STATE_MISMATCH"
                 self.psd_certificate_rejections += 1
                 raise RuntimeError("experimental PSD certificate state differs")
+            range_certificate = certificate.get(
+                "native_transition", {}).get("semantic_range_certificate")
+            if not isinstance(range_certificate, dict):
+                entry["reject_reason"] = "SEMANTIC_RANGE_CERTIFICATE_ABSENT"
+                self.psd_certificate_rejections += 1
+                raise RuntimeError("semantic range certificate was not emitted")
+            self._bind_range_certificate(range_certificate)
             self.certificates.append(certificate)
             self.psd_certificate_applications += 1
             entry["psd_applied"] = True
@@ -171,6 +197,20 @@ class LayerNormExperimentHarness:
                 self.psd_certificate_rejections += 1
             raise
         finally:
+            for name in (
+                    "psd_variance_certificate_authenticated",
+                    "psd_variance_lower_consumed",
+                    "sqrt_semantic_lower_constructed",
+                    "reciprocal_semantic_range_consumed",
+                    "full_psd_layernorm_completed"):
+                if "milestones" in locals():
+                    entry[name] = bool(milestones.get(name, False))
+            if ("milestones" in locals()
+                    and isinstance(milestones.get(
+                        "semantic_range_certificate"), dict)):
+                range_certificate = milestones["semantic_range_certificate"]
+                self._bind_range_certificate(range_certificate)
+                entry["semantic_range_certificate"] = range_certificate
             self.trace.append(entry)
 
     def record_evaluator_exception(self, error: Exception) -> None:
