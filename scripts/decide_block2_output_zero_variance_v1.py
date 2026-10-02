@@ -43,6 +43,9 @@ REDUCTION_LABEL = "b2_ffn_residual"
 DECISION_ZERO = "ZERO_VARIANCE_FEASIBLE_EXACT"
 DECISION_POSITIVE = "ZERO_VARIANCE_NOT_ESTABLISHED_DUAL_POSITIVE"
 DECISION_UNRESOLVED = "ZERO_VARIANCE_UNRESOLVED"
+EXACT_SOLVER_FAILED = "EXACT_SOLVER_UNAVAILABLE_OR_FAILED"
+EXACT_SOLUTION_OUTSIDE_BOX = "EXACT_SOLUTION_OUTSIDE_AUTHENTICATED_BOX"
+EXACT_ZERO_VERIFIED = "EXACT_AUTHENTICATED_ZERO_WITNESS_VERIFIED"
 
 
 def _atomic_json(path: Path, value: dict) -> dict:
@@ -402,6 +405,77 @@ def verify_exact_zero_certificate(problem: dict, certificate: dict) -> dict:
     }
 
 
+def _solve_exact_selected_system(
+        matrix: sympy.Matrix, rhs: list[sympy.Rational]
+) -> tuple[list[sympy.Rational], dict]:
+    """Solve a bounded exact correction system and replay it over QQ.
+
+    DomainMatrix API availability varies between the pinned cluster images.
+    ``solve_den`` is the preferred stable fraction-free interface.  The
+    bounded Matrix fallback is deliberately restricted to the already
+    selected correction system (at most ``maximum_rank`` columns), never the
+    full generator population.
+    """
+    rhs_matrix = sympy.Matrix(rhs)
+    failures = []
+    solution = None
+    solver_api = None
+    try:
+        from sympy.polys.matrices import DomainMatrix
+        domain_matrix = DomainMatrix.from_Matrix(matrix)
+        domain_rhs = DomainMatrix.from_Matrix(rhs_matrix)
+        domain_matrix, domain_rhs = domain_matrix.unify(
+            domain_rhs, fmt="dense")
+        solve_den = getattr(domain_matrix, "solve_den", None)
+        if not callable(solve_den):
+            failures.append("DomainMatrix.solve_den unavailable")
+        else:
+            try:
+                numerator, denominator = solve_den(domain_rhs)
+                denominator = sympy.sympify(denominator)
+                if denominator == 0:
+                    raise RuntimeError("exact solver returned zero denominator")
+                solution = numerator.to_Matrix().applyfunc(
+                    lambda value: sympy.cancel(value / denominator))
+                solver_api = "DomainMatrix.solve_den"
+            except Exception as error:
+                failures.append(
+                    f"DomainMatrix.solve_den: {type(error).__name__}: {error}")
+                solution = None
+    except Exception as error:
+        failures.append(
+            f"DomainMatrix setup: {type(error).__name__}: {error}")
+
+    if solution is None:
+        try:
+            solution, parameters = matrix.gauss_jordan_solve(rhs_matrix)
+            if parameters.rows:
+                raise RuntimeError(
+                    "selected exact correction system is underdetermined")
+            solution = solution.applyfunc(sympy.cancel)
+            solver_api = "Matrix.gauss_jordan_solve"
+        except Exception as error:
+            failures.append(
+                f"Matrix.gauss_jordan_solve: {type(error).__name__}: {error}")
+            raise RuntimeError("; ".join(failures)) from error
+
+    if solution.shape != (matrix.cols, rhs_matrix.cols):
+        raise RuntimeError(
+            "exact solver returned an unexpected solution shape "
+            f"{solution.shape} != {(matrix.cols, rhs_matrix.cols)}")
+    residual = matrix * solution - rhs_matrix
+    if any(value != 0 for value in residual):
+        raise RuntimeError("exact selected-system replay is nonzero")
+    values = [sympy.Rational(value) for value in solution]
+    return values, {
+        "sympy_version": sympy.__version__,
+        "solver_api": solver_api,
+        "selected_system_shape": [int(matrix.rows), int(matrix.cols)],
+        "exact_selected_system_replay": True,
+        "preferred_solver_failures": failures,
+    }
+
+
 def construct_exact_zero_certificate(problem: dict, candidate: np.ndarray,
                                      maximum_rank: int) -> tuple[dict | None, dict]:
     A = problem["A"]
@@ -438,6 +512,7 @@ def construct_exact_zero_certificate(problem: dict, candidate: np.ndarray,
         "selected_correction_variables": int(len(selected_columns)),
         "interior_candidate_variables": int(len(interior)),
         "attempted": rank <= maximum_rank,
+        "status_code": None,
     }
     if rank > maximum_rank:
         diagnostics["reason"] = "exact correction rank exceeds configured cap"
@@ -465,15 +540,33 @@ def construct_exact_zero_certificate(problem: dict, candidate: np.ndarray,
                      for column in range(problem["variable_count"])
                      if column not in selected_set), Fraction(0))
                 rhs.append(sympy.Rational(value.numerator, value.denominator))
-            from sympy.polys.matrices import DomainMatrix
-            domain_matrix = DomainMatrix.from_Matrix(matrix)
-            domain_rhs = DomainMatrix.from_Matrix(sympy.Matrix(rhs))
-            domain_matrix, domain_rhs = domain_matrix.unify(
-                domain_rhs, fmt="dense")
-            numerator, denominator = domain_matrix.solve_den_rref(domain_rhs)
-            solution = numerator.to_Matrix() / sympy.sympify(denominator)
+            solution, solver_evidence = _solve_exact_selected_system(
+                matrix, rhs)
+            diagnostics["exact_solver"] = solver_evidence
             for column, value in zip(selected_columns, solution):
                 values[int(column)] = Fraction(int(value.p), int(value.q))
+        else:
+            diagnostics["exact_solver"] = {
+                "sympy_version": sympy.__version__,
+                "solver_api": "empty_exact_system",
+                "selected_system_shape": [0, 0],
+                "exact_selected_system_replay": True,
+                "preferred_solver_failures": [],
+            }
+        outside = [
+            index for index, value in enumerate(values)
+            if not (_fraction(problem["low"][index]) <= value
+                    <= _fraction(problem["high"][index]))
+        ]
+        if outside:
+            diagnostics.update({
+                "verified": False,
+                "status_code": EXACT_SOLUTION_OUTSIDE_BOX,
+                "reason": "exact algebraic solution violates authenticated box",
+                "outside_box_variable_count": len(outside),
+                "first_outside_box_variable": int(outside[0]),
+            })
+            return None, diagnostics
         certificate = {
             "schema": EXACT_SCHEMA,
             "problem_sha256": problem["problem_sha256"],
@@ -488,11 +581,13 @@ def construct_exact_zero_certificate(problem: dict, candidate: np.ndarray,
                  "denominator": str(value.denominator)} for value in values],
         }
         checked = verify_exact_zero_certificate(problem, certificate)
-        diagnostics.update({"verified": True, **checked})
+        diagnostics.update({
+            "verified": True, "status_code": EXACT_ZERO_VERIFIED, **checked})
         return certificate, diagnostics
     except Exception as error:
         diagnostics.update({
             "verified": False,
+            "status_code": EXACT_SOLVER_FAILED,
             "reason": f"{type(error).__name__}: {error}",
         })
         return None, diagnostics

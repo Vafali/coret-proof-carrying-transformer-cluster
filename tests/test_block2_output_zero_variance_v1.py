@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+import sympy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +31,7 @@ def test_exact_synthetic_zero_variance_is_certified():
     certificate, status = DECIDE.construct_exact_zero_certificate(
         value, np.array([1.0]), 2)
     assert status["verified"] is True
+    assert status["status_code"] == DECIDE.EXACT_ZERO_VERIFIED
     assert DECIDE.verify_exact_zero_certificate(
         value, certificate)["exact_variance"] == "0"
 
@@ -49,6 +51,64 @@ def test_asymmetric_ranges_are_respected_by_exact_candidate():
     assert status["verified"] is True
     assert DECIDE.verify_exact_zero_certificate(
         value, certificate)["maximum_exact_residual"] == "0"
+
+
+def test_installed_sympy_exact_api_is_used_and_replayed():
+    from sympy.polys.matrices import DomainMatrix
+    assert callable(getattr(DomainMatrix, "solve_den", None))
+    solution, evidence = DECIDE._solve_exact_selected_system(
+        sympy.Matrix([[2, 1], [1, -1]]),
+        [sympy.Rational(1), sympy.Rational(0)])
+    assert solution == [sympy.Rational(1, 3), sympy.Rational(1, 3)]
+    assert evidence["solver_api"] == "DomainMatrix.solve_den"
+    assert evidence["exact_selected_system_replay"] is True
+    assert evidence["sympy_version"] == sympy.__version__
+
+
+def test_bounded_matrix_fallback_when_domain_solve_is_unavailable(monkeypatch):
+    from sympy.polys.matrices import DomainMatrix
+
+    def unavailable(*_args, **_kwargs):
+        raise AttributeError("solve_den unavailable in compatibility fixture")
+
+    monkeypatch.setattr(DomainMatrix, "solve_den", unavailable)
+    solution, evidence = DECIDE._solve_exact_selected_system(
+        sympy.Matrix([[2, 1], [1, -1]]),
+        [sympy.Rational(1), sympy.Rational(0)])
+    assert solution == [sympy.Rational(1, 3), sympy.Rational(1, 3)]
+    assert evidence["solver_api"] == "Matrix.gauss_jordan_solve"
+    assert evidence["exact_selected_system_replay"] is True
+    assert "DomainMatrix.solve_den: AttributeError" in " ".join(
+        evidence["preferred_solver_failures"])
+
+
+def test_exact_algebraic_solution_outside_box_is_distinguished():
+    value = problem([1.0, -1.0], [[-1.0, 1.0]], [0.0], [0.5])
+    certificate, status = DECIDE.construct_exact_zero_certificate(
+        value, np.array([0.25]), 2)
+    assert certificate is None
+    assert status["verified"] is False
+    assert status["status_code"] == DECIDE.EXACT_SOLUTION_OUTSIDE_BOX
+
+
+def test_exact_solver_failure_is_distinguished(monkeypatch):
+    from sympy.polys.matrices import DomainMatrix
+
+    def unavailable(*_args, **_kwargs):
+        raise AttributeError("no domain solve")
+
+    def fallback_failed(*_args, **_kwargs):
+        raise RuntimeError("no bounded fallback")
+
+    monkeypatch.setattr(DomainMatrix, "solve_den", unavailable)
+    monkeypatch.setattr(sympy.MutableDenseMatrix, "gauss_jordan_solve",
+                        fallback_failed)
+    value = problem([1.0, -1.0], [[-1.0, 1.0]], [0.0], [2.0])
+    certificate, status = DECIDE.construct_exact_zero_certificate(
+        value, np.array([1.0]), 2)
+    assert certificate is None
+    assert status["verified"] is False
+    assert status["status_code"] == DECIDE.EXACT_SOLVER_FAILED
 
 
 def test_zero_dual_baseline_is_exactly_zero():
