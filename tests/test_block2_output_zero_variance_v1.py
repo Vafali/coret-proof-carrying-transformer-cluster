@@ -180,6 +180,70 @@ def test_end_to_end_synthetic_capture_decision_is_exact(tmp_path):
                and row["exact_zero_certificate_status"]["verified"] is True
                for row in report["results"])
     assert report["scientific_queries"] == report["bound_calls"] == 0
+    assert (tmp_path / "decision.partial.json").is_file()
+
+
+def _variant(center=(1.0, -1.0), generator=(-1.0, 1.0),
+             low=0.0, high=2.0):
+    return {
+        "center": np.array(center),
+        "generators": np.array([generator]),
+        "low": np.array([low]), "high": np.array([high]),
+        "ids": ["g0"], "reasons": ["native_semantic"],
+        "native_generator_count": 1, "numerical_generator_count": 0,
+    }
+
+
+def test_positive_dual_stops_before_exact_stage(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        DECIDE, "construct_exact_zero_certificate",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("exact called")))
+    row = DECIDE.decide_variant(
+        "positive", _variant(generator=(0.0, 0.0), low=0.0, high=0.0),
+        128, tmp_path)
+    assert row["decision"] == DECIDE.DECISION_POSITIVE
+    assert row["exact_zero_certificate_status"]["attempted"] is False
+
+
+def test_non_near_candidate_stops_without_claiming_infeasibility(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(DECIDE, "dual_scaling_search", lambda *_a, **_k: {
+        "zero_baseline": DECIDE.exact_zero_dual_baseline(2),
+        "candidates": [], "best": {"outward_safe_lower": 0.0}})
+    monkeypatch.setattr(
+        DECIDE, "construct_exact_zero_certificate",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("exact called")))
+    row = DECIDE.decide_variant(
+        "non_near", _variant(generator=(0.0, 0.0), low=0.0, high=0.0),
+        128, tmp_path)
+    assert row["near_zero_gate"]["is_compelling_near_zero"] is False
+    assert row["decision"] == DECIDE.DECISION_UNRESOLVED
+    assert "did not pass near-zero" in row[
+        "exact_zero_certificate_status"]["reason"]
+
+
+def test_skip_exact_leaves_near_zero_candidate_unresolved(tmp_path, monkeypatch):
+    monkeypatch.setattr(DECIDE, "dual_scaling_search", lambda *_a, **_k: {
+        "zero_baseline": DECIDE.exact_zero_dual_baseline(2),
+        "candidates": [], "best": {"outward_safe_lower": 0.0}})
+    monkeypatch.setattr(
+        DECIDE, "construct_exact_zero_certificate",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("exact called")))
+    row = DECIDE.decide_variant(
+        "skip", _variant(), 128, tmp_path, skip_exact=True)
+    assert row["near_zero_gate"]["is_compelling_near_zero"] is True
+    assert row["decision"] == DECIDE.DECISION_UNRESOLVED
+    assert row["exact_zero_certificate_status"]["reason"] == (
+        "exact stage disabled by --skip-exact")
+
+
+def test_progress_is_flushed_after_each_numerical_stage(capsys):
+    value = problem([1.0, -1.0], [[-1.0, 1.0]], [0.0], [2.0])
+    DECIDE.numerical_primal_search(value, "progress_fixture")
+    output = capsys.readouterr().out
+    assert "highs_feasibility_complete" in output
+    assert "bounded_least_squares_complete" in output
+    assert "numerical_primal_stage_complete" in output
 
 
 def test_authenticated_range_hash_mutation_rejection(tmp_path):

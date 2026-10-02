@@ -252,7 +252,18 @@ def _box_metrics(candidate: np.ndarray, low: np.ndarray,
     }
 
 
-def numerical_primal_search(problem: dict) -> tuple[np.ndarray, dict]:
+def _progress(variant: str, stage: str, started: float, **fields) -> None:
+    print(json.dumps({
+        "event": "ZERO_VARIANCE_PROGRESS",
+        "variant": variant,
+        "stage": stage,
+        "elapsed_seconds": time.perf_counter() - started,
+        **fields,
+    }, sort_keys=True), flush=True)
+
+
+def numerical_primal_search(problem: dict,
+                            variant_name: str = "synthetic") -> tuple[np.ndarray, dict]:
     A, b = problem["A"], problem["b"]
     low, high = problem["low"], problem["high"]
     scale = np.maximum(
@@ -260,10 +271,15 @@ def numerical_primal_search(problem: dict) -> tuple[np.ndarray, dict]:
         np.finfo(np.float64).tiny)
     scaled_A, scaled_b = A / scale[:, None], -b / scale
     started = time.perf_counter()
+    stage_started = time.perf_counter()
     lp = linprog(
         np.zeros(len(low), dtype=np.float64), A_eq=scaled_A, b_eq=scaled_b,
         bounds=list(zip(low, high)), method="highs",
         options={"presolve": True})
+    _progress(
+        variant_name, "highs_feasibility_complete", stage_started,
+        success=bool(lp.success), status=int(lp.status),
+        iterations=int(getattr(lp, "nit", 0)))
     searches = []
     candidates = []
     if lp.x is not None and np.isfinite(lp.x).all():
@@ -279,10 +295,15 @@ def numerical_primal_search(problem: dict) -> tuple[np.ndarray, dict]:
                       if fixed.any() else 0.0)
     free = ~fixed
     if free.any():
+        stage_started = time.perf_counter()
         lsq = lsq_linear(
             A[:, free] / scale[:, None], -adjusted_b / scale,
             bounds=(low[free], high[free]), method="trf", lsq_solver="lsmr",
             tol=1e-12, lsmr_tol=1e-12, max_iter=500, verbose=0)
+        _progress(
+            variant_name, "bounded_least_squares_complete", stage_started,
+            success=bool(lsq.success), status=int(lsq.status),
+            iterations=int(lsq.nit), optimality=float(lsq.optimality))
         candidate = fixed_value.copy()
         candidate[free] = lsq.x
         candidates.append(("bounded_least_squares", candidate))
@@ -305,17 +326,32 @@ def numerical_primal_search(problem: dict) -> tuple[np.ndarray, dict]:
                           name, candidate, equality, centered))
     variance, selected, candidate, equality, centered = min(
         evaluated, key=lambda row: row[0])
-    return candidate, {
+    maximum_equality_residual = float(
+        np.abs(equality).max(initial=0.0))
+    maximum_scaled_equality_residual = float(
+        (np.abs(equality) / scale).max(initial=0.0))
+    result = {
         "selected_candidate": selected,
         "solver_runs": searches,
-        "max_equality_residual": float(np.abs(equality).max(initial=0.0)),
+        "max_equality_residual": maximum_equality_residual,
+        "max_scaled_equality_residual": maximum_scaled_equality_residual,
         "centered_residual_l2": float(np.linalg.norm(centered)),
+        "centered_residual_rms": float(np.sqrt(variance)),
         "numerical_variance": variance,
+        "candidate_state_scale": float(max(
+            1.0, np.abs(vector).max(initial=0.0))),
         "row_scaling_min": float(scale.min()),
         "row_scaling_max": float(scale.max()),
         "runtime_seconds": time.perf_counter() - started,
         **_box_metrics(candidate, low, high),
     }
+    _progress(
+        variant_name, "numerical_primal_stage_complete", started,
+        selected_candidate=selected,
+        max_equality_residual=maximum_equality_residual,
+        max_scaled_equality_residual=maximum_scaled_equality_residual,
+        numerical_variance=variance)
+    return candidate, result
 
 
 def _fraction(value: float) -> Fraction:
@@ -389,8 +425,7 @@ def construct_exact_zero_certificate(problem: dict, candidate: np.ndarray,
             np.asarray(pivots[:rank], dtype=np.int64)]
         # An interior-only pool may not span every exact equality.  Retry with
         # every non-singleton variable before declaring a rank limitation.
-        full_rank = int(np.linalg.matrix_rank(A[:, free]))
-        if rank < full_rank:
+        if len(interior) and rank < min(A.shape[0], len(free)):
             _q, r, pivots = qr(A[:, free], mode="economic", pivoting=True)
             threshold = (max(A.shape) * np.finfo(np.float64).eps
                          * (abs(r[0, 0]) if r.size else 0.0))
@@ -430,7 +465,13 @@ def construct_exact_zero_certificate(problem: dict, candidate: np.ndarray,
                      for column in range(problem["variable_count"])
                      if column not in selected_set), Fraction(0))
                 rhs.append(sympy.Rational(value.numerator, value.denominator))
-            solution = matrix.inv().multiply(sympy.Matrix(rhs))
+            from sympy.polys.matrices import DomainMatrix
+            domain_matrix = DomainMatrix.from_Matrix(matrix)
+            domain_rhs = DomainMatrix.from_Matrix(sympy.Matrix(rhs))
+            domain_matrix, domain_rhs = domain_matrix.unify(
+                domain_rhs, fmt="dense")
+            numerator, denominator = domain_matrix.solve_den_rref(domain_rhs)
+            solution = numerator.to_Matrix() / sympy.sympify(denominator)
             for column, value in zip(selected_columns, solution):
                 values[int(column)] = Fraction(int(value.p), int(value.q))
         certificate = {
@@ -520,7 +561,8 @@ def _optimize_from_start(problem: dict, start: np.ndarray) -> tuple[np.ndarray, 
     }
 
 
-def dual_scaling_search(problem: dict, primal_candidate: np.ndarray) -> dict:
+def dual_scaling_search(problem: dict, primal_candidate: np.ndarray,
+                        variant_name: str = "synthetic") -> dict:
     vector = problem["center"] + primal_candidate @ problem["generators"]
     residual = oracle.center_vector(vector)
     b = oracle.center_vector(problem["center"])
@@ -531,6 +573,7 @@ def dual_scaling_search(problem: dict, primal_candidate: np.ndarray) -> dict:
                        (b / b_norm) * (2.0 ** exponent)))
     rows = []
     for name, start in starts:
+        started = time.perf_counter()
         witness, optimizer = _optimize_from_start(problem, start)
         checked = oracle.recheck_dual_witness(
             problem["center"], problem["generators"], problem["low"],
@@ -547,6 +590,12 @@ def dual_scaling_search(problem: dict, primal_candidate: np.ndarray) -> dict:
             "witness_sha256": hashlib.sha256(
                 np.ascontiguousarray(witness, dtype="<f8").tobytes()).hexdigest(),
         })
+        _progress(
+            variant_name, "dual_start_complete", started,
+            start=name, optimizer_success=optimizer["success"],
+            outward_safe_lower=
+                checked["psd_dual_candidate_lower_outward_safe"],
+            witness_l2=float(np.linalg.norm(witness)))
     best = max(rows, key=lambda row: row["outward_safe_lower"])
     return {
         "zero_baseline": exact_zero_dual_baseline(problem["dimension"]),
@@ -554,17 +603,83 @@ def dual_scaling_search(problem: dict, primal_candidate: np.ndarray) -> dict:
     }
 
 
+def near_zero_gate(problem: dict, primal: dict) -> dict:
+    relative_tolerance = 1e-9
+    state_tolerance = relative_tolerance * primal["candidate_state_scale"]
+    scaled_residual = primal["max_scaled_equality_residual"]
+    centered_rms = primal["centered_residual_rms"]
+    near = (scaled_residual <= relative_tolerance
+            and centered_rms <= state_tolerance
+            and primal["maximum_box_violation"] == 0.0)
+    return {
+        "is_compelling_near_zero": bool(near),
+        "relative_equality_tolerance": relative_tolerance,
+        "state_residual_tolerance": state_tolerance,
+        "observed_scaled_equality_residual": scaled_residual,
+        "observed_centered_residual_rms": centered_rms,
+        "requires_exact_reconstruction_for_zero_claim": True,
+    }
+
+
 def decide_variant(name: str, variant: dict, exact_max_rank: int,
-                   certificate_dir: Path) -> dict:
+                   certificate_dir: Path, *, skip_exact: bool = False,
+                   exact_only_if_near_zero: bool = True,
+                   fast_first: bool = True) -> dict:
     started = time.perf_counter()
     problem = centered_problem(
         variant["center"], variant["generators"],
         variant["low"], variant["high"], variant["ids"])
-    candidate, primal = numerical_primal_search(problem)
-    upper = exact_candidate_upper(problem, candidate)
-    exact, exact_status = construct_exact_zero_certificate(
-        problem, candidate, exact_max_rank)
+    _progress(name, "variant_start", started,
+              generator_count=problem["variable_count"])
+    if not fast_first:
+        raise RuntimeError("non-fast-first execution is intentionally unsupported")
+    candidate, primal = numerical_primal_search(problem, name)
+    gate = near_zero_gate(problem, primal)
+    dual_started = time.perf_counter()
+    dual = dual_scaling_search(problem, candidate, name)
+    _progress(
+        name, "dual_stage_complete", dual_started,
+        best_outward_safe_lower=dual["best"]["outward_safe_lower"])
+    exact = None
+    upper = None
     certificate_record = None
+    if dual["best"]["outward_safe_lower"] > 0.0:
+        exact_status = {
+            "attempted": False,
+            "reason": "positive outward-safe dual lower established first",
+        }
+        decision = DECISION_POSITIVE
+    elif skip_exact:
+        exact_status = {
+            "attempted": False, "reason": "exact stage disabled by --skip-exact"}
+        decision = DECISION_UNRESOLVED
+    elif exact_only_if_near_zero and not gate["is_compelling_near_zero"]:
+        exact_status = {
+            "attempted": False,
+            "reason": "numerical candidate did not pass near-zero triage",
+        }
+        decision = DECISION_UNRESOLVED
+    else:
+        exact_started = time.perf_counter()
+        _progress(name, "exact_reconstruction_start", exact_started,
+                  numerical_rank_limit=exact_max_rank)
+        exact, exact_status = construct_exact_zero_certificate(
+            problem, candidate, exact_max_rank)
+        _progress(
+            name, "exact_reconstruction_complete", exact_started,
+            verified=bool(exact_status.get("verified", False)),
+            reason=exact_status.get("reason"))
+        if exact is not None:
+            decision = DECISION_ZERO
+        else:
+            upper_started = time.perf_counter()
+            _progress(name, "exact_candidate_upper_start", upper_started)
+            upper = exact_candidate_upper(problem, candidate)
+            _progress(
+                name, "exact_candidate_upper_complete", upper_started,
+                variance_upper_outward_binary64=
+                    upper["variance_upper_outward_binary64"])
+            decision = DECISION_UNRESOLVED
     if exact is not None:
         certificate_path = certificate_dir / f"{name}_exact_zero_witness.json"
         persisted = _atomic_json(certificate_path, exact)
@@ -575,33 +690,54 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
             "sha256": oracle.sha256(certificate_path),
             "record_sha256": persisted["record_sha256"],
         }
-    dual = dual_scaling_search(problem, candidate)
-    if exact is not None:
-        decision = DECISION_ZERO
-    elif dual["best"]["outward_safe_lower"] > 0.0:
-        decision = DECISION_POSITIVE
-    else:
-        decision = DECISION_UNRESOLVED
-    return {
+    record = {
         "variant": name, "decision": decision,
         "generator_count": problem["variable_count"],
         "native_generator_count": variant["native_generator_count"],
         "numerical_generator_count": variant["numerical_generator_count"],
         "primal_numerical_search": primal,
+        "near_zero_gate": gate,
         "primal_exact_binary64_candidate_upper": upper,
         "exact_zero_certificate_status": exact_status,
         "exact_zero_certificate": certificate_record,
         "dual_search": dual,
         "runtime_seconds": time.perf_counter() - started,
     }
+    _progress(
+        name, "variant_complete", started, decision=decision,
+        exact_attempted=bool(exact_status.get("attempted", False)))
+    return record
 
 
 def execute(manifest_path: Path, output_path: Path,
-            exact_max_rank: int = 128) -> dict:
+            exact_max_rank: int = 128, *, fast_first: bool = True,
+            skip_exact: bool = False,
+            exact_only_if_near_zero: bool = True) -> dict:
+    load_started = time.perf_counter()
     variants, identity = _load_authenticated_variants(manifest_path)
+    _progress("all", "loading_authentication_complete", load_started,
+              variant_count=len(variants),
+              artifact_sha256=identity["artifact_sha256"])
     certificate_dir = output_path.parent / "exact_zero_witnesses"
-    results = [decide_variant(name, variant, exact_max_rank, certificate_dir)
-               for name, variant in variants.items()]
+    results = []
+    for name, variant in variants.items():
+        row = decide_variant(
+            name, variant, exact_max_rank, certificate_dir,
+            skip_exact=skip_exact,
+            exact_only_if_near_zero=exact_only_if_near_zero,
+            fast_first=fast_first)
+        results.append(row)
+        print(json.dumps({
+            "event": "ZERO_VARIANCE_VARIANT_RESULT",
+            "result": row,
+        }, sort_keys=True), flush=True)
+        # Persist each completed variant immediately, so diagnostics survive
+        # interruption of a later exact stage.
+        _atomic_json(output_path.with_suffix(".partial.json"), {
+            "schema": SCHEMA, "property_id": PROPERTY_ID,
+            "authenticated_capture": identity, "results": results,
+            "partial": True, "scientific_queries": 0, "bound_calls": 0,
+        })
     return _atomic_json(output_path, {
         "schema": SCHEMA, "property_id": PROPERTY_ID,
         "multiplier": MULTIPLIER, "stage_label": STAGE,
@@ -612,6 +748,10 @@ def execute(manifest_path: Path, output_path: Path,
         "optimizer_is_untrusted": True,
         "zero_decision_requires_exact_rational_witness": True,
         "positive_decision_requires_outward_safe_dual_lower": True,
+        "execution_policy": {
+            "fast_first": fast_first, "skip_exact": skip_exact,
+            "exact_only_if_near_zero": exact_only_if_near_zero,
+        },
         "scientific_queries": 0, "bound_calls": 0,
     })
 
@@ -621,11 +761,19 @@ def main() -> int:
     parser.add_argument("--capture-manifest", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--exact-max-rank", type=int, default=128)
+    parser.add_argument(
+        "--fast-first", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--skip-exact", action="store_true")
+    parser.add_argument(
+        "--exact-only-if-near-zero", action=argparse.BooleanOptionalAction,
+        default=True)
     args = parser.parse_args()
     if not 0 <= args.exact_max_rank <= 128:
         raise RuntimeError("exact rank cap is outside [0,128]")
     report = execute(args.capture_manifest.resolve(), args.output.resolve(),
-                     args.exact_max_rank)
+                     args.exact_max_rank, fast_first=args.fast_first,
+                     skip_exact=args.skip_exact,
+                     exact_only_if_near_zero=args.exact_only_if_near_zero)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
