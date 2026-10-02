@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
+import hashlib
 import json
 import os
 import sys
@@ -33,6 +35,43 @@ NEXT_MANIFEST_SCHEMA = "CORET_PSD_NEXT_LAYERNORM_CAPTURE_MANIFEST_V1"
 NEXT_STAGE = "block2_output"
 NEXT_LAYERNORM_INDEX = 6
 NEXT_REDUCTION_LABEL = "b2_ffn_residual"
+FRONTIER_CAPTURE_SCHEMA = "CORET_BLOCK2_FFN_FRONTIER_CAPTURE_V1"
+FRONTIER_MANIFEST_SCHEMA = "CORET_BLOCK2_FFN_FRONTIER_MANIFEST_V1"
+FRONTIER_STAGE = "block2_ffn_joint_cancellation_frontier"
+
+FRONTIER_REDUCTION_STATES = {
+    "b2_post_attention_layernorm": (
+        "post_attention_ln_pre_reduction",
+        "post_attention_ln_post_reduction"),
+    "b2_ffn_first": (
+        "ffn_first_pre_reduction", "ffn_first_post_reduction"),
+    "b2_relu": (
+        "relu_post_injection_pre_reduction", "relu_post_reduction"),
+    "b2_ffn_second": (
+        "ffn_second_pre_reduction", "ffn_second_post_reduction"),
+    "b2_ffn_residual": (
+        "residual_sum_post_numerical_pre_reduction",
+        "residual_sum_post_reduction"),
+}
+FRONTIER_PAIR_LABEL = "b2_pre_ffn_residual_pair"
+FRONTIER_STATE_NAMES = (
+    "post_attention_ln_pre_reduction",
+    "post_attention_ln_post_reduction",
+    "ffn_first_pre_reduction",
+    "ffn_first_post_reduction",
+    "relu_raw_post_relaxation",
+    "relu_post_injection_pre_reduction",
+    "relu_post_reduction",
+    "ffn_second_pre_reduction",
+    "ffn_second_post_reduction",
+    "residual_pair_pre_ffn",
+    "residual_pair_pre_skip",
+    "residual_pair_post_ffn",
+    "residual_pair_post_skip",
+    "residual_sum_pre_numerical_injection",
+    "residual_sum_post_numerical_pre_reduction",
+    "residual_sum_post_reduction",
+)
 
 
 def _atomic_json(path: Path, value: dict) -> dict:
@@ -308,6 +347,181 @@ class NextLayerNormFailureCapture:
         }
 
 
+def _frontier_snapshot(state, proof) -> dict:
+    low, high = capture.sound._ranges(state)
+    snapshot = {
+        "weights": state.zonotope_w.detach().cpu().clone(),
+        "range_low": low.detach().cpu().clone(),
+        "range_high": high.detach().cpu().clone(),
+        "proof": {
+            "masks": list(proof.masks), "ids": list(proof.ids),
+            "reasons": list(proof.reasons), "num_tokens": proof.num_tokens,
+        },
+    }
+    weights = snapshot["weights"]
+    generators = int(weights.shape[0] - 1)
+    if (weights.ndim != 3 or weights.dtype != capture.sound.torch.float64
+            or weights.device.type != "cpu"
+            or snapshot["range_low"].dtype != capture.sound.torch.float64
+            or snapshot["range_high"].dtype != capture.sound.torch.float64
+            or tuple(snapshot["range_low"].shape) != (generators,)
+            or tuple(snapshot["range_high"].shape) != (generators,)
+            or len(proof.ids) != generators
+            or len(proof.masks) != generators
+            or len(proof.reasons) != generators
+            or int(proof.num_tokens) != int(weights.shape[1])
+            or len(set(proof.ids)) != generators
+            or not bool(capture.sound.torch.isfinite(weights).all())
+            or not bool(capture.sound.torch.isfinite(
+                snapshot["range_low"]).all())
+            or not bool(capture.sound.torch.isfinite(
+                snapshot["range_high"]).all())
+            or bool((snapshot["range_low"] > snapshot["range_high"]).any())):
+        raise RuntimeError("FFN frontier snapshot topology/ranges differ")
+    return snapshot
+
+
+def _frontier_state_hashes(state: dict) -> dict:
+    proof = state["proof"]
+    range_sha = hashlib.sha256(
+        state["range_low"].contiguous().numpy().tobytes()
+        + state["range_high"].contiguous().numpy().tobytes()).hexdigest()
+    ids_sha = capture._json_sha(proof["ids"])
+    provenance_sha = capture._json_sha({
+        "masks": proof["masks"], "reasons": proof["reasons"],
+        "num_tokens": proof["num_tokens"],
+    })
+    reasons = proof["reasons"]
+    return {
+        "center_sha256": capture._tensor_sha(state["weights"][0]),
+        "generator_sha256": capture._tensor_sha(state["weights"][1:]),
+        "generator_ids_sha256": ids_sha,
+        "ranges_sha256": range_sha,
+        "provenance_sha256": provenance_sha,
+        "generator_id_range_provenance_sha256": capture._json_sha({
+            "generator_ids_sha256": ids_sha,
+            "ranges_sha256": range_sha,
+            "provenance_sha256": provenance_sha,
+        }),
+        "generator_count": len(reasons),
+        "native_generator_count": sum(
+            reason not in capture.NUMERICAL_REASONS for reason in reasons),
+        "numerical_generator_count": sum(
+            reason in capture.NUMERICAL_REASONS for reason in reasons),
+        "token_count": int(state["weights"].shape[1]),
+        "feature_dimension": int(state["weights"].shape[2]),
+        "dtype": str(state["weights"].dtype).replace("torch.", ""),
+    }
+
+
+class FFNFrontierCapture:
+    """Semantically passive Block-2 FFN boundary capture interposer."""
+
+    def __init__(self):
+        self.states = {}
+        self.reductions = {}
+        self._original_inject = None
+        self._original_reduce = None
+        self._original_reduce_pair = None
+
+    def _put(self, name, state, proof):
+        if name in self.states:
+            raise RuntimeError(f"FFN frontier state captured twice: {name}")
+        self.states[name] = _frontier_snapshot(state, proof)
+
+    @contextlib.contextmanager
+    def installed(self):
+        sound = capture.sound
+        if self._original_inject is not None:
+            raise RuntimeError("FFN frontier capture is already installed")
+        self._original_inject = sound._inject
+        self._original_reduce = sound._maybe_reduce
+        self._original_reduce_pair = sound._maybe_reduce_pair
+
+        def inject_wrapper(output, proof, inputs, label, operations,
+                           measurements, condition=1.0, reserve=None):
+            result = self._original_inject(
+                output, proof, inputs, label, operations, measurements,
+                condition=condition, reserve=reserve)
+            if label == "b2_relu":
+                self._put("relu_raw_post_relaxation", output, proof)
+            elif label == "b2_ffn_residual":
+                self._put(
+                    "residual_sum_pre_numerical_injection", output, proof)
+            return result
+
+        def reduce_wrapper(state, proof, label, reductions):
+            names = FRONTIER_REDUCTION_STATES.get(label)
+            before_records = len(reductions)
+            if names is not None:
+                self._put(names[0], state, proof)
+            result = self._original_reduce(state, proof, label, reductions)
+            if names is not None:
+                self._put(names[1], result[0], result[1])
+                self.reductions[label] = copy.deepcopy(
+                    reductions[before_records:])
+            return result
+
+        def pair_wrapper(left, right, proof, label, reductions):
+            before_records = len(reductions)
+            if label == FRONTIER_PAIR_LABEL:
+                self._put("residual_pair_pre_ffn", left, proof)
+                self._put("residual_pair_pre_skip", right, proof)
+            result = self._original_reduce_pair(
+                left, right, proof, label, reductions)
+            if label == FRONTIER_PAIR_LABEL:
+                self._put("residual_pair_post_ffn", result[0], result[2])
+                self._put("residual_pair_post_skip", result[1], result[2])
+                self.reductions[label] = copy.deepcopy(
+                    reductions[before_records:])
+            return result
+
+        sound._inject = inject_wrapper
+        sound._maybe_reduce = reduce_wrapper
+        sound._maybe_reduce_pair = pair_wrapper
+        try:
+            yield self
+        finally:
+            sound._inject = self._original_inject
+            sound._maybe_reduce = self._original_reduce
+            sound._maybe_reduce_pair = self._original_reduce_pair
+            self._original_inject = None
+            self._original_reduce = None
+            self._original_reduce_pair = None
+
+    def materialize(self) -> dict:
+        if tuple(self.states) != FRONTIER_STATE_NAMES:
+            raise RuntimeError(
+                "FFN frontier state inventory differs: "
+                f"{tuple(self.states)}")
+        expected_reductions = (
+            "b2_post_attention_layernorm", "b2_ffn_first", "b2_relu",
+            "b2_ffn_second", FRONTIER_PAIR_LABEL, "b2_ffn_residual")
+        if tuple(self.reductions) != expected_reductions:
+            raise RuntimeError("FFN frontier reduction inventory differs")
+        for side in ("pre", "post"):
+            left = self.states[f"residual_pair_{side}_ffn"]
+            right = self.states[f"residual_pair_{side}_skip"]
+            if (left["proof"] != right["proof"]
+                    or not capture.sound.torch.equal(
+                        left["range_low"], right["range_low"])
+                    or not capture.sound.torch.equal(
+                        left["range_high"], right["range_high"])):
+                raise RuntimeError(
+                    f"FFN frontier {side} pair does not share IDs/ranges")
+        return {
+            "states": self.states,
+            "reductions": self.reductions,
+            "aliases": {
+                "relu_pre_activation": "ffn_first_post_reduction",
+                "known_exact_zero_pre_final_reduction":
+                    "residual_sum_post_numerical_pre_reduction",
+                "known_exact_zero_post_final_reduction":
+                    "residual_sum_post_reduction",
+            },
+        }
+
+
 def _relative(path: Path, root: Path) -> str:
     return os.path.relpath(path.resolve(), root.resolve())
 
@@ -420,6 +634,135 @@ def _persist_next_capture(output_root: Path,
             states["pre_last_reduction"]["weights"].shape[0] - 1),
         "post_generator_count": int(
             states["post_last_reduction"]["weights"].shape[0] - 1),
+        "verified_identity": verified,
+    }
+
+
+def _verify_ffn_frontier_capture(manifest_path: Path) -> dict:
+    manifest = cluster_common.verified_json(manifest_path)
+    if (manifest.get("schema") != FRONTIER_MANIFEST_SCHEMA
+            or manifest.get("property_id") != PROPERTY_ID
+            or manifest.get("multiplier") != MULTIPLIER
+            or manifest.get("tested_radius") != TESTED_RADIUS
+            or manifest.get("tested_radius_hex") != TESTED_RADIUS_HEX
+            or manifest.get("stage_label") != FRONTIER_STAGE
+            or manifest.get("pinned_deept_revision") !=
+            capture.prefix.PINNED_REVISION
+            or manifest.get("scientific_manifest_sha256") !=
+            cluster_common.SCIENTIFIC_MANIFEST_SHA
+            or manifest.get("production_manifest_sha256") !=
+            cluster_common.PRODUCTION_MANIFEST_SHA
+            or manifest.get("source_set_model") != capture.SOURCE_SET_MODEL):
+        raise RuntimeError("FFN frontier manifest identity differs")
+    artifact_path = (manifest_path.parent
+                     / manifest["tensor_artifact_path"]).resolve()
+    if cluster_common.sha256(artifact_path) != manifest[
+            "tensor_artifact_sha256"]:
+        raise RuntimeError("FFN frontier artifact SHA differs")
+    payload = capture.sound.torch.load(
+        artifact_path, map_location="cpu", weights_only=False)
+    if (payload.get("schema") != FRONTIER_CAPTURE_SCHEMA
+            or payload.get("pinned_revision") !=
+            capture.prefix.PINNED_REVISION
+            or payload.get("identity") != manifest.get("artifact_identity")
+            or tuple((payload.get("states") or {}).keys()) !=
+            FRONTIER_STATE_NAMES):
+        raise RuntimeError("FFN frontier artifact identity/inventory differs")
+    states = payload["states"]
+    variants = manifest.get("variants")
+    if (not isinstance(variants, list)
+            or [row.get("state_key") for row in variants]
+            != list(FRONTIER_STATE_NAMES)):
+        raise RuntimeError("FFN frontier manifest state inventory differs")
+    for row in variants:
+        name = row["state_key"]
+        actual = _frontier_state_hashes(states[name])
+        for field, value in actual.items():
+            if row.get(field) != value:
+                raise RuntimeError(
+                    f"FFN frontier state hash differs: {name}/{field}")
+    reductions = payload.get("reductions")
+    if (not isinstance(reductions, dict)
+            or capture._json_sha(reductions) !=
+            manifest.get("reduction_records_sha256")):
+        raise RuntimeError("FFN frontier reduction records differ")
+    aliases = payload.get("aliases")
+    if aliases != manifest.get("aliases"):
+        raise RuntimeError("FFN frontier aliases differ")
+    for side in ("pre", "post"):
+        left = states[f"residual_pair_{side}_ffn"]
+        right = states[f"residual_pair_{side}_skip"]
+        if (left["proof"] != right["proof"]
+                or not capture.sound.torch.equal(
+                    left["range_low"], right["range_low"])
+                or not capture.sound.torch.equal(
+                    left["range_high"], right["range_high"])):
+            raise RuntimeError(
+                f"FFN frontier persisted {side} pair identity differs")
+    result_path = (manifest_path.parent / manifest["result_path"]).resolve()
+    if cluster_common.sha256(result_path) != manifest["result_sha256"]:
+        raise RuntimeError("FFN frontier result SHA differs")
+    _validate_next_failure_result(campaign._verified_result(result_path))
+    return {
+        "schema": FRONTIER_MANIFEST_SCHEMA,
+        "property_id": PROPERTY_ID,
+        "state_count": len(states),
+        "tensor_artifact_sha256": manifest["tensor_artifact_sha256"],
+        "result_sha256": manifest["result_sha256"],
+        "shared_pair_identity_verified": True,
+    }
+
+
+def _persist_ffn_frontier_capture(
+        output_root: Path, captured: FFNFrontierCapture,
+        source_capture: dict, result_path: Path) -> dict:
+    materialized = captured.materialize()
+    identity = {
+        "property_id": PROPERTY_ID,
+        "multiplier": MULTIPLIER,
+        "tested_radius": TESTED_RADIUS,
+        "tested_radius_hex": TESTED_RADIUS_HEX,
+        "stage_label": FRONTIER_STAGE,
+        "pinned_deept_revision": source_capture["pinned_deept_revision"],
+        "scientific_manifest_sha256": source_capture[
+            "scientific_manifest_sha256"],
+        "production_manifest_sha256": source_capture[
+            "production_manifest_sha256"],
+        "source_set_model": source_capture["source_set_model"],
+    }
+    artifact_path = output_root / "block2_ffn_frontier_states.pt"
+    capture._write_torch_atomic(artifact_path, {
+        "schema": FRONTIER_CAPTURE_SCHEMA,
+        "pinned_revision": source_capture["pinned_deept_revision"],
+        "identity": identity,
+        **materialized,
+    })
+    variants = [{
+        "state_key": name,
+        **_frontier_state_hashes(materialized["states"][name]),
+    } for name in FRONTIER_STATE_NAMES]
+    manifest_path = output_root / "block2_ffn_frontier_manifest.json"
+    manifest = _atomic_json(manifest_path, {
+        "schema": FRONTIER_MANIFEST_SCHEMA,
+        **identity,
+        "tensor_artifact_path": _relative(artifact_path, output_root),
+        "tensor_artifact_sha256": cluster_common.sha256(artifact_path),
+        "artifact_identity": identity,
+        "result_path": _relative(result_path, output_root),
+        "result_sha256": cluster_common.sha256(result_path),
+        "aliases": materialized["aliases"],
+        "reduction_records_sha256": capture._json_sha(
+            materialized["reductions"]),
+        "variants": variants,
+    })
+    verified = _verify_ffn_frontier_capture(manifest_path)
+    return {
+        "artifact_path": str(artifact_path),
+        "artifact_sha256": cluster_common.sha256(artifact_path),
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": cluster_common.sha256(manifest_path),
+        "manifest_record_sha256": manifest["record_sha256"],
+        "state_count": len(materialized["states"]),
         "verified_identity": verified,
     }
 
@@ -602,13 +945,15 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
     harness = LayerNormExperimentHarness(
         PROPERTY_ID, TESTED_RADIUS, expected_state_identity, oracle_identity)
     next_capture = NextLayerNormFailureCapture()
+    frontier_capture = FFNFrontierCapture()
     execution_root = output_root / "scientific_execution"
     device = f"cuda:{device_index}"
     campaign._property_boundary_cleanup(device)
     campaign_error = None
     result = None
     try:
-        with _installed_finish_hook(harness, next_capture):
+        with frontier_capture.installed(), \
+                _installed_finish_hook(harness, next_capture):
             result = campaign.execute_property(row, execution_root, device)
     except Exception as error:
         campaign_error = error
@@ -657,6 +1002,8 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
     _validate_next_failure_result(result)
     next_capture_record = _persist_next_capture(
         output_root, next_capture, capture_identity, result_path)
+    frontier_capture_record = _persist_ffn_frontier_capture(
+        output_root, frontier_capture, capture_identity, result_path)
     return _atomic_json(output_root / "experiment_report.json", {
         "schema": SCHEMA,
         "verdict": "CORET_PSD_LAYERNORM_EXPERIMENT_COMPLETE",
@@ -687,6 +1034,7 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
         "next_failure_reason": result.get("failure_reason"),
         "generic_fallback_count": result.get("generic_fallback_count"),
         "next_layernorm_capture": next_capture_record,
+        "block2_ffn_frontier_capture": frontier_capture_record,
         "scientific_queries": 1,
         "bound_calls": 1,
     })
