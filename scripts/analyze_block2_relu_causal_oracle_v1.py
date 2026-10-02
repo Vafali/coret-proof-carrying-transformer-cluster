@@ -88,12 +88,14 @@ def _exact_affine_bounds(center: np.ndarray, generators: np.ndarray,
 
 class ReluCancellationProblem:
     def __init__(self, preactivation: dict, residual: dict,
-                 weight: np.ndarray, bias: np.ndarray, label="block2_relu"):
+                 weight: np.ndarray, bias: np.ndarray, label="block2_relu",
+                 exact_preactivation=None):
         h, r, source = frontier._align_sources(preactivation, residual)
         self.h, self.r, self.source = h, r, source
         self.weight = np.asarray(weight, dtype=np.float64)
         self.bias = np.asarray(bias, dtype=np.float64)
         self.label = label
+        self.exact_preactivation = exact_preactivation
         if (h["center"].ndim != 1 or r["center"].shape != (128,)
                 or self.weight.shape != (128, h["center"].size)
                 or self.bias.shape != (128,)):
@@ -101,8 +103,7 @@ class ReluCancellationProblem:
         self.n = len(source["ids"])
         self.m = h["center"].size
         started = time.perf_counter()
-        self.lower_exact, self.upper_exact = _exact_affine_bounds(
-            h["center"], h["generators"], source["low"], source["high"])
+        self.lower_exact, self.upper_exact = self._exact_bounds()
         self.bound_seconds = time.perf_counter() - started
         self.inactive = [index for index, upper in enumerate(self.upper_exact)
                          if upper <= 0]
@@ -124,7 +125,40 @@ class ReluCancellationProblem:
             "r_generators": frontier._array_sha(r["generators"]),
             "weight": frontier._array_sha(self.weight),
             "bias": frontier._array_sha(self.bias),
+            "exact_preactivation_identity": (
+                None if exact_preactivation is None
+                else exact_preactivation["identity_sha256"]),
         })
+
+    def h_center_exact(self, coordinate: int) -> Fraction:
+        if self.exact_preactivation is None:
+            return _fraction(self.h["center"][coordinate])
+        return self.exact_preactivation["center"](coordinate)
+
+    def h_generator_exact(self, source: int, coordinate: int) -> Fraction:
+        if self.exact_preactivation is None:
+            return _fraction(self.h["generators"][source, coordinate])
+        return self.exact_preactivation["generator"](source, coordinate)
+
+    def _exact_bounds(self):
+        if (self.exact_preactivation is not None
+                and self.exact_preactivation.get("bounds") is not None):
+            lower, upper = self.exact_preactivation["bounds"]
+            if len(lower) != self.h["center"].size or len(upper) != len(lower):
+                raise RuntimeError("exact preactivation bound dimensions differ")
+            return list(lower), list(upper)
+        lowers, uppers = [], []
+        for coordinate in range(self.h["center"].size):
+            lo = hi = self.h_center_exact(coordinate)
+            for source, (lower, upper) in enumerate(zip(
+                    self.source["low"], self.source["high"])):
+                coefficient = self.h_generator_exact(source, coordinate)
+                first = coefficient * _fraction(lower)
+                second = coefficient * _fraction(upper)
+                lo += min(first, second)
+                hi += max(first, second)
+            lowers.append(lo); uppers.append(hi)
+        return lowers, uppers
 
     def _build_numeric_hull(self):
         active = np.asarray(self.active, dtype=np.int64)
@@ -175,31 +209,15 @@ class ReluCancellationProblem:
 
     def exact_h(self, values: list[Fraction]) -> list[Fraction]:
         return [
-            _fraction(center) + sum(
-                (_fraction(self.h["generators"][row, coordinate]) * xi
+            self.h_center_exact(coordinate) + sum(
+                (self.h_generator_exact(row, coordinate) * xi
                  for row, xi in enumerate(values)), Fraction(0))
-            for coordinate, center in enumerate(self.h["center"])]
+            for coordinate in range(self.h["center"].size)]
 
     def fixed_pattern_model(self, active_pattern: list[bool]):
         if len(active_pattern) != self.m:
             raise RuntimeError("activation pattern length differs")
-        masked = self.weight.copy()
-        masked[:, np.logical_not(active_pattern)] = 0.0
-        pre = {
-            "center": self.h["center"], "generators": self.h["generators"],
-            "low": self.source["low"], "high": self.source["high"],
-            "ids": self.source["ids"], "masks": self.source["masks"],
-            "reasons": self.source["reasons"], "num_tokens": 1,
-        }
-        residual = {
-            "center": self.r["center"], "generators": self.r["generators"],
-            "low": self.source["low"], "high": self.source["high"],
-            "ids": self.source["ids"], "masks": self.source["masks"],
-            "reasons": self.source["reasons"], "num_tokens": 1,
-        }
-        return frontier.ExactJointAffine(
-            pre, residual, weight=masked, bias=self.bias,
-            label="exact_fixed_relu_pattern")
+        return ExactFixedReluModel(self, active_pattern)
 
     def verify_pattern(self, values: list[Fraction], pattern: list[bool]) -> dict:
         h = self.exact_h(values)
@@ -224,17 +242,17 @@ class ReluCancellationProblem:
             A.append({y: Fraction(-1)}); b.append(Fraction(0))
             row = {y: Fraction(-1)}
             for source in range(self.n):
-                value = _fraction(self.h["generators"][source, neuron])
+                value = self.h_generator_exact(source, neuron)
                 if value: row[source] = value
-            A.append(row); b.append(-_fraction(self.h["center"][neuron]))
+            A.append(row); b.append(-self.h_center_exact(neuron))
             lower, upper = self.lower_exact[neuron], self.upper_exact[neuron]
             alpha = upper / (upper - lower)
             row = {y: Fraction(1)}
             for source in range(self.n):
-                value = -alpha * _fraction(self.h["generators"][source, neuron])
+                value = -alpha * self.h_generator_exact(source, neuron)
                 if value: row[source] = value
             A.append(row)
-            b.append(alpha * (_fraction(self.h["center"][neuron]) - lower))
+            b.append(alpha * (self.h_center_exact(neuron) - lower))
         E, f = [], []
         active = self.active
         for output in range(1, 128):
@@ -245,7 +263,7 @@ class ReluCancellationProblem:
                 for neuron in active:
                     value += ((_fraction(self.weight[output, neuron])
                                - _fraction(self.weight[0, neuron]))
-                              * _fraction(self.h["generators"][source, neuron]))
+                              * self.h_generator_exact(source, neuron))
                 if value: row[source] = value
             for local, neuron in enumerate(self.unstable):
                 value = (_fraction(self.weight[output, neuron])
@@ -257,9 +275,87 @@ class ReluCancellationProblem:
             for neuron in active:
                 constant += ((_fraction(self.weight[output, neuron])
                               - _fraction(self.weight[0, neuron]))
-                             * _fraction(self.h["center"][neuron]))
+                             * self.h_center_exact(neuron))
             E.append(row); f.append(-constant)
         return A, b, E, f, variable_count
+
+
+class ExactFixedReluModel:
+    """Exact shared-source r + W2*ReLU(h)+b2 for one fixed sign pattern."""
+
+    def __init__(self, parent: ReluCancellationProblem, pattern: list[bool]):
+        self.parent = parent
+        self.pattern = list(pattern)
+        masked = parent.weight.copy()
+        masked[:, np.logical_not(pattern)] = 0.0
+        self.masked = masked
+        self.numeric_center = (parent.r["center"] + parent.bias
+                               + masked @ parent.h["center"])
+        self.numeric_generators = (parent.r["generators"]
+                                   + parent.h["generators"] @ masked.T)
+        self.source = parent.source
+
+    def _coordinate(self, output: int, source: int | None) -> Fraction:
+        if source is None:
+            value = (_fraction(self.parent.r["center"][output])
+                     + _fraction(self.parent.bias[output]))
+            h_value = self.parent.h_center_exact
+        else:
+            value = _fraction(self.parent.r["generators"][source, output])
+            h_value = lambda coordinate: self.parent.h_generator_exact(
+                source, coordinate)
+        for coordinate, active in enumerate(self.pattern):
+            if active:
+                value += (_fraction(self.parent.weight[output, coordinate])
+                          * h_value(coordinate))
+        return value
+
+    def exact_center_difference(self, row: int) -> Fraction:
+        return self._coordinate(row, None) - self._coordinate(-1, None)
+
+    def exact_coefficient(self, row: int, column: int) -> Fraction:
+        return self._coordinate(row, column) - self._coordinate(-1, column)
+
+    def exact_residual(self, values: list[Fraction]) -> list[Fraction]:
+        h = self.parent.exact_h(values)
+        residual = [
+            _fraction(center) + sum(
+                (_fraction(self.parent.r["generators"][source, coordinate])
+                 * xi for source, xi in enumerate(values)), Fraction(0))
+            for coordinate, center in enumerate(self.parent.r["center"])]
+        output = []
+        for row in range(128):
+            value = residual[row] + _fraction(self.parent.bias[row])
+            value += sum(
+                (_fraction(self.parent.weight[row, coordinate]) * h[coordinate]
+                 for coordinate, active in enumerate(self.pattern) if active),
+                Fraction(0))
+            output.append(value)
+        return [value - output[-1] for value in output[:-1]]
+
+    def exact_replay(self, values: list[Fraction]) -> dict:
+        residuals = self.exact_residual(values)
+        if any(residuals):
+            raise RuntimeError("exact joint cancellation replay is nonzero")
+        return {
+            "exact_equalities": len(residuals),
+            "exact_box_constraints": len(values),
+            "maximum_exact_residual": "0", "exact_variance": "0",
+            "joint_residual_ffn_correlation_preserved": True,
+            "exact_preactivation_composition_replayed": True,
+        }
+
+    def problem(self) -> dict:
+        problem = zero.centered_problem(
+            self.numeric_center, self.numeric_generators,
+            self.source["low"], self.source["high"], self.source["ids"])
+        problem.update({
+            "exact_center_difference": self.exact_center_difference,
+            "exact_coefficient": self.exact_coefficient,
+            "exact_residual": self.exact_residual,
+            "exact_replay": self.exact_replay,
+        })
+        return problem
 
 
 def solve_hull(problem: ReluCancellationProblem,
