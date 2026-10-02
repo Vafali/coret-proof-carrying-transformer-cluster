@@ -9,11 +9,14 @@ directed/outward dual checker.  Otherwise the result is explicitly unresolved.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import math
 import os
+import signal
 import sys
+import threading
 import time
 from fractions import Fraction
 from pathlib import Path
@@ -43,8 +46,9 @@ REDUCTION_LABEL = "b2_ffn_residual"
 DECISION_ZERO = "ZERO_VARIANCE_FEASIBLE_EXACT"
 DECISION_POSITIVE = "ZERO_VARIANCE_NOT_ESTABLISHED_DUAL_POSITIVE"
 DECISION_UNRESOLVED = "ZERO_VARIANCE_UNRESOLVED"
-EXACT_SOLVER_FAILED = "EXACT_SOLVER_UNAVAILABLE_OR_FAILED"
+EXACT_INTEGER_SOLVER_FAILED = "EXACT_INTEGER_SOLVER_FAILED"
 EXACT_SOLUTION_OUTSIDE_BOX = "EXACT_SOLUTION_OUTSIDE_AUTHENTICATED_BOX"
+EXACT_REPLAY_FAILED = "EXACT_REPLAY_FAILED"
 EXACT_ZERO_VERIFIED = "EXACT_AUTHENTICATED_ZERO_WITNESS_VERIFIED"
 
 
@@ -405,79 +409,128 @@ def verify_exact_zero_certificate(problem: dict, certificate: dict) -> dict:
     }
 
 
-def _solve_exact_selected_system(
-        matrix: sympy.Matrix, rhs: list[sympy.Rational]
-) -> tuple[list[sympy.Rational], dict]:
-    """Solve a bounded exact correction system and replay it over QQ.
+class ExactIntegerSolverError(RuntimeError):
+    pass
 
-    DomainMatrix API availability varies between the pinned cluster images.
-    ``solve_den`` is the preferred stable fraction-free interface.  The
-    bounded Matrix fallback is deliberately restricted to the already
-    selected correction system (at most ``maximum_rank`` columns), never the
-    full generator population.
-    """
-    rhs_matrix = sympy.Matrix(rhs)
-    failures = []
-    solution = None
-    solver_api = None
-    try:
-        from sympy.polys.matrices import DomainMatrix
-        domain_matrix = DomainMatrix.from_Matrix(matrix)
-        domain_rhs = DomainMatrix.from_Matrix(rhs_matrix)
-        domain_matrix, domain_rhs = domain_matrix.unify(
-            domain_rhs, fmt="dense")
-        solve_den = getattr(domain_matrix, "solve_den", None)
-        if not callable(solve_den):
-            failures.append("DomainMatrix.solve_den unavailable")
-        else:
-            try:
-                numerator, denominator = solve_den(domain_rhs)
-                denominator = sympy.sympify(denominator)
-                if denominator == 0:
-                    raise RuntimeError("exact solver returned zero denominator")
-                solution = numerator.to_Matrix().applyfunc(
-                    lambda value: sympy.cancel(value / denominator))
-                solver_api = "DomainMatrix.solve_den"
-            except Exception as error:
-                failures.append(
-                    f"DomainMatrix.solve_den: {type(error).__name__}: {error}")
-                solution = None
-    except Exception as error:
-        failures.append(
-            f"DomainMatrix setup: {type(error).__name__}: {error}")
 
-    if solution is None:
-        try:
-            solution, parameters = matrix.gauss_jordan_solve(rhs_matrix)
-            if parameters.rows:
-                raise RuntimeError(
-                    "selected exact correction system is underdetermined")
-            solution = solution.applyfunc(sympy.cancel)
-            solver_api = "Matrix.gauss_jordan_solve"
-        except Exception as error:
-            failures.append(
-                f"Matrix.gauss_jordan_solve: {type(error).__name__}: {error}")
-            raise RuntimeError("; ".join(failures)) from error
+class ExactReplayError(RuntimeError):
+    pass
 
-    if solution.shape != (matrix.cols, rhs_matrix.cols):
-        raise RuntimeError(
-            "exact solver returned an unexpected solution shape "
-            f"{solution.shape} != {(matrix.cols, rhs_matrix.cols)}")
-    residual = matrix * solution - rhs_matrix
-    if any(value != 0 for value in residual):
-        raise RuntimeError("exact selected-system replay is nonzero")
-    values = [sympy.Rational(value) for value in solution]
-    return values, {
-        "sympy_version": sympy.__version__,
-        "solver_api": solver_api,
-        "selected_system_shape": [int(matrix.rows), int(matrix.cols)],
-        "exact_selected_system_replay": True,
-        "preferred_solver_failures": failures,
+
+def _dyadic_row_to_integers(values: list[Fraction]) -> tuple[list[int], dict]:
+    """Clear a dyadic row denominator and remove its integer content."""
+    exponents = []
+    for value in values:
+        denominator = value.denominator
+        if denominator <= 0 or denominator & (denominator - 1):
+            raise ExactIntegerSolverError(
+                "selected correction system contains a non-dyadic value")
+        exponents.append(denominator.bit_length() - 1)
+    common_exponent = max(exponents, default=0)
+    integers = [
+        value.numerator << (common_exponent - exponent)
+        for value, exponent in zip(values, exponents)
+    ]
+    content = 0
+    for value in integers:
+        content = math.gcd(content, abs(value))
+    content = max(content, 1)
+    integers = [value // content for value in integers]
+    first = next((value for value in integers if value), 0)
+    if first < 0:
+        integers = [-value for value in integers]
+    return integers, {
+        "common_denominator_power_of_two": common_exponent,
+        "removed_row_gcd_bits": content.bit_length() - 1,
+        "maximum_integer_bits": max(
+            (abs(value).bit_length() for value in integers), default=0),
     }
 
 
-def construct_exact_zero_certificate(problem: dict, candidate: np.ndarray,
-                                     maximum_rank: int) -> tuple[dict | None, dict]:
+@contextmanager
+def _exact_solve_guard(timeout_seconds: float):
+    """Interrupt a silent exact solve on POSIX when run in the main thread."""
+    enabled = (timeout_seconds > 0 and hasattr(signal, "SIGALRM")
+               and threading.current_thread() is threading.main_thread())
+    if not enabled:
+        yield False
+        return
+    def timed_out(_signum, _frame):
+        raise TimeoutError(
+            f"exact integer solve exceeded {timeout_seconds:g} seconds")
+
+    previous_handler = signal.signal(signal.SIGALRM, timed_out)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        yield True
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0.0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
+def _solve_exact_integer_system(
+        integer_rows: list[list[int]], integer_rhs: list[int],
+        timeout_seconds: float
+) -> tuple[list[Fraction], dict]:
+    """Fraction-free exact solve over ZZ followed by integer replay."""
+    from sympy.polys.matrices import DomainMatrix
+
+    if not integer_rows or len(integer_rows) != len(integer_rows[0]):
+        raise ExactIntegerSolverError(
+            "selected exact integer system is not nonempty and square")
+    if len(integer_rhs) != len(integer_rows):
+        raise ExactIntegerSolverError("exact integer RHS shape differs")
+    try:
+        domain_matrix = DomainMatrix.from_list(integer_rows, sympy.ZZ)
+        domain_rhs = DomainMatrix.from_list(
+            [[value] for value in integer_rhs], sympy.ZZ)
+        if domain_matrix.domain != sympy.ZZ or domain_rhs.domain != sympy.ZZ:
+            raise ExactIntegerSolverError("exact system domain is not ZZ")
+        solve_den = getattr(domain_matrix, "solve_den", None)
+        if not callable(solve_den):
+            raise ExactIntegerSolverError(
+                "DomainMatrix.solve_den is unavailable for ZZ")
+        with _exact_solve_guard(timeout_seconds) as guard_enabled:
+            numerator, denominator = solve_den(domain_rhs)
+        denominator = int(denominator)
+        if denominator == 0:
+            raise ExactIntegerSolverError(
+                "exact integer solver returned zero denominator")
+        numerators = [int(row[0]) for row in numerator.to_list()]
+        if len(numerators) != len(integer_rows):
+            raise ExactIntegerSolverError(
+                "exact integer solver returned unexpected solution shape")
+        if denominator < 0:
+            denominator = -denominator
+            numerators = [-value for value in numerators]
+        for row, rhs, in zip(integer_rows, integer_rhs):
+            if sum(coefficient * value for coefficient, value in
+                   zip(row, numerators)) != denominator * rhs:
+                raise ExactReplayError(
+                    "selected exact integer system replay is nonzero")
+    except ExactReplayError:
+        raise
+    except Exception as error:
+        raise ExactIntegerSolverError(
+            f"{type(error).__name__}: {error}") from error
+    return [Fraction(value, denominator) for value in numerators], {
+        "sympy_version": sympy.__version__,
+        "solver_api": "DomainMatrix.solve_den",
+        "solver_domain": "ZZ",
+        "selected_system_shape": [len(integer_rows), len(integer_rows[0])],
+        "common_solution_denominator_bits": denominator.bit_length(),
+        "exact_selected_system_replay": True,
+        "timeout_guard_enabled": guard_enabled,
+        "timeout_seconds": timeout_seconds,
+    }
+
+
+def construct_exact_zero_certificate(
+        problem: dict, candidate: np.ndarray, maximum_rank: int,
+        *, variant_name: str = "synthetic",
+        solve_timeout_seconds: float = 300.0) -> tuple[dict | None, dict]:
     A = problem["A"]
     free = np.flatnonzero(problem["low"] < problem["high"])
     slack = np.minimum(candidate - problem["low"],
@@ -527,24 +580,56 @@ def construct_exact_zero_certificate(problem: dict, candidate: np.ndarray,
     values = [_fraction(value) for value in candidate]
     try:
         if rank:
-            matrix = sympy.Matrix([
-                [sympy.Rational(_exact_coefficient(problem, int(row), int(col)).numerator,
-                                _exact_coefficient(problem, int(row), int(col)).denominator)
-                 for col in selected_columns]
-                for row in selected_rows])
-            rhs = []
+            build_started = time.perf_counter()
+            integer_rows = []
+            integer_rhs = []
+            row_metadata = []
             for row in selected_rows:
-                value = -_exact_center_difference(problem, int(row))
-                value -= sum(
+                rhs = -_exact_center_difference(problem, int(row))
+                rhs -= sum(
                     (_exact_coefficient(problem, int(row), column) * values[column]
                      for column in range(problem["variable_count"])
                      if column not in selected_set), Fraction(0))
-                rhs.append(sympy.Rational(value.numerator, value.denominator))
-            solution, solver_evidence = _solve_exact_selected_system(
-                matrix, rhs)
+                dyadic_row = [
+                    _exact_coefficient(problem, int(row), int(column))
+                    for column in selected_columns]
+                integers, metadata = _dyadic_row_to_integers(
+                    [*dyadic_row, rhs])
+                integer_rows.append(integers[:-1])
+                integer_rhs.append(integers[-1])
+                row_metadata.append(metadata)
+            build_seconds = time.perf_counter() - build_started
+            _progress(
+                variant_name, "integer_system_build", build_started,
+                row_count=len(integer_rows), column_count=len(selected_columns),
+                maximum_row_denominator_power=max(
+                    item["common_denominator_power_of_two"]
+                    for item in row_metadata),
+                maximum_integer_bits=max(
+                    item["maximum_integer_bits"] for item in row_metadata))
+            solve_started = time.perf_counter()
+            solution, solver_evidence = _solve_exact_integer_system(
+                integer_rows, integer_rhs, solve_timeout_seconds)
+            solve_seconds = time.perf_counter() - solve_started
+            _progress(
+                variant_name, "exact_integer_solve", solve_started,
+                solver_api=solver_evidence["solver_api"],
+                solver_domain=solver_evidence["solver_domain"])
+            solver_evidence.update({
+                "integer_system_build_seconds": build_seconds,
+                "exact_integer_solve_seconds": solve_seconds,
+                "row_denominator_power_min": min(
+                    item["common_denominator_power_of_two"]
+                    for item in row_metadata),
+                "row_denominator_power_max": max(
+                    item["common_denominator_power_of_two"]
+                    for item in row_metadata),
+                "maximum_integer_bits": max(
+                    item["maximum_integer_bits"] for item in row_metadata),
+            })
             diagnostics["exact_solver"] = solver_evidence
             for column, value in zip(selected_columns, solution):
-                values[int(column)] = Fraction(int(value.p), int(value.q))
+                values[int(column)] = value
         else:
             diagnostics["exact_solver"] = {
                 "sympy_version": sympy.__version__,
@@ -553,11 +638,17 @@ def construct_exact_zero_certificate(problem: dict, candidate: np.ndarray,
                 "exact_selected_system_replay": True,
                 "preferred_solver_failures": [],
             }
+        box_started = time.perf_counter()
         outside = [
             index for index, value in enumerate(values)
             if not (_fraction(problem["low"][index]) <= value
                     <= _fraction(problem["high"][index]))
         ]
+        box_seconds = time.perf_counter() - box_started
+        diagnostics["exact_box_check_seconds"] = box_seconds
+        _progress(
+            variant_name, "exact_box_check", box_started,
+            outside_box_variable_count=len(outside))
         if outside:
             diagnostics.update({
                 "verified": False,
@@ -580,14 +671,39 @@ def construct_exact_zero_certificate(problem: dict, candidate: np.ndarray,
                 {"numerator": str(value.numerator),
                  "denominator": str(value.denominator)} for value in values],
         }
-        checked = verify_exact_zero_certificate(problem, certificate)
+        replay_started = time.perf_counter()
+        try:
+            checked = verify_exact_zero_certificate(problem, certificate)
+        except Exception as error:
+            raise ExactReplayError(
+                f"full authenticated replay failed: {error}") from error
+        replay_seconds = time.perf_counter() - replay_started
+        diagnostics["exact_full_replay_seconds"] = replay_seconds
+        _progress(
+            variant_name, "exact_full_replay", replay_started,
+            exact_equalities=checked["exact_equalities"],
+            exact_box_constraints=checked["exact_box_constraints"])
         diagnostics.update({
             "verified": True, "status_code": EXACT_ZERO_VERIFIED, **checked})
         return certificate, diagnostics
+    except ExactReplayError as error:
+        diagnostics.update({
+            "verified": False,
+            "status_code": EXACT_REPLAY_FAILED,
+            "reason": f"{type(error).__name__}: {error}",
+        })
+        return None, diagnostics
+    except ExactIntegerSolverError as error:
+        diagnostics.update({
+            "verified": False,
+            "status_code": EXACT_INTEGER_SOLVER_FAILED,
+            "reason": f"{type(error).__name__}: {error}",
+        })
+        return None, diagnostics
     except Exception as error:
         diagnostics.update({
             "verified": False,
-            "status_code": EXACT_SOLVER_FAILED,
+            "status_code": EXACT_INTEGER_SOLVER_FAILED,
             "reason": f"{type(error).__name__}: {error}",
         })
         return None, diagnostics
@@ -719,7 +835,8 @@ def near_zero_gate(problem: dict, primal: dict) -> dict:
 def decide_variant(name: str, variant: dict, exact_max_rank: int,
                    certificate_dir: Path, *, skip_exact: bool = False,
                    exact_only_if_near_zero: bool = True,
-                   fast_first: bool = True) -> dict:
+                   fast_first: bool = True,
+                   exact_solve_timeout_seconds: float = 300.0) -> dict:
     started = time.perf_counter()
     problem = centered_problem(
         variant["center"], variant["generators"],
@@ -759,7 +876,8 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
         _progress(name, "exact_reconstruction_start", exact_started,
                   numerical_rank_limit=exact_max_rank)
         exact, exact_status = construct_exact_zero_certificate(
-            problem, candidate, exact_max_rank)
+            problem, candidate, exact_max_rank, variant_name=name,
+            solve_timeout_seconds=exact_solve_timeout_seconds)
         _progress(
             name, "exact_reconstruction_complete", exact_started,
             verified=bool(exact_status.get("verified", False)),
@@ -807,7 +925,8 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
 def execute(manifest_path: Path, output_path: Path,
             exact_max_rank: int = 128, *, fast_first: bool = True,
             skip_exact: bool = False,
-            exact_only_if_near_zero: bool = True) -> dict:
+            exact_only_if_near_zero: bool = True,
+            exact_solve_timeout_seconds: float = 300.0) -> dict:
     load_started = time.perf_counter()
     variants, identity = _load_authenticated_variants(manifest_path)
     _progress("all", "loading_authentication_complete", load_started,
@@ -820,7 +939,8 @@ def execute(manifest_path: Path, output_path: Path,
             name, variant, exact_max_rank, certificate_dir,
             skip_exact=skip_exact,
             exact_only_if_near_zero=exact_only_if_near_zero,
-            fast_first=fast_first)
+            fast_first=fast_first,
+            exact_solve_timeout_seconds=exact_solve_timeout_seconds)
         results.append(row)
         print(json.dumps({
             "event": "ZERO_VARIANCE_VARIANT_RESULT",
@@ -846,6 +966,7 @@ def execute(manifest_path: Path, output_path: Path,
         "execution_policy": {
             "fast_first": fast_first, "skip_exact": skip_exact,
             "exact_only_if_near_zero": exact_only_if_near_zero,
+            "exact_solve_timeout_seconds": exact_solve_timeout_seconds,
         },
         "scientific_queries": 0, "bound_calls": 0,
     })
@@ -857,6 +978,8 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--exact-max-rank", type=int, default=128)
     parser.add_argument(
+        "--exact-solve-timeout-seconds", type=float, default=300.0)
+    parser.add_argument(
         "--fast-first", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--skip-exact", action="store_true")
     parser.add_argument(
@@ -865,10 +988,14 @@ def main() -> int:
     args = parser.parse_args()
     if not 0 <= args.exact_max_rank <= 128:
         raise RuntimeError("exact rank cap is outside [0,128]")
+    if not 0 < args.exact_solve_timeout_seconds <= 3600:
+        raise RuntimeError("exact solve timeout is outside (0,3600]")
     report = execute(args.capture_manifest.resolve(), args.output.resolve(),
                      args.exact_max_rank, fast_first=args.fast_first,
                      skip_exact=args.skip_exact,
-                     exact_only_if_near_zero=args.exact_only_if_near_zero)
+                     exact_only_if_near_zero=args.exact_only_if_near_zero,
+                     exact_solve_timeout_seconds=
+                     args.exact_solve_timeout_seconds)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
