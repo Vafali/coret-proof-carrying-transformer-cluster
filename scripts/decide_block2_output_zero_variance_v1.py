@@ -370,11 +370,17 @@ def _fraction(value: float) -> Fraction:
 
 
 def _exact_coefficient(problem: dict, row: int, column: int) -> Fraction:
+    exact = problem.get("exact_coefficient")
+    if exact is not None:
+        return exact(row, column)
     generator = problem["generators"][column]
     return _fraction(generator[row]) - _fraction(generator[-1])
 
 
 def _exact_center_difference(problem: dict, row: int) -> Fraction:
+    exact = problem.get("exact_center_difference")
+    if exact is not None:
+        return exact(row)
     center = problem["center"]
     return _fraction(center[row]) - _fraction(center[-1])
 
@@ -398,6 +404,14 @@ def verify_exact_zero_certificate(problem: dict, certificate: dict) -> dict:
         if not (_fraction(problem["low"][index]) <= value
                 <= _fraction(problem["high"][index])):
             raise RuntimeError(f"exact zero certificate is outside range: {index}")
+    exact_replay = problem.get("exact_replay")
+    if exact_replay is not None:
+        checked = exact_replay(values)
+        if (not isinstance(checked, dict)
+                or checked.get("maximum_exact_residual") != "0"
+                or checked.get("exact_variance") != "0"):
+            raise RuntimeError("exact zero certificate equality differs")
+        return checked
     residuals = []
     for row in range(problem["dimension"] - 1):
         residual = _exact_center_difference(problem, row)
@@ -669,12 +683,23 @@ def construct_exact_zero_certificate(
             integer_rows = []
             integer_rhs = []
             row_metadata = []
+            exact_residual = problem.get("exact_residual")
+            candidate_residuals = (exact_residual(values)
+                                   if exact_residual is not None else None)
             for row in selected_rows:
-                rhs = -_exact_center_difference(problem, int(row))
-                rhs -= sum(
-                    (_exact_coefficient(problem, int(row), column) * values[column]
-                     for column in range(problem["variable_count"])
-                     if column not in selected_set), Fraction(0))
+                if candidate_residuals is None:
+                    rhs = -_exact_center_difference(problem, int(row))
+                    rhs -= sum(
+                        (_exact_coefficient(problem, int(row), column)
+                         * values[column]
+                         for column in range(problem["variable_count"])
+                         if column not in selected_set), Fraction(0))
+                else:
+                    rhs = -candidate_residuals[int(row)]
+                    rhs += sum(
+                        (_exact_coefficient(problem, int(row), int(column))
+                         * values[int(column)]
+                         for column in selected_columns), Fraction(0))
                 dyadic_row = [
                     _exact_coefficient(problem, int(row), int(column))
                     for column in selected_columns]
