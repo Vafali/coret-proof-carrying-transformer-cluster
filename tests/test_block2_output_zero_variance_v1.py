@@ -67,43 +67,40 @@ def test_dyadic_rows_with_different_denominators_are_integerized():
     assert second_meta["common_denominator_power_of_two"] == 3
 
 
-def test_installed_sympy_integer_api_is_used_and_replayed():
-    import sympy
-    from sympy.polys.matrices import DomainMatrix
-    assert callable(getattr(DomainMatrix, "solve_den", None))
+def test_bareiss_full_rank_integer_system_has_rational_solution():
     solution, evidence = DECIDE._solve_exact_integer_system(
         [[2, 1], [1, -1]], [1, 0], 5.0)
     from fractions import Fraction
     assert solution == [Fraction(1, 3), Fraction(1, 3)]
-    assert evidence["solver_api"] == "DomainMatrix.solve_den"
+    assert evidence["solver_api"] == "pure_python_fraction_free_bareiss"
     assert evidence["solver_domain"] == "ZZ"
     assert evidence["exact_selected_system_replay"] is True
-    assert evidence["sympy_version"] == sympy.__version__
+    assert evidence["exact_division_count"] > 0
 
 
-def test_integer_solver_unavailable_is_distinguished(monkeypatch):
-    from sympy.polys.matrices import DomainMatrix
+def test_bareiss_deterministic_row_swap():
+    from fractions import Fraction
+    solution, evidence = DECIDE._solve_exact_integer_system(
+        [[0, 2], [3, 4]], [1, 2], 5.0)
+    assert solution == [Fraction(0), Fraction(1, 2)]
+    assert evidence["row_swaps"] == [[0, 1]]
 
-    def unavailable(*_args, **_kwargs):
-        raise AttributeError("solve_den unavailable in compatibility fixture")
 
-    monkeypatch.setattr(DomainMatrix, "solve_den", unavailable)
-    with pytest.raises(DECIDE.ExactIntegerSolverError):
+def test_bareiss_singular_system_is_distinguished():
+    with pytest.raises(DECIDE.ExactBareissSingularError):
         DECIDE._solve_exact_integer_system(
-            [[2, 1], [1, -1]], [1, 0], 5.0)
+            [[1, 2], [2, 4]], [1, 2], 5.0)
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="POSIX guard")
 def test_exact_integer_solver_timeout_is_fail_closed(monkeypatch):
-    from sympy.polys.matrices import DomainMatrix
-
     def stalled(*_args, **_kwargs):
         time.sleep(1.0)
         raise AssertionError("timeout guard did not interrupt solver")
 
-    monkeypatch.setattr(DomainMatrix, "solve_den", stalled)
+    monkeypatch.setattr(DECIDE, "_bareiss_eliminate", stalled)
     started = time.perf_counter()
-    with pytest.raises(DECIDE.ExactIntegerSolverError, match="exceeded"):
+    with pytest.raises(DECIDE.ExactBareissTimeoutError, match="exceeded"):
         DECIDE._solve_exact_integer_system(
             [[2, 1], [1, -1]], [1, 0], 0.02)
     assert time.perf_counter() - started < 0.5
@@ -118,19 +115,22 @@ def test_exact_algebraic_solution_outside_box_is_distinguished():
     assert status["status_code"] == DECIDE.EXACT_SOLUTION_OUTSIDE_BOX
 
 
-def test_exact_solver_failure_is_distinguished(monkeypatch):
-    from sympy.polys.matrices import DomainMatrix
-
-    def unavailable(*_args, **_kwargs):
-        raise AttributeError("no domain solve")
-
-    monkeypatch.setattr(DomainMatrix, "solve_den", unavailable)
-    value = problem([1.0, -1.0], [[-1.0, 1.0]], [0.0], [2.0])
-    certificate, status = DECIDE.construct_exact_zero_certificate(
-        value, np.array([1.0]), 2)
-    assert certificate is None
-    assert status["verified"] is False
-    assert status["status_code"] == DECIDE.EXACT_INTEGER_SOLVER_FAILED
+def test_synthetic_dense_127_bareiss_system():
+    size = 127
+    rows = []
+    expected = [index % 5 - 2 for index in range(size)]
+    for row_index in range(size):
+        row = [((row_index * 17 + column * 31) % 3) - 1
+               for column in range(size)]
+        row[row_index] += 256
+        rows.append(row)
+    rhs = [sum(coefficient * value for coefficient, value in
+               zip(row, expected)) for row in rows]
+    solution, evidence = DECIDE._solve_exact_integer_system(
+        rows, rhs, 20.0, "dense_127_fixture")
+    assert solution == expected
+    assert evidence["selected_system_shape"] == [127, 127]
+    assert evidence["exact_selected_system_replay"] is True
 
 
 def test_numerically_tiny_but_not_exact_residual_is_replay_failure():
@@ -274,6 +274,17 @@ def test_end_to_end_synthetic_capture_decision_is_exact(tmp_path):
                for row in report["results"])
     assert report["scientific_queries"] == report["bound_calls"] == 0
     assert (tmp_path / "decision.partial.json").is_file()
+
+
+def test_single_variant_execution_only_runs_requested_variant(tmp_path):
+    manifest, _artifact = _capture_fixture(tmp_path)
+    report = DECIDE.execute(
+        manifest, tmp_path / "single.json", 128,
+        variant="complete_post_reduction")
+    assert [row["variant"] for row in report["results"]] == [
+        "complete_post_reduction"]
+    assert report["execution_policy"]["variant"] == (
+        "complete_post_reduction")
 
 
 def _variant(center=(1.0, -1.0), generator=(-1.0, 1.0),

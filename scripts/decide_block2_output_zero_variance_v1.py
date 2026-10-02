@@ -22,7 +22,6 @@ from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
-import sympy
 from scipy.linalg import qr
 from scipy.optimize import linprog, lsq_linear, minimize
 
@@ -46,10 +45,15 @@ REDUCTION_LABEL = "b2_ffn_residual"
 DECISION_ZERO = "ZERO_VARIANCE_FEASIBLE_EXACT"
 DECISION_POSITIVE = "ZERO_VARIANCE_NOT_ESTABLISHED_DUAL_POSITIVE"
 DECISION_UNRESOLVED = "ZERO_VARIANCE_UNRESOLVED"
-EXACT_INTEGER_SOLVER_FAILED = "EXACT_INTEGER_SOLVER_FAILED"
+EXACT_BAREISS_TIMEOUT = "EXACT_BAREISS_TIMEOUT"
+EXACT_BAREISS_SINGULAR = "EXACT_BAREISS_SINGULAR_OR_PIVOT_FAILURE"
+EXACT_BAREISS_NONEXACT = "EXACT_BAREISS_NONEXACT_DIVISION"
 EXACT_SOLUTION_OUTSIDE_BOX = "EXACT_SOLUTION_OUTSIDE_AUTHENTICATED_BOX"
 EXACT_REPLAY_FAILED = "EXACT_REPLAY_FAILED"
 EXACT_ZERO_VERIFIED = "EXACT_AUTHENTICATED_ZERO_WITNESS_VERIFIED"
+VARIANT_NAMES = (
+    "complete_post_reduction", "native_only",
+    "authenticated_pre_reduction")
 
 
 def _atomic_json(path: Path, value: dict) -> dict:
@@ -409,7 +413,19 @@ def verify_exact_zero_certificate(problem: dict, certificate: dict) -> dict:
     }
 
 
-class ExactIntegerSolverError(RuntimeError):
+class ExactBareissTimeoutError(RuntimeError):
+    pass
+
+
+class ExactBareissSingularError(RuntimeError):
+    pass
+
+
+class ExactBareissNonexactDivisionError(RuntimeError):
+    pass
+
+
+class ExactIntegerSystemError(RuntimeError):
     pass
 
 
@@ -423,7 +439,7 @@ def _dyadic_row_to_integers(values: list[Fraction]) -> tuple[list[int], dict]:
     for value in values:
         denominator = value.denominator
         if denominator <= 0 or denominator & (denominator - 1):
-            raise ExactIntegerSolverError(
+            raise ExactIntegerSystemError(
                 "selected correction system contains a non-dyadic value")
         exponents.append(denominator.bit_length() - 1)
     common_exponent = max(exponents, default=0)
@@ -456,7 +472,7 @@ def _exact_solve_guard(timeout_seconds: float):
         yield False
         return
     def timed_out(_signum, _frame):
-        raise TimeoutError(
+        raise ExactBareissTimeoutError(
             f"exact integer solve exceeded {timeout_seconds:g} seconds")
 
     previous_handler = signal.signal(signal.SIGALRM, timed_out)
@@ -470,60 +486,129 @@ def _exact_solve_guard(timeout_seconds: float):
             signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
+def _bareiss_eliminate(
+        integer_rows: list[list[int]], integer_rhs: list[int]
+) -> tuple[list[list[int]], dict]:
+    """Deterministic fraction-free elimination of an integer system."""
+    size = len(integer_rows)
+    augmented = [list(row) + [int(rhs)] for row, rhs in
+                 zip(integer_rows, integer_rhs)]
+    initial_bits = max(
+        (abs(value).bit_length() for row in augmented for value in row),
+        default=0)
+    maximum_bits = initial_bits
+    previous_pivot = 1
+    row_swaps = []
+    exact_divisions = 0
+    for pivot_column in range(size - 1):
+        pivot_row = next(
+            (row for row in range(pivot_column, size)
+             if augmented[row][pivot_column] != 0), None)
+        if pivot_row is None:
+            raise ExactBareissSingularError(
+                f"no nonzero pivot in column {pivot_column}")
+        if pivot_row != pivot_column:
+            augmented[pivot_column], augmented[pivot_row] = (
+                augmented[pivot_row], augmented[pivot_column])
+            row_swaps.append([pivot_column, pivot_row])
+        pivot = augmented[pivot_column][pivot_column]
+        pivot_values = augmented[pivot_column]
+        for row_index in range(pivot_column + 1, size):
+            row_values = augmented[row_index]
+            multiplier = row_values[pivot_column]
+            for column in range(pivot_column + 1, size + 1):
+                numerator = (pivot * row_values[column]
+                             - multiplier * pivot_values[column])
+                maximum_bits = max(maximum_bits, abs(numerator).bit_length())
+                quotient, remainder = divmod(numerator, previous_pivot)
+                if remainder:
+                    raise ExactBareissNonexactDivisionError(
+                        "Bareiss division is nonexact at "
+                        f"({row_index},{column})")
+                row_values[column] = quotient
+                maximum_bits = max(maximum_bits, abs(quotient).bit_length())
+                exact_divisions += 1
+            row_values[pivot_column] = 0
+        previous_pivot = pivot
+    if augmented[-1][-2] == 0:
+        raise ExactBareissSingularError("final Bareiss pivot is zero")
+    return augmented, {
+        "initial_maximum_integer_bits": initial_bits,
+        "elimination_maximum_integer_bits": maximum_bits,
+        "row_swaps": row_swaps,
+        "exact_division_count": exact_divisions,
+    }
+
+
+def _bareiss_back_substitution(
+        augmented: list[list[int]]) -> list[Fraction]:
+    size = len(augmented)
+    solution = [Fraction(0) for _ in range(size)]
+    for row_index in range(size - 1, -1, -1):
+        pivot = augmented[row_index][row_index]
+        if pivot == 0:
+            raise ExactBareissSingularError(
+                f"zero triangular pivot at row {row_index}")
+        residual = Fraction(augmented[row_index][size])
+        residual -= sum(
+            (augmented[row_index][column] * solution[column]
+             for column in range(row_index + 1, size)), Fraction(0))
+        solution[row_index] = residual / pivot
+    return solution
+
+
 def _solve_exact_integer_system(
         integer_rows: list[list[int]], integer_rhs: list[int],
-        timeout_seconds: float
+        timeout_seconds: float, variant_name: str = "synthetic"
 ) -> tuple[list[Fraction], dict]:
-    """Fraction-free exact solve over ZZ followed by integer replay."""
-    from sympy.polys.matrices import DomainMatrix
-
-    if not integer_rows or len(integer_rows) != len(integer_rows[0]):
-        raise ExactIntegerSolverError(
+    """Pure-Python Bareiss solve followed by exact selected-system replay."""
+    size = len(integer_rows)
+    if (not integer_rows or any(len(row) != size for row in integer_rows)):
+        raise ExactIntegerSystemError(
             "selected exact integer system is not nonempty and square")
-    if len(integer_rhs) != len(integer_rows):
-        raise ExactIntegerSolverError("exact integer RHS shape differs")
-    try:
-        domain_matrix = DomainMatrix.from_list(integer_rows, sympy.ZZ)
-        domain_rhs = DomainMatrix.from_list(
-            [[value] for value in integer_rhs], sympy.ZZ)
-        if domain_matrix.domain != sympy.ZZ or domain_rhs.domain != sympy.ZZ:
-            raise ExactIntegerSolverError("exact system domain is not ZZ")
-        solve_den = getattr(domain_matrix, "solve_den", None)
-        if not callable(solve_den):
-            raise ExactIntegerSolverError(
-                "DomainMatrix.solve_den is unavailable for ZZ")
-        with _exact_solve_guard(timeout_seconds) as guard_enabled:
-            numerator, denominator = solve_den(domain_rhs)
-        denominator = int(denominator)
-        if denominator == 0:
-            raise ExactIntegerSolverError(
-                "exact integer solver returned zero denominator")
-        numerators = [int(row[0]) for row in numerator.to_list()]
-        if len(numerators) != len(integer_rows):
-            raise ExactIntegerSolverError(
-                "exact integer solver returned unexpected solution shape")
-        if denominator < 0:
-            denominator = -denominator
-            numerators = [-value for value in numerators]
-        for row, rhs, in zip(integer_rows, integer_rhs):
-            if sum(coefficient * value for coefficient, value in
-                   zip(row, numerators)) != denominator * rhs:
+    if len(integer_rhs) != size:
+        raise ExactIntegerSystemError("exact integer RHS shape differs")
+    with _exact_solve_guard(timeout_seconds) as guard_enabled:
+        elimination_started = time.perf_counter()
+        augmented, elimination = _bareiss_eliminate(
+            integer_rows, integer_rhs)
+        elimination_seconds = time.perf_counter() - elimination_started
+        _progress(
+            variant_name, "bareiss_elimination", elimination_started,
+            maximum_integer_bits_before=
+            elimination["initial_maximum_integer_bits"],
+            maximum_integer_bits_encountered=
+            elimination["elimination_maximum_integer_bits"],
+            row_swap_count=len(elimination["row_swaps"]))
+
+        back_started = time.perf_counter()
+        solution = _bareiss_back_substitution(augmented)
+        back_seconds = time.perf_counter() - back_started
+        _progress(
+            variant_name, "rational_back_substitution", back_started,
+            solution_count=len(solution))
+
+        replay_started = time.perf_counter()
+        for row, rhs in zip(integer_rows, integer_rhs):
+            if sum((coefficient * value for coefficient, value in
+                    zip(row, solution)), Fraction(0)) != rhs:
                 raise ExactReplayError(
                     "selected exact integer system replay is nonzero")
-    except ExactReplayError:
-        raise
-    except Exception as error:
-        raise ExactIntegerSolverError(
-            f"{type(error).__name__}: {error}") from error
-    return [Fraction(value, denominator) for value in numerators], {
-        "sympy_version": sympy.__version__,
-        "solver_api": "DomainMatrix.solve_den",
+        replay_seconds = time.perf_counter() - replay_started
+        _progress(
+            variant_name, "selected_system_replay", replay_started,
+            equation_count=size)
+    return solution, {
+        "solver_api": "pure_python_fraction_free_bareiss",
         "solver_domain": "ZZ",
-        "selected_system_shape": [len(integer_rows), len(integer_rows[0])],
-        "common_solution_denominator_bits": denominator.bit_length(),
+        "selected_system_shape": [size, size],
         "exact_selected_system_replay": True,
         "timeout_guard_enabled": guard_enabled,
         "timeout_seconds": timeout_seconds,
+        "bareiss_elimination_seconds": elimination_seconds,
+        "rational_back_substitution_seconds": back_seconds,
+        "selected_system_replay_seconds": replay_seconds,
+        **elimination,
     }
 
 
@@ -609,10 +694,11 @@ def construct_exact_zero_certificate(
                     item["maximum_integer_bits"] for item in row_metadata))
             solve_started = time.perf_counter()
             solution, solver_evidence = _solve_exact_integer_system(
-                integer_rows, integer_rhs, solve_timeout_seconds)
+                integer_rows, integer_rhs, solve_timeout_seconds,
+                variant_name)
             solve_seconds = time.perf_counter() - solve_started
             _progress(
-                variant_name, "exact_integer_solve", solve_started,
+                variant_name, "exact_integer_solve_complete", solve_started,
                 solver_api=solver_evidence["solver_api"],
                 solver_domain=solver_evidence["solver_domain"])
             solver_evidence.update({
@@ -632,8 +718,8 @@ def construct_exact_zero_certificate(
                 values[int(column)] = value
         else:
             diagnostics["exact_solver"] = {
-                "sympy_version": sympy.__version__,
                 "solver_api": "empty_exact_system",
+                "solver_domain": "ZZ",
                 "selected_system_shape": [0, 0],
                 "exact_selected_system_replay": True,
                 "preferred_solver_failures": [],
@@ -663,7 +749,8 @@ def construct_exact_zero_certificate(
             "problem_sha256": problem["problem_sha256"],
             "generator_ids_sha256": _json_sha(problem["ids"]),
             "construction": (
-                "exact_rational_correction_on_qr_selected_full_rank_subsystem"),
+                "dyadic_row_cleared_bareiss_correction_on_"
+                "qr_selected_full_rank_subsystem"),
             "reference_coordinate": problem["dimension"] - 1,
             "selected_rows": [int(value) for value in selected_rows],
             "selected_columns": [int(value) for value in selected_columns],
@@ -680,7 +767,7 @@ def construct_exact_zero_certificate(
         replay_seconds = time.perf_counter() - replay_started
         diagnostics["exact_full_replay_seconds"] = replay_seconds
         _progress(
-            variant_name, "exact_full_replay", replay_started,
+            variant_name, "full_127_equation_replay", replay_started,
             exact_equalities=checked["exact_equalities"],
             exact_box_constraints=checked["exact_box_constraints"])
         diagnostics.update({
@@ -693,17 +780,38 @@ def construct_exact_zero_certificate(
             "reason": f"{type(error).__name__}: {error}",
         })
         return None, diagnostics
-    except ExactIntegerSolverError as error:
+    except ExactBareissTimeoutError as error:
         diagnostics.update({
             "verified": False,
-            "status_code": EXACT_INTEGER_SOLVER_FAILED,
+            "status_code": EXACT_BAREISS_TIMEOUT,
+            "reason": f"{type(error).__name__}: {error}",
+        })
+        return None, diagnostics
+    except ExactBareissSingularError as error:
+        diagnostics.update({
+            "verified": False,
+            "status_code": EXACT_BAREISS_SINGULAR,
+            "reason": f"{type(error).__name__}: {error}",
+        })
+        return None, diagnostics
+    except ExactBareissNonexactDivisionError as error:
+        diagnostics.update({
+            "verified": False,
+            "status_code": EXACT_BAREISS_NONEXACT,
+            "reason": f"{type(error).__name__}: {error}",
+        })
+        return None, diagnostics
+    except ExactIntegerSystemError as error:
+        diagnostics.update({
+            "verified": False,
+            "status_code": EXACT_BAREISS_SINGULAR,
             "reason": f"{type(error).__name__}: {error}",
         })
         return None, diagnostics
     except Exception as error:
         diagnostics.update({
             "verified": False,
-            "status_code": EXACT_INTEGER_SOLVER_FAILED,
+            "status_code": EXACT_REPLAY_FAILED,
             "reason": f"{type(error).__name__}: {error}",
         })
         return None, diagnostics
@@ -926,17 +1034,21 @@ def execute(manifest_path: Path, output_path: Path,
             exact_max_rank: int = 128, *, fast_first: bool = True,
             skip_exact: bool = False,
             exact_only_if_near_zero: bool = True,
-            exact_solve_timeout_seconds: float = 300.0) -> dict:
+            exact_solve_timeout_seconds: float = 300.0,
+            variant: str = "all") -> dict:
+    selected_variant = variant
     load_started = time.perf_counter()
     variants, identity = _load_authenticated_variants(manifest_path)
+    if selected_variant != "all":
+        variants = {selected_variant: variants[selected_variant]}
     _progress("all", "loading_authentication_complete", load_started,
               variant_count=len(variants),
               artifact_sha256=identity["artifact_sha256"])
     certificate_dir = output_path.parent / "exact_zero_witnesses"
     results = []
-    for name, variant in variants.items():
+    for name, variant_state in variants.items():
         row = decide_variant(
-            name, variant, exact_max_rank, certificate_dir,
+            name, variant_state, exact_max_rank, certificate_dir,
             skip_exact=skip_exact,
             exact_only_if_near_zero=exact_only_if_near_zero,
             fast_first=fast_first,
@@ -967,6 +1079,7 @@ def execute(manifest_path: Path, output_path: Path,
             "fast_first": fast_first, "skip_exact": skip_exact,
             "exact_only_if_near_zero": exact_only_if_near_zero,
             "exact_solve_timeout_seconds": exact_solve_timeout_seconds,
+            "variant": selected_variant,
         },
         "scientific_queries": 0, "bound_calls": 0,
     })
@@ -979,6 +1092,8 @@ def main() -> int:
     parser.add_argument("--exact-max-rank", type=int, default=128)
     parser.add_argument(
         "--exact-solve-timeout-seconds", type=float, default=300.0)
+    parser.add_argument(
+        "--variant", choices=(*VARIANT_NAMES, "all"), default="all")
     parser.add_argument(
         "--fast-first", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--skip-exact", action="store_true")
@@ -995,7 +1110,8 @@ def main() -> int:
                      skip_exact=args.skip_exact,
                      exact_only_if_near_zero=args.exact_only_if_near_zero,
                      exact_solve_timeout_seconds=
-                     args.exact_solve_timeout_seconds)
+                     args.exact_solve_timeout_seconds,
+                     variant=args.variant)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
