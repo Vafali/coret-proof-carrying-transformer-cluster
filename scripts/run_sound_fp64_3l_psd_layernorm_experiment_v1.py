@@ -19,6 +19,7 @@ sys.path[:0] = [str(REPO / "scripts"), str(REPO / "research_hab")]
 
 import cluster_common
 import coret_psd_layernorm_experiment_v1 as experiment
+import inspect_block2_layernorm_capture_linkage_v1 as linkage_diagnostic
 import run_sound_fp64_3l_campaign as campaign
 import run_sound_fp64_3l_psd_state_capture_v1 as capture
 import run_sound_fp64_finish_3l_v1 as finish3l
@@ -1054,6 +1055,28 @@ def _frontier_output_state_record(manifest_path: Path) -> dict:
     return matches[0]
 
 
+def _enforce_existing_frontier_linkage(
+        output_root: Path, expected_manifest: Path,
+        reproduced_manifest: Path) -> dict:
+    """Persist a content-level diagnostic before any linkage hard failure."""
+    comparison = linkage_diagnostic.compare_frontier_manifests(
+        expected_manifest, reproduced_manifest)
+    diagnostic_path = output_root / "layernorm_output_linkage_diagnostic.json"
+    persisted = _atomic_json(diagnostic_path, comparison)
+    if persisted.get("semantic_equal") is not True:
+        first = persisted.get("first_semantic_difference")
+        raise RuntimeError(
+            "reproduced/job-2995 LayerNorm output identity differs"
+            + (f" at {first}" if first else ""))
+    return {
+        "path": str(diagnostic_path),
+        "sha256": cluster_common.sha256(diagnostic_path),
+        "record_sha256": persisted["record_sha256"],
+        "classification": persisted["classification"],
+        "semantic_equal": True,
+    }
+
+
 def _authenticate_prior_experiment(report_path: Path) -> dict:
     report = cluster_common.verified_json(report_path)
     if (report.get("schema") != SCHEMA
@@ -1325,13 +1348,9 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
         output_root, frontier_capture, capture_identity, result_path)
     linkage_frontier_record = frontier_capture_record
     if existing_frontier_manifest is not None:
-        existing_row = _frontier_output_state_record(
-            existing_frontier_manifest)
-        reproduced_row = _frontier_output_state_record(
+        _enforce_existing_frontier_linkage(
+            output_root, existing_frontier_manifest,
             Path(frontier_capture_record["manifest_path"]))
-        if existing_row != reproduced_row:
-            raise RuntimeError(
-                "reproduced/job-2995 LayerNorm output identity differs")
         linkage_frontier_record = {
             "manifest_path": str(existing_frontier_manifest),
             "manifest_sha256": cluster_common.sha256(
