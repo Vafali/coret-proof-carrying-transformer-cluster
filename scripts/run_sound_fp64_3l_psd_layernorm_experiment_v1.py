@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -45,6 +46,8 @@ INPUT_MANIFEST_SCHEMA = (
 INPUT_OPERATOR = "bert.encoder.layer.2.attention.output.LayerNorm"
 INPUT_BLOCK_INDEX = 2
 INPUT_LAYERNORM_INDEX = 5
+EXPECTED_INPUT_CANONICAL_STATE_IDENTITY_SHA256 = (
+    "c2fbf1d175157dfecca9c3da95573b593921a4dc05ca1b6a3e7eacaf730ea507")
 
 FRONTIER_REDUCTION_STATES = {
     "b2_post_attention_layernorm": (
@@ -89,6 +92,39 @@ def _atomic_json(path: Path, value: dict) -> dict:
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     os.replace(temporary, path)
     return cluster_common.verified_json(path)
+
+
+def _runtime_provenance() -> dict:
+    """Collect environment provenance before scientific execution starts."""
+    torch = finish3l.torch
+
+    def command(*args):
+        completed = subprocess.run(
+            args, cwd=REPO, check=True, capture_output=True, text=True,
+            timeout=5)
+        return completed.stdout.strip()
+
+    cudnn = getattr(torch.backends, "cudnn", None)
+    try:
+        gpu_driver_rows = command(
+            "nvidia-smi", "--query-gpu=index,name,driver_version",
+            "--format=csv,noheader")
+    except (FileNotFoundError, subprocess.SubprocessError):
+        gpu_driver_rows = None
+    return {
+        "git_head": command("git", "rev-parse", "HEAD"),
+        "git_status_porcelain": command("git", "status", "--porcelain").splitlines(),
+        "python_version": sys.version,
+        "pytorch_version": torch.__version__,
+        "torch_cuda_version": torch.version.cuda,
+        "cudnn_version": cudnn.version() if cudnn is not None else None,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_allow_tf32": cudnn.allow_tf32 if cudnn is not None else None,
+        "gpu_model_and_driver": gpu_driver_rows,
+    }
 
 
 def _authenticate_oracle(path: Path) -> dict:
@@ -315,16 +351,24 @@ class LayerNormExperimentHarness:
 
 
 class PostAttentionLayerNormInputCapture:
-    """Opt-in snapshot at entry to the exact index-5 LayerNorm computation."""
+    """Schedule-passive reference capture for the index-5 LayerNorm input."""
 
-    def __init__(self):
+    def __init__(self, expected_state_identity: dict,
+                 required_canonical_identity: str =
+                 EXPECTED_INPUT_CANONICAL_STATE_IDENTITY_SHA256):
+        self.expected_state_identity = expected_state_identity
+        self.required_canonical_identity = required_canonical_identity
         self.snapshot = None
         self.state_identity = None
+        self.state_ref = None
+        self.proof_ref = None
         self.layernorm_index = None
         self.invocation_ordinal = None
         self.live_state_identity = None
         self.encounters = 0
         self.input_unchanged = None
+        self.original_returned = False
+        self.materialized_after_execution = False
         self._original = None
 
     @contextlib.contextmanager
@@ -339,16 +383,11 @@ class PostAttentionLayerNormInputCapture:
             self.encounters += 1
             if self.encounters != 1:
                 raise RuntimeError("target pre-LayerNorm input encountered twice")
-            before = experiment.state_identity(state, proof)
-            self.snapshot = _frontier_snapshot(state, proof)
-            self.state_identity = before
-            try:
-                return self._original(state, proof, label)
-            finally:
-                after = experiment.state_identity(state, proof)
-                self.input_unchanged = before == after
-                if not self.input_unchanged:
-                    raise RuntimeError("pre-LayerNorm capture input was mutated")
+            self.state_ref = state
+            self.proof_ref = proof
+            result = self._original(state, proof, label)
+            self.original_returned = True
+            return result
 
         finish3l._layernorm_variance_state = wrapper
         try:
@@ -359,24 +398,46 @@ class PostAttentionLayerNormInputCapture:
 
     def bind_invocation(self, *, layernorm_index: int,
                         invocation_ordinal: int, live_state_identity: dict):
-        if self.snapshot is None or self.encounters != 1:
-            raise RuntimeError("pre-LayerNorm input was not captured")
+        if (self.state_ref is None or self.proof_ref is None
+                or self.encounters != 1 or not self.original_returned):
+            raise RuntimeError("pre-LayerNorm input reference was not captured")
         if layernorm_index != INPUT_LAYERNORM_INDEX:
             raise RuntimeError("pre-LayerNorm capture index differs")
-        if live_state_identity != self.state_identity:
-            raise RuntimeError("pre-LayerNorm capture/callback state differs")
+        if live_state_identity != self.expected_state_identity:
+            raise RuntimeError("pre-LayerNorm authenticated input differs")
         if self.layernorm_index is not None:
             raise RuntimeError("pre-LayerNorm invocation was bound twice")
         self.layernorm_index = int(layernorm_index)
         self.invocation_ordinal = int(invocation_ordinal)
         self.live_state_identity = live_state_identity
 
+    def materialize_after_execution(self):
+        if (not self.original_returned or self.state_ref is None
+                or self.proof_ref is None or self.layernorm_index is None):
+            raise RuntimeError("pre-LayerNorm reference is incomplete")
+        if self.materialized_after_execution:
+            raise RuntimeError("pre-LayerNorm input was materialized twice")
+        self.snapshot = _frontier_snapshot(self.state_ref, self.proof_ref)
+        self.state_identity = experiment.state_identity(
+            self.state_ref, self.proof_ref)
+        self.input_unchanged = (
+            self.state_identity == self.expected_state_identity
+            and self.live_state_identity == self.expected_state_identity)
+        if not self.input_unchanged:
+            raise RuntimeError("pre-LayerNorm capture input was mutated")
+        if self.state_identity.get("canonical_state_identity_sha256") != \
+                self.required_canonical_identity:
+            raise RuntimeError("pre-LayerNorm canonical input identity differs")
+        self.materialized_after_execution = True
+
     def validate(self):
         if (self.encounters != 1 or self.snapshot is None
                 or self.layernorm_index != INPUT_LAYERNORM_INDEX
                 or self.invocation_ordinal is None
                 or self.live_state_identity != self.state_identity
-                or self.input_unchanged is not True):
+                or self.input_unchanged is not True
+                or not self.original_returned
+                or not self.materialized_after_execution):
             raise RuntimeError("pre-LayerNorm input capture is incomplete")
 
 
@@ -1232,6 +1293,14 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
     if output_root.exists() and any(output_root.iterdir()):
         raise RuntimeError("refusing to overwrite PSD experiment root")
     output_root.mkdir(parents=True, exist_ok=True)
+    runtime_provenance_path = output_root / "runtime_provenance.json"
+    runtime_provenance = _atomic_json(
+        runtime_provenance_path, _runtime_provenance())
+    runtime_provenance_ref = {
+        "path": str(runtime_provenance_path),
+        "sha256": cluster_common.sha256(runtime_provenance_path),
+        "record_sha256": runtime_provenance["record_sha256"],
+    }
     try:
         capture_identity = capture.verify_capture(capture_manifest)
         oracle_identity = _authenticate_oracle(oracle_report)
@@ -1268,6 +1337,7 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
                 "traceback_tail": traceback.format_exc().splitlines()[-40:],
                 "last_callback_trace_entry": None,
             },
+            "runtime_provenance": runtime_provenance_ref,
         }
         trace_path = output_root / "psd_layernorm_invocation_trace.json"
         trace = _atomic_json(trace_path, failure)
@@ -1280,9 +1350,10 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
             "invocation_trace_path": str(trace_path),
             "invocation_trace_sha256": cluster_common.sha256(trace_path),
             "invocation_trace_record_sha256": trace["record_sha256"],
+            "runtime_provenance": runtime_provenance_ref,
         })
         raise
-    input_capture = PostAttentionLayerNormInputCapture()
+    input_capture = PostAttentionLayerNormInputCapture(expected_state_identity)
     harness = LayerNormExperimentHarness(
         PROPERTY_ID, TESTED_RADIUS, expected_state_identity, oracle_identity,
         input_capture=input_capture)
@@ -1297,6 +1368,7 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
         with input_capture.installed(), frontier_capture.installed(), \
                 _installed_finish_hook(harness, next_capture):
             result = campaign.execute_property(row, execution_root, device)
+        input_capture.materialize_after_execution()
     except Exception as error:
         campaign_error = error
         if harness.evaluator_exception is None:
@@ -1318,6 +1390,7 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
             "invocation_trace_record_sha256": trace["record_sha256"],
             "counters": harness.counters(),
             "evaluator_exception": harness.evaluator_exception,
+            "runtime_provenance": runtime_provenance_ref,
         })
         raise campaign_error
     try:
@@ -1333,6 +1406,7 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
             "invocation_trace_sha256": cluster_common.sha256(trace_path),
             "invocation_trace_record_sha256": trace["record_sha256"],
             "counters": harness.counters(),
+            "runtime_provenance": runtime_provenance_ref,
         })
         raise
     certificate_path = output_root / "psd_layernorm_certificate.json"
@@ -1348,9 +1422,6 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
         output_root, frontier_capture, capture_identity, result_path)
     linkage_frontier_record = frontier_capture_record
     if existing_frontier_manifest is not None:
-        _enforce_existing_frontier_linkage(
-            output_root, existing_frontier_manifest,
-            Path(frontier_capture_record["manifest_path"]))
         linkage_frontier_record = {
             "manifest_path": str(existing_frontier_manifest),
             "manifest_sha256": cluster_common.sha256(
@@ -1359,6 +1430,11 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
     input_capture_record = _persist_pre_layernorm_input_capture(
         output_root, input_capture, capture_identity, result,
         linkage_frontier_record, harness)
+    output_linkage = None
+    if existing_frontier_manifest is not None:
+        output_linkage = _enforce_existing_frontier_linkage(
+            output_root, existing_frontier_manifest,
+            Path(frontier_capture_record["manifest_path"]))
     return _atomic_json(output_root / "experiment_report.json", {
         "schema": SCHEMA,
         "verdict": "CORET_PSD_LAYERNORM_EXPERIMENT_COMPLETE",
@@ -1393,6 +1469,8 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
         "post_attention_layernorm_input_capture": input_capture_record,
         "input_capture_linked_to_existing_job2995": (
             existing_frontier_manifest is not None),
+        "job2995_output_linkage": output_linkage,
+        "runtime_provenance": runtime_provenance_ref,
         "scientific_queries": 1,
         "bound_calls": 1,
     })

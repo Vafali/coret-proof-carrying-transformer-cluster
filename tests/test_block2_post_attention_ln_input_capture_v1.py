@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -43,13 +44,18 @@ def proof(generators=2):
         tuple(["native_semantic"] * generators), 2)
 
 
-def _capture(monkeypatch, mutate=False):
+def _capture(monkeypatch, mutate=False, finalize=True):
     state, support = State(), proof()
-    recorder = RUNNER.PostAttentionLayerNormInputCapture()
+    expected = RUNNER.experiment.state_identity(state, support)
+    recorder = RUNNER.PostAttentionLayerNormInputCapture(
+        expected, expected["canonical_state_identity_sha256"])
     observed = {}
 
     def original(value, proof_value, label):
         observed["snapshot_exists_before_semantics"] = recorder.snapshot is not None
+        observed["state_is_identical"] = value is state
+        observed["proof_is_identical"] = proof_value is support
+        observed["label"] = label
         if mutate:
             value.zonotope_w[0, 0, 0] += 1.0
         return "centered", "variance", {"label": label}
@@ -58,31 +64,133 @@ def _capture(monkeypatch, mutate=False):
     with recorder.installed():
         result = RUNNER.finish3l._layernorm_variance_state(
             state, support, RUNNER.experiment.TARGET_LABEL)
+    if finalize:
+        recorder.bind_invocation(
+            layernorm_index=5, invocation_ordinal=5,
+            live_state_identity=RUNNER.experiment.state_identity(state, support))
+        recorder.materialize_after_execution()
     return recorder, state, support, observed, result
 
 
 def test_correct_invocation_selected_before_semantic_operations(monkeypatch):
     recorder, state, _support, observed, result = _capture(monkeypatch)
-    recorder.bind_invocation(
-        layernorm_index=5, invocation_ordinal=5,
-        live_state_identity=recorder.state_identity)
     recorder.validate()
-    assert observed["snapshot_exists_before_semantics"] is True
+    assert observed == {
+        "snapshot_exists_before_semantics": False,
+        "state_is_identical": True,
+        "proof_is_identical": True,
+        "label": RUNNER.experiment.TARGET_LABEL,
+    }
     assert result[0] == "centered"
     assert torch.equal(recorder.snapshot["weights"], state.zonotope_w)
+    assert recorder.materialized_after_execution is True
+
+
+def test_wrapper_entry_is_strictly_reference_only(monkeypatch):
+    class HostileTensorState:
+        def __getattribute__(self, _name):
+            raise AssertionError("capture touched input state before original")
+
+    state = HostileTensorState()
+    support = object()
+    expected = {"canonical_state_identity_sha256": "test"}
+    recorder = RUNNER.PostAttentionLayerNormInputCapture(expected, "test")
+    observed = []
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("pre-call tensor inspection occurred")
+
+    def original(value, proof_value, label):
+        observed.append((value is state, proof_value is support, label))
+        return "unchanged"
+
+    monkeypatch.setattr(RUNNER.experiment, "state_identity", forbidden)
+    monkeypatch.setattr(RUNNER, "_frontier_snapshot", forbidden)
+    monkeypatch.setattr(RUNNER.finish3l, "_layernorm_variance_state", original)
+    with recorder.installed():
+        assert RUNNER.finish3l._layernorm_variance_state(
+            state, support, RUNNER.experiment.TARGET_LABEL) == "unchanged"
+    assert observed == [(True, True, RUNNER.experiment.TARGET_LABEL)]
+    assert recorder.snapshot is None
+    assert recorder.original_returned is True
+
+
+def test_snapshot_and_hash_are_deferred_until_explicit_materialization(
+        monkeypatch):
+    state, support = State(), proof()
+    expected = RUNNER.experiment.state_identity(state, support)
+    recorder = RUNNER.PostAttentionLayerNormInputCapture(
+        expected, expected["canonical_state_identity_sha256"])
+    events = []
+    real_snapshot = RUNNER._frontier_snapshot
+    real_identity = RUNNER.experiment.state_identity
+
+    monkeypatch.setattr(
+        RUNNER.finish3l, "_layernorm_variance_state",
+        lambda *_args: events.append("original") or "result")
+    monkeypatch.setattr(
+        RUNNER, "_frontier_snapshot",
+        lambda *args: events.append("snapshot") or real_snapshot(*args))
+    monkeypatch.setattr(
+        RUNNER.experiment, "state_identity",
+        lambda *args: events.append("identity") or real_identity(*args))
+    with recorder.installed():
+        RUNNER.finish3l._layernorm_variance_state(
+            state, support, RUNNER.experiment.TARGET_LABEL)
+    assert events == ["original"]
+    recorder.bind_invocation(
+        layernorm_index=5, invocation_ordinal=5,
+        live_state_identity=expected)
+    assert events == ["original"]
+    recorder.materialize_after_execution()
+    assert events[0] == "original"
+    assert events[1:] == ["snapshot", "identity"]
+
+
+def test_production_canonical_identity_is_frozen():
+    assert RUNNER.EXPECTED_INPUT_CANONICAL_STATE_IDENTITY_SHA256 == (
+        "c2fbf1d175157dfecca9c3da95573b593921a4dc05ca1b6a3e7eacaf730ea507")
+
+
+def test_provenance_collection_is_not_in_target_wrapper():
+    source = inspect.getsource(RUNNER.PostAttentionLayerNormInputCapture.installed)
+    assert "_runtime_provenance" not in source
+    assert "state_identity" not in source
+    assert "_frontier_snapshot" not in source
+    assert ".cpu(" not in source
+    assert "synchronize" not in source
+
+
+def test_runtime_provenance_records_required_fields_before_execution(
+        monkeypatch):
+    def completed(args, **_kwargs):
+        output = "head\n" if args[0] == "git" else "0, A40, driver\n"
+        return SimpleNamespace(stdout=output)
+
+    monkeypatch.setattr(RUNNER.subprocess, "run", completed)
+    record = RUNNER._runtime_provenance()
+    assert set((
+        "git_head", "git_status_porcelain", "python_version",
+        "pytorch_version", "torch_cuda_version", "cudnn_version",
+        "cuda_visible_devices", "cublas_workspace_config",
+        "deterministic_algorithms", "cuda_matmul_allow_tf32",
+        "cudnn_allow_tf32", "gpu_model_and_driver")) <= set(record)
+    assert record["gpu_model_and_driver"] == "0, A40, driver"
 
 
 def test_wrong_layernorm_index_rejected(monkeypatch):
-    recorder, *_ = _capture(monkeypatch)
+    recorder, state, support, *_ = _capture(monkeypatch, finalize=False)
     with pytest.raises(RuntimeError, match="index differs"):
         recorder.bind_invocation(
             layernorm_index=4, invocation_ordinal=4,
-            live_state_identity=recorder.state_identity)
+            live_state_identity=RUNNER.experiment.state_identity(state, support))
 
 
 def test_wrong_stage_is_not_captured_and_validation_fails(monkeypatch):
     state, support = State(), proof()
-    recorder = RUNNER.PostAttentionLayerNormInputCapture()
+    expected = RUNNER.experiment.state_identity(state, support)
+    recorder = RUNNER.PostAttentionLayerNormInputCapture(
+        expected, expected["canonical_state_identity_sha256"])
     monkeypatch.setattr(
         RUNNER.finish3l, "_layernorm_variance_state",
         lambda *_args: (None, None, {}))
@@ -94,8 +202,25 @@ def test_wrong_stage_is_not_captured_and_validation_fails(monkeypatch):
 
 
 def test_capture_hook_detects_input_mutation(monkeypatch):
-    with pytest.raises(RuntimeError, match="input was mutated"):
+    with pytest.raises(RuntimeError, match="authenticated input differs"):
         _capture(monkeypatch, mutate=True)
+
+
+def test_wrong_canonical_input_identity_hard_fails(monkeypatch):
+    state, support = State(), proof()
+    expected = RUNNER.experiment.state_identity(state, support)
+    recorder = RUNNER.PostAttentionLayerNormInputCapture(expected, "0" * 64)
+    monkeypatch.setattr(
+        RUNNER.finish3l, "_layernorm_variance_state",
+        lambda *_args: "result")
+    with recorder.installed():
+        RUNNER.finish3l._layernorm_variance_state(
+            state, support, RUNNER.experiment.TARGET_LABEL)
+    recorder.bind_invocation(
+        layernorm_index=5, invocation_ordinal=5,
+        live_state_identity=expected)
+    with pytest.raises(RuntimeError, match="canonical input identity differs"):
+        recorder.materialize_after_execution()
 
 
 def test_source_metadata_hashes_are_deterministic(monkeypatch):
@@ -107,7 +232,7 @@ def test_source_metadata_hashes_are_deterministic(monkeypatch):
 
 
 def test_missing_target_invocation_hard_fails():
-    recorder = RUNNER.PostAttentionLayerNormInputCapture()
+    recorder = RUNNER.PostAttentionLayerNormInputCapture({})
     with pytest.raises(RuntimeError, match="incomplete"):
         recorder.validate()
 
@@ -121,9 +246,6 @@ def test_existing_output_root_is_refused_before_execution(tmp_path):
 
 def _persist_fixture(tmp_path, monkeypatch):
     recorder, *_ = _capture(monkeypatch)
-    recorder.bind_invocation(
-        layernorm_index=5, invocation_ordinal=5,
-        live_state_identity=recorder.state_identity)
     state_hashes = RUNNER._frontier_state_hashes(recorder.snapshot)
     frontier_path = tmp_path / "block2_ffn_frontier_manifest.json"
     RUNNER._atomic_json(frontier_path, {
