@@ -89,13 +89,14 @@ def _exact_affine_bounds(center: np.ndarray, generators: np.ndarray,
 class ReluCancellationProblem:
     def __init__(self, preactivation: dict, residual: dict,
                  weight: np.ndarray, bias: np.ndarray, label="block2_relu",
-                 exact_preactivation=None):
+                 exact_preactivation=None, additional_equalities=None):
         h, r, source = frontier._align_sources(preactivation, residual)
         self.h, self.r, self.source = h, r, source
         self.weight = np.asarray(weight, dtype=np.float64)
         self.bias = np.asarray(bias, dtype=np.float64)
         self.label = label
         self.exact_preactivation = exact_preactivation
+        self.additional_equalities = additional_equalities
         if (h["center"].ndim != 1 or r["center"].shape != (128,)
                 or self.weight.shape != (128, h["center"].size)
                 or self.bias.shape != (128,)):
@@ -115,6 +116,7 @@ class ReluCancellationProblem:
         if len(self.inactive) + len(self.active) + len(self.unstable) != self.m:
             raise RuntimeError("exact ReLU bound partition is incomplete")
         self._build_numeric_hull()
+        self._append_additional_equalities()
         self.identity_sha256 = _sha_json({
             "ids": source["ids"],
             "low_hex": [float(value).hex() for value in source["low"]],
@@ -128,7 +130,37 @@ class ReluCancellationProblem:
             "exact_preactivation_identity": (
                 None if exact_preactivation is None
                 else exact_preactivation["identity_sha256"]),
+            "additional_equalities_identity": (
+                None if additional_equalities is None
+                else additional_equalities["identity_sha256"]),
         })
+
+    def _append_additional_equalities(self):
+        if self.additional_equalities is None:
+            self.additional_equality_count = 0
+            return
+        extra = self.additional_equalities
+        matrix = np.asarray(extra["numeric_A"], dtype=np.float64)
+        constant = np.asarray(extra["numeric_b"], dtype=np.float64)
+        if (matrix.ndim != 2 or matrix.shape[1] != self.n
+                or constant.shape != (matrix.shape[0],)
+                or not np.isfinite(matrix).all()
+                or not np.isfinite(constant).all()):
+            raise RuntimeError("additional exact equality dimensions differ")
+        padded = np.pad(matrix, ((0, 0), (0, len(self.unstable))))
+        self.E = np.concatenate((self.E, padded), axis=0)
+        self.f = np.concatenate((self.f, -constant), axis=0)
+        self.additional_equality_count = int(matrix.shape[0])
+
+    def additional_exact_residual(self, values: list[Fraction]):
+        if self.additional_equalities is None:
+            return []
+        extra = self.additional_equalities
+        return [
+            extra["exact_constant"](row) + sum(
+                (extra["exact_coefficient"](row, source) * xi
+                 for source, xi in enumerate(values)), Fraction(0))
+            for row in range(self.additional_equality_count)]
 
     def h_center_exact(self, coordinate: int) -> Fraction:
         if self.exact_preactivation is None:
@@ -237,9 +269,13 @@ class ReluCancellationProblem:
         for index in range(self.n):
             A.append({index: Fraction(1)}); b.append(_fraction(self.source["high"][index]))
             A.append({index: Fraction(-1)}); b.append(-_fraction(self.source["low"][index]))
-        for local, neuron in enumerate(self.unstable):
+        # Keep exact inequality order identical to propose_farkas(): all
+        # source bounds, all y>=0 rows, then the two triangle rows per neuron.
+        for local, _neuron in enumerate(self.unstable):
             y = self.n + local
             A.append({y: Fraction(-1)}); b.append(Fraction(0))
+        for local, neuron in enumerate(self.unstable):
+            y = self.n + local
             row = {y: Fraction(-1)}
             for source in range(self.n):
                 value = self.h_generator_exact(source, neuron)
@@ -277,6 +313,16 @@ class ReluCancellationProblem:
                               - _fraction(self.weight[0, neuron]))
                              * self.h_center_exact(neuron))
             E.append(row); f.append(-constant)
+        if self.additional_equalities is not None:
+            extra = self.additional_equalities
+            for equality in range(self.additional_equality_count):
+                row = {}
+                for source in range(self.n):
+                    value = extra["exact_coefficient"](equality, source)
+                    if value:
+                        row[source] = value
+                E.append(row)
+                f.append(-extra["exact_constant"](equality))
         return A, b, E, f, variable_count
 
 
@@ -311,9 +357,15 @@ class ExactFixedReluModel:
         return value
 
     def exact_center_difference(self, row: int) -> Fraction:
+        if row >= 127:
+            return self.parent.additional_equalities["exact_constant"](
+                row - 127)
         return self._coordinate(row, None) - self._coordinate(-1, None)
 
     def exact_coefficient(self, row: int, column: int) -> Fraction:
+        if row >= 127:
+            return self.parent.additional_equalities["exact_coefficient"](
+                row - 127, column)
         return self._coordinate(row, column) - self._coordinate(-1, column)
 
     def exact_residual(self, values: list[Fraction]) -> list[Fraction]:
@@ -331,14 +383,24 @@ class ExactFixedReluModel:
                  for coordinate, active in enumerate(self.pattern) if active),
                 Fraction(0))
             output.append(value)
-        return [value - output[-1] for value in output[:-1]]
+        residuals = [value - output[-1] for value in output[:-1]]
+        return residuals + self.parent.additional_exact_residual(values)
 
     def exact_replay(self, values: list[Fraction]) -> dict:
         residuals = self.exact_residual(values)
-        if any(residuals):
+        cancellation = residuals[:127]
+        additional = residuals[127:]
+        if any(cancellation):
             raise RuntimeError("exact joint cancellation replay is nonzero")
+        if any(additional):
+            raise RuntimeError("exact additional equality replay is nonzero")
         return {
             "exact_equalities": len(residuals),
+            "cancellation_equalities": 127,
+            "additional_equalities": self.parent.additional_equality_count,
+            "invariant_check": (
+                self.parent.additional_equality_count > 0
+                and not any(additional)),
             "exact_box_constraints": len(values),
             "maximum_exact_residual": "0", "exact_variance": "0",
             "joint_residual_ffn_correlation_preserved": True,
@@ -349,6 +411,12 @@ class ExactFixedReluModel:
         problem = zero.centered_problem(
             self.numeric_center, self.numeric_generators,
             self.source["low"], self.source["high"], self.source["ids"])
+        if self.parent.additional_equalities is not None:
+            extra = self.parent.additional_equalities
+            problem["A"] = np.concatenate(
+                (problem["A"], np.asarray(extra["numeric_A"])), axis=0)
+            problem["b"] = np.concatenate(
+                (problem["b"], np.asarray(extra["numeric_b"])), axis=0)
         problem.update({
             "exact_center_difference": self.exact_center_difference,
             "exact_coefficient": self.exact_coefficient,
@@ -489,6 +557,116 @@ def _repair_farkas(problem: ReluCancellationProblem, candidate: np.ndarray,
     }
 
 
+def _repair_large_farkas(problem: ReluCancellationProblem,
+                         candidate: np.ndarray,
+                         timeout: float = 180.0):
+    """Repair a large-source Farkas ray through bound-multiplier elimination.
+
+    Source-box multipliers are eliminated analytically after fixing their
+    active sign.  Exact solving therefore has only ``unstable+1`` equations,
+    independent of the often 14k+ source count.
+    """
+    started = time.perf_counter()
+    A, b, E, f, variables = problem.exact_lp()
+    n, u = problem.n, len(problem.unstable)
+    source_rows = 2 * n
+    if len(candidate) != len(A) + len(E):
+        raise RuntimeError("large Farkas candidate dimensions differ")
+    columns = [("lambda", index) for index in range(source_rows, len(A))]
+    columns.extend(("mu", index) for index in range(len(E)))
+    values = [_fraction(candidate[index])
+              for index in range(source_rows, len(A))]
+    values.extend(_fraction(candidate[len(A) + index])
+                  for index in range(len(E)))
+
+    def coefficient(column, variable):
+        kind, index = columns[column]
+        return (A[index].get(variable, Fraction(0)) if kind == "lambda"
+                else E[index].get(variable, Fraction(0)))
+
+    # Freeze only the sign of the analytically reconstructed source-bound
+    # multiplier.  Exact replay below remains authoritative.
+    source_signs = []
+    for variable in range(n):
+        high_multiplier = float(candidate[2 * variable])
+        low_multiplier = float(candidate[2 * variable + 1])
+        source_signs.append(1 if low_multiplier >= high_multiplier else -1)
+
+    def contradiction_coefficient(column):
+        kind, index = columns[column]
+        value = b[index] if kind == "lambda" else f[index]
+        for variable, sign in enumerate(source_signs):
+            stationarity = coefficient(column, variable)
+            bound = (_fraction(problem.source["low"][variable])
+                     if sign > 0 else
+                     _fraction(problem.source["high"][variable]))
+            value -= bound * stationarity
+        return value
+
+    exact_rows = []
+    for local in range(u):
+        exact_rows.append([
+            coefficient(column, n + local)
+            for column in range(len(columns))])
+    exact_rows.append([
+        contradiction_coefficient(column)
+        for column in range(len(columns))])
+    numeric = np.array([[float(value) for value in row]
+                        for row in exact_rows], dtype=np.float64)
+    equation_count = u + 1
+    _q, r, pivots = qr(numeric, mode="economic", pivoting=True)
+    threshold = (max(numeric.shape) * np.finfo(np.float64).eps
+                 * (abs(r[0, 0]) if r.size else 0.0))
+    rank = int(np.sum(np.abs(np.diag(r)) > threshold))
+    if rank != equation_count:
+        raise RuntimeError("large Farkas reduced correction lacks full row rank")
+    selected = np.asarray(pivots[:equation_count], dtype=np.int64)
+    chosen = set(int(value) for value in selected)
+    targets = [Fraction(0)] * u + [Fraction(-1)]
+    integer_rows, integer_rhs = [], []
+    for row, target in zip(exact_rows, targets):
+        rhs = target - sum(
+            (row[column] * values[column]
+             for column in range(len(columns)) if column not in chosen),
+            Fraction(0))
+        integers = _rational_row_to_integers(
+            [*[row[int(column)] for column in selected], rhs])
+        integer_rows.append(integers[:-1]); integer_rhs.append(integers[-1])
+    solution, evidence = zero._solve_exact_integer_system(
+        integer_rows, integer_rhs, timeout, "relu_large_farkas_repair")
+    for column, value in zip(selected, solution):
+        values[int(column)] = value
+
+    core_lambda_count = len(A) - source_rows
+    core_lambdas = values[:core_lambda_count]
+    mus = values[core_lambda_count:]
+    if any(value < 0 for value in core_lambdas):
+        raise RuntimeError("large Farkas repaired core lambda is negative")
+    source_lambdas = [Fraction(0)] * source_rows
+    for variable, sign in enumerate(source_signs):
+        contribution = sum(
+            (coefficient(column, variable) * values[column]
+             for column in range(len(columns))), Fraction(0))
+        if sign > 0:
+            if contribution < 0:
+                raise RuntimeError("large Farkas source sign changed")
+            source_lambdas[2 * variable + 1] = contribution
+        else:
+            if contribution > 0:
+                raise RuntimeError("large Farkas source sign changed")
+            source_lambdas[2 * variable] = -contribution
+    lambdas = source_lambdas + core_lambdas
+    checked = _verify_farkas(problem, lambdas, mus)
+    return lambdas, mus, {
+        "repair_backend": "source_bound_elimination_plus_bareiss",
+        "original_variable_count": variables,
+        "reduced_equation_count": equation_count,
+        "reduced_column_count": len(columns),
+        "runtime_seconds": time.perf_counter() - started,
+        **evidence, **checked,
+    }
+
+
 def propose_farkas(problem: ReluCancellationProblem,
                    timeout: float = 300.0) -> tuple[dict | None, dict]:
     """Numerically propose, then directly replay a rational Farkas ray.
@@ -520,14 +698,22 @@ def propose_farkas(problem: ReluCancellationProblem,
         "solver_backend": "scipy.optimize.linprog/highs_farkas_system",
         "solver_status": int(result.status), "solver_message": str(result.message),
         "runtime_seconds": time.perf_counter() - started,
-        "exact_repair_supported": A.shape[1] <= 512,
+        "exact_repair_supported": True,
+        "exact_repair_mode": ("bounded_full_stationarity"
+                              if A.shape[1] <= 512 else
+                              "source_bound_elimination"),
     }
-    if not result.success or A.shape[1] > 512:
+    if not result.success:
         return None, diagnostics
-    numeric_matrix = np.asarray(vstack((stationarity, csr_matrix(objective))).todense())
     try:
-        lambdas, mus, checked = _repair_farkas(
-            problem, np.asarray(result.x), numeric_matrix)
+        if A.shape[1] <= 512:
+            numeric_matrix = np.asarray(vstack(
+                (stationarity, csr_matrix(objective))).todense())
+            lambdas, mus, checked = _repair_farkas(
+                problem, np.asarray(result.x), numeric_matrix)
+        else:
+            lambdas, mus, checked = _repair_large_farkas(
+                problem, np.asarray(result.x))
     except RuntimeError as error:
         diagnostics["exact_replay_error"] = str(error)
         return None, diagnostics
@@ -581,7 +767,8 @@ def solve_exact_relu_milp(problem: ReluCancellationProblem,
             active_count += int(active)
         lower.append(-np.inf); upper.append(float(active_count - 1))
     nonlinear = coo_matrix((values, (rows, columns)), shape=(len(lower), total)).tocsr()
-    equality = hstack((csr_matrix(problem.E), csr_matrix((127, u))), format="csr")
+    equality = hstack((csr_matrix(problem.E),
+                       csr_matrix((problem.E.shape[0], u))), format="csr")
     constraints = LinearConstraint(
         vstack((equality, nonlinear), format="csr"),
         np.concatenate((problem.f, np.asarray(lower))),
