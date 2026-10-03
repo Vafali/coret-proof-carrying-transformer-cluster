@@ -231,6 +231,34 @@ def test_source_metadata_hashes_are_deterministic(monkeypatch):
     assert first["generator_count"] == 2
 
 
+def test_same_snapshot_reproduces_psd_canonical_identity(monkeypatch):
+    recorder, *_ = _capture(monkeypatch)
+    assert RUNNER._snapshot_state_identity(recorder.snapshot) == \
+        RUNNER._snapshot_state_identity(copy.deepcopy(recorder.snapshot))
+
+
+@pytest.mark.parametrize("mutation", (
+    "coefficient", "source_id", "range", "mask", "provenance"))
+def test_canonical_identity_rejects_semantic_component_mutation(
+        monkeypatch, mutation):
+    recorder, *_ = _capture(monkeypatch)
+    snapshot = copy.deepcopy(recorder.snapshot)
+    original = RUNNER._snapshot_state_identity(snapshot)
+    if mutation == "coefficient":
+        snapshot["weights"][0, 0, 0] += 1.0
+    elif mutation == "source_id":
+        snapshot["proof"]["ids"][0] = "mutated-id"
+    elif mutation == "range":
+        snapshot["range_high"][0] += 0.25
+    elif mutation == "mask":
+        snapshot["proof"]["masks"][0] ^= 1
+    else:
+        snapshot["proof"]["reasons"][0] = "mutated-provenance"
+    changed = RUNNER._snapshot_state_identity(snapshot)
+    assert changed["canonical_state_identity_sha256"] != \
+        original["canonical_state_identity_sha256"]
+
+
 def test_missing_target_invocation_hard_fails():
     recorder = RUNNER.PostAttentionLayerNormInputCapture({})
     with pytest.raises(RuntimeError, match="incomplete"):
@@ -246,6 +274,9 @@ def test_existing_output_root_is_refused_before_execution(tmp_path):
 
 def _persist_fixture(tmp_path, monkeypatch):
     recorder, *_ = _capture(monkeypatch)
+    monkeypatch.setattr(
+        RUNNER, "EXPECTED_INPUT_CANONICAL_STATE_IDENTITY_SHA256",
+        recorder.state_identity["canonical_state_identity_sha256"])
     state_hashes = RUNNER._frontier_state_hashes(recorder.snapshot)
     frontier_path = tmp_path / "block2_ffn_frontier_manifest.json"
     RUNNER._atomic_json(frontier_path, {
@@ -277,6 +308,62 @@ def test_linkage_to_frontier_output_is_verified(tmp_path, monkeypatch):
     checked = RUNNER._verify_pre_layernorm_input_capture(
         Path(record["manifest_path"]))
     assert checked["verified"] is True
+
+
+def test_manifest_row_hash_is_distinct_secondary_identity(
+        tmp_path, monkeypatch):
+    record = _persist_fixture(tmp_path, monkeypatch)
+    manifest = RUNNER.cluster_common.verified_json(Path(record["manifest_path"]))
+    assert manifest["invocation_linkage"]["input_state_identity_sha256"] != \
+        manifest["canonical_state_identity"][
+            "canonical_state_identity_sha256"]
+    assert RUNNER._verify_pre_layernorm_input_capture(
+        Path(record["manifest_path"]))["verified"] is True
+
+
+def test_persisted_reload_reproduces_canonical_identity(tmp_path, monkeypatch):
+    record = _persist_fixture(tmp_path, monkeypatch)
+    path = Path(record["manifest_path"])
+    manifest = RUNNER.cluster_common.verified_json(path)
+    payload = RUNNER.capture.sound.torch.load(
+        Path(record["artifact_path"]), map_location="cpu", weights_only=False)
+    recomputed = RUNNER._snapshot_state_identity(
+        payload["states"]["pre_layernorm_input"])
+    assert recomputed == manifest["canonical_state_identity"]
+
+
+def test_verifier_rejects_recorded_canonical_mismatch(tmp_path, monkeypatch):
+    record = _persist_fixture(tmp_path, monkeypatch)
+    path = Path(record["manifest_path"])
+    manifest = RUNNER.cluster_common.verified_json(path)
+    manifest.pop("record_sha256")
+    manifest["canonical_state_identity"]["weights_sha256"] = "0" * 64
+    RUNNER._atomic_json(path, manifest)
+    with pytest.raises(RuntimeError, match="canonical state identity differs"):
+        RUNNER._verify_pre_layernorm_input_capture(path)
+
+
+def test_job2997_legacy_manifest_authenticates_only_against_live_canonical(
+        tmp_path, monkeypatch):
+    record = _persist_fixture(tmp_path, monkeypatch)
+    path = Path(record["manifest_path"])
+    manifest = RUNNER.cluster_common.verified_json(path)
+    expected = manifest.pop("canonical_state_identity")
+    manifest.pop("record_sha256")
+    linkage = manifest["invocation_linkage"]
+    linkage.pop("input_state_identity_schema")
+    linkage.pop("canonical_state_identity_sha256")
+    linkage.pop("linkage_identity_sha256")
+    linkage["linkage_identity_sha256"] = RUNNER.capture._json_sha(
+        {key: value for key, value in linkage.items()
+         if key not in {"verified", "existing_frontier_manifest_path"}})
+    RUNNER._atomic_json(path, manifest)
+    checked = RUNNER._verify_pre_layernorm_input_capture(
+        path, allow_legacy_missing_canonical=True,
+        expected_canonical_identity=expected)
+    assert checked["legacy_manifest_without_canonical"] is True
+    with pytest.raises(RuntimeError, match="canonical state identity is absent"):
+        RUNNER._verify_pre_layernorm_input_capture(path)
 
 
 def test_property_or_radius_mismatch_is_rejected(tmp_path, monkeypatch):

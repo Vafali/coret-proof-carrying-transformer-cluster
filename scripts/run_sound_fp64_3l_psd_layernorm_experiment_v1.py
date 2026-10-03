@@ -152,6 +152,11 @@ def _captured_state_identity(manifest_path: Path, manifest: dict) -> dict:
     payload = capture.sound.torch.load(
         artifact, map_location="cpu", weights_only=False)
     snapshot = payload["states"]["post_last_reduction"]
+    return _snapshot_state_identity(snapshot)
+
+
+def _snapshot_state_identity(snapshot: dict) -> dict:
+    """Reconstruct the exact PSD canonical identity from a CPU snapshot."""
     proof = snapshot["proof"]
     state = SimpleNamespace(
         zonotope_w=snapshot["weights"],
@@ -912,7 +917,8 @@ def _persist_ffn_frontier_capture(
 def _input_linkage_identity(*, state_hashes: dict, invocation_ordinal: int,
                             frontier_manifest_sha256: str,
                             output_state_hashes: dict,
-                            source_capture: dict) -> dict:
+                            source_capture: dict,
+                            canonical_state_identity: dict | None = None) -> dict:
     revision = source_capture.get(
         "pinned_deept_revision", source_capture.get("pinned_revision"))
     fields = {
@@ -931,11 +937,20 @@ def _input_linkage_identity(*, state_hashes: dict, invocation_ordinal: int,
         "pinned_revision": revision,
         "checkpoint_sha256": capture.prefix.CHECKPOINT_SHA256,
     }
+    if canonical_state_identity is not None:
+        fields.update({
+            "input_state_identity_schema":
+                "CORET_FRONTIER_MANIFEST_STATE_ROW_V1",
+            "canonical_state_identity_sha256": canonical_state_identity[
+                "canonical_state_identity_sha256"],
+        })
     fields["linkage_identity_sha256"] = capture._json_sha(fields)
     return fields
 
 
-def _verify_pre_layernorm_input_capture(manifest_path: Path) -> dict:
+def _verify_pre_layernorm_input_capture(
+        manifest_path: Path, *, allow_legacy_missing_canonical: bool = False,
+        expected_canonical_identity: dict | None = None) -> dict:
     manifest = cluster_common.verified_json(manifest_path)
     operator = manifest.get("operator") or {}
     model = manifest.get("model_authentication") or {}
@@ -982,6 +997,20 @@ def _verify_pre_layernorm_input_capture(manifest_path: Path) -> dict:
         raise RuntimeError("pre-LayerNorm input artifact identity differs")
     actual = _frontier_state_hashes(
         payload["states"]["pre_layernorm_input"])
+    actual_canonical = _snapshot_state_identity(
+        payload["states"]["pre_layernorm_input"])
+    recorded_canonical = manifest.get("canonical_state_identity")
+    if recorded_canonical is None:
+        if (not allow_legacy_missing_canonical
+                or expected_canonical_identity is None):
+            raise RuntimeError(
+                "pre-LayerNorm canonical state identity is absent")
+        recorded_canonical = expected_canonical_identity
+    if (not isinstance(recorded_canonical, dict)
+            or actual_canonical != recorded_canonical
+            or actual_canonical.get("canonical_state_identity_sha256") !=
+            EXPECTED_INPUT_CANONICAL_STATE_IDENTITY_SHA256):
+        raise RuntimeError("pre-LayerNorm canonical state identity differs")
     actual = {**actual,
               "source_ids_sha256": actual["generator_ids_sha256"],
               "hidden_dimension": actual["feature_dimension"]}
@@ -1006,7 +1035,11 @@ def _verify_pre_layernorm_input_capture(manifest_path: Path) -> dict:
             "existing_frontier_manifest_sha256"],
         output_state_hashes={key: value for key, value in matches[0].items()
                              if key != "state_key"},
-        source_capture=model)
+        source_capture=model,
+        canonical_state_identity=(
+            actual_canonical
+            if linkage.get("input_state_identity_schema") is not None
+            else None))
     if (linkage.get("linkage_identity_sha256") !=
             expected_linkage["linkage_identity_sha256"]
             or state_record.get("token_count") != matches[0].get("token_count")
@@ -1015,7 +1048,10 @@ def _verify_pre_layernorm_input_capture(manifest_path: Path) -> dict:
         raise RuntimeError("pre/output LayerNorm invocation linkage differs")
     return {"schema": INPUT_MANIFEST_SCHEMA, "verified": True,
             "artifact_sha256": state_record["tensor_artifact_sha256"],
-            "linkage_identity_sha256": linkage["linkage_identity_sha256"]}
+            "linkage_identity_sha256": linkage["linkage_identity_sha256"],
+            "canonical_state_identity": actual_canonical,
+            "legacy_manifest_without_canonical": (
+                manifest.get("canonical_state_identity") is None)}
 
 
 def _persist_pre_layernorm_input_capture(
@@ -1024,6 +1060,9 @@ def _persist_pre_layernorm_input_capture(
         harness: LayerNormExperimentHarness) -> dict:
     captured.validate()
     snapshot = captured.snapshot
+    canonical_state_identity = _snapshot_state_identity(snapshot)
+    if canonical_state_identity != captured.state_identity:
+        raise RuntimeError("persisted/PSD canonical state identity differs")
     state_hashes = _frontier_state_hashes(snapshot)
     state_hashes = {
         **state_hashes,
@@ -1042,7 +1081,8 @@ def _persist_pre_layernorm_input_capture(
         state_hashes=state_hashes,
         invocation_ordinal=captured.invocation_ordinal,
         frontier_manifest_sha256=frontier_record["manifest_sha256"],
-        output_state_hashes=output_hashes, source_capture=source_capture)
+        output_state_hashes=output_hashes, source_capture=source_capture,
+        canonical_state_identity=canonical_state_identity)
     identity = {
         "property_id": PROPERTY_ID, "tested_radius": TESTED_RADIUS,
         "tested_radius_hex": TESTED_RADIUS_HEX,
@@ -1083,6 +1123,7 @@ def _persist_pre_layernorm_input_capture(
         "operator": identity["operator"],
         "tensor_artifact_path": _relative(artifact_path, output_root),
         "artifact_identity": identity,
+        "canonical_state_identity": canonical_state_identity,
         "state": {**state_hashes,
                   "tensor_artifact_sha256": cluster_common.sha256(
                       artifact_path)},
