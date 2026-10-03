@@ -38,6 +38,12 @@ NEXT_REDUCTION_LABEL = "b2_ffn_residual"
 FRONTIER_CAPTURE_SCHEMA = "CORET_BLOCK2_FFN_FRONTIER_CAPTURE_V1"
 FRONTIER_MANIFEST_SCHEMA = "CORET_BLOCK2_FFN_FRONTIER_MANIFEST_V1"
 FRONTIER_STAGE = "block2_ffn_joint_cancellation_frontier"
+INPUT_CAPTURE_SCHEMA = "CORET_BLOCK2_POST_ATTENTION_LN_INPUT_CAPTURE_V1"
+INPUT_MANIFEST_SCHEMA = (
+    "CORET_BLOCK2_POST_ATTENTION_LN_INPUT_CAPTURE_MANIFEST_V1")
+INPUT_OPERATOR = "bert.encoder.layer.2.attention.output.LayerNorm"
+INPUT_BLOCK_INDEX = 2
+INPUT_LAYERNORM_INDEX = 5
 
 FRONTIER_REDUCTION_STATES = {
     "b2_post_attention_layernorm": (
@@ -127,11 +133,13 @@ class LayerNormExperimentHarness:
     """Authenticate and trace the sole opt-in PSD LayerNorm application."""
 
     def __init__(self, property_id: str, radius: float,
-                 expected_state_identity: dict, oracle_identity: dict):
+                 expected_state_identity: dict, oracle_identity: dict,
+                 input_capture=None):
         self.property_id = property_id
         self.radius = radius
         self.expected_state_identity = expected_state_identity
         self.oracle_identity = oracle_identity
+        self.input_capture = input_capture
         self.trace = []
         self.certificates = []
         self.total_callback_invocations = 0
@@ -210,6 +218,10 @@ class LayerNormExperimentHarness:
                 entry["reject_reason"] = "DUPLICATE_AUTHENTICATED_TARGET"
                 self.psd_certificate_rejections += 1
                 raise RuntimeError("PSD LayerNorm target state visited twice")
+            if self.input_capture is not None:
+                self.input_capture.bind_invocation(
+                    layernorm_index=index, invocation_ordinal=entry["ordinal"],
+                    live_state_identity=live_identity)
             milestones = {}
             result = experiment.execute_experimental_layernorm(
                 residual=residual, proof=proof, normalizer=normalizer,
@@ -284,6 +296,8 @@ class LayerNormExperimentHarness:
             raise RuntimeError("PSD experiment certificate application count differs")
         if counters["psd_certificate_rejections"] != 0:
             raise RuntimeError("PSD experiment certificate was rejected")
+        if self.input_capture is not None:
+            self.input_capture.validate()
 
     def record(self) -> dict:
         return {
@@ -297,6 +311,72 @@ class LayerNormExperimentHarness:
             "invocations": self.trace,
             "evaluator_exception": self.evaluator_exception,
         }
+
+
+class PostAttentionLayerNormInputCapture:
+    """Opt-in snapshot at entry to the exact index-5 LayerNorm computation."""
+
+    def __init__(self):
+        self.snapshot = None
+        self.state_identity = None
+        self.layernorm_index = None
+        self.invocation_ordinal = None
+        self.live_state_identity = None
+        self.encounters = 0
+        self.input_unchanged = None
+        self._original = None
+
+    @contextlib.contextmanager
+    def installed(self):
+        if self._original is not None:
+            raise RuntimeError("pre-LayerNorm input capture is already installed")
+        self._original = finish3l._layernorm_variance_state
+
+        def wrapper(state, proof, label):
+            if label != experiment.TARGET_LABEL:
+                return self._original(state, proof, label)
+            self.encounters += 1
+            if self.encounters != 1:
+                raise RuntimeError("target pre-LayerNorm input encountered twice")
+            before = experiment.state_identity(state, proof)
+            self.snapshot = _frontier_snapshot(state, proof)
+            self.state_identity = before
+            try:
+                return self._original(state, proof, label)
+            finally:
+                after = experiment.state_identity(state, proof)
+                self.input_unchanged = before == after
+                if not self.input_unchanged:
+                    raise RuntimeError("pre-LayerNorm capture input was mutated")
+
+        finish3l._layernorm_variance_state = wrapper
+        try:
+            yield self
+        finally:
+            finish3l._layernorm_variance_state = self._original
+            self._original = None
+
+    def bind_invocation(self, *, layernorm_index: int,
+                        invocation_ordinal: int, live_state_identity: dict):
+        if self.snapshot is None or self.encounters != 1:
+            raise RuntimeError("pre-LayerNorm input was not captured")
+        if layernorm_index != INPUT_LAYERNORM_INDEX:
+            raise RuntimeError("pre-LayerNorm capture index differs")
+        if live_state_identity != self.state_identity:
+            raise RuntimeError("pre-LayerNorm capture/callback state differs")
+        if self.layernorm_index is not None:
+            raise RuntimeError("pre-LayerNorm invocation was bound twice")
+        self.layernorm_index = int(layernorm_index)
+        self.invocation_ordinal = int(invocation_ordinal)
+        self.live_state_identity = live_state_identity
+
+    def validate(self):
+        if (self.encounters != 1 or self.snapshot is None
+                or self.layernorm_index != INPUT_LAYERNORM_INDEX
+                or self.invocation_ordinal is None
+                or self.live_state_identity != self.state_identity
+                or self.input_unchanged is not True):
+            raise RuntimeError("pre-LayerNorm input capture is incomplete")
 
 
 class NextLayerNormFailureCapture:
@@ -767,6 +847,242 @@ def _persist_ffn_frontier_capture(
     }
 
 
+def _input_linkage_identity(*, state_hashes: dict, invocation_ordinal: int,
+                            frontier_manifest_sha256: str,
+                            output_state_hashes: dict,
+                            source_capture: dict) -> dict:
+    revision = source_capture.get(
+        "pinned_deept_revision", source_capture.get("pinned_revision"))
+    fields = {
+        "property_id": PROPERTY_ID,
+        "tested_radius_hex": TESTED_RADIUS_HEX,
+        "block_index": INPUT_BLOCK_INDEX,
+        "layernorm_index": INPUT_LAYERNORM_INDEX,
+        "stage": experiment.TARGET_LABEL,
+        "parameter_name": INPUT_OPERATOR,
+        "invocation_ordinal": int(invocation_ordinal),
+        "input_state_identity_sha256": capture._json_sha(state_hashes),
+        "existing_output_state_name": "post_attention_ln_pre_reduction",
+        "existing_output_identity_sha256": capture._json_sha(
+            output_state_hashes),
+        "existing_frontier_manifest_sha256": frontier_manifest_sha256,
+        "pinned_revision": revision,
+        "checkpoint_sha256": capture.prefix.CHECKPOINT_SHA256,
+    }
+    fields["linkage_identity_sha256"] = capture._json_sha(fields)
+    return fields
+
+
+def _verify_pre_layernorm_input_capture(manifest_path: Path) -> dict:
+    manifest = cluster_common.verified_json(manifest_path)
+    operator = manifest.get("operator") or {}
+    model = manifest.get("model_authentication") or {}
+    state_record = manifest.get("state") or {}
+    linkage = manifest.get("invocation_linkage") or {}
+    reproduction = manifest.get("passive_reproduction") or {}
+    if (manifest.get("schema") != INPUT_MANIFEST_SCHEMA
+            or manifest.get("property_id") != PROPERTY_ID
+            or manifest.get("tested_radius") != TESTED_RADIUS
+            or manifest.get("tested_radius_hex") != TESTED_RADIUS_HEX
+            or operator != {
+                "block_index": INPUT_BLOCK_INDEX,
+                "layernorm_index": INPUT_LAYERNORM_INDEX,
+                "stage": experiment.TARGET_LABEL,
+                "parameter_name": INPUT_OPERATOR,
+                "invocation_ordinal": linkage.get("invocation_ordinal")}
+            or model.get("pinned_revision") != capture.prefix.PINNED_REVISION
+            or model.get("checkpoint_sha256") !=
+            capture.prefix.CHECKPOINT_SHA256
+            or model.get("scientific_manifest_sha256") !=
+            cluster_common.SCIENTIFIC_MANIFEST_SHA
+            or model.get("production_manifest_sha256") !=
+            cluster_common.PRODUCTION_MANIFEST_SHA
+            or linkage.get("verified") is not True
+            or linkage.get("existing_output_state_name") !=
+            "post_attention_ln_pre_reduction"
+            or reproduction.get("psd_application_count") != 1
+            or reproduction.get("psd_rejection_count") != 0
+            or reproduction.get("next_failure_stage") != NEXT_STAGE
+            or reproduction.get("next_failure_reason") !=
+            finish3l.LAYERNORM_DOMAIN_REASON
+            or reproduction.get("scientific_queries") != 1):
+        raise RuntimeError("pre-LayerNorm input manifest identity differs")
+    artifact_path = (manifest_path.parent
+                     / manifest["tensor_artifact_path"]).resolve()
+    if cluster_common.sha256(artifact_path) != state_record.get(
+            "tensor_artifact_sha256"):
+        raise RuntimeError("pre-LayerNorm input artifact SHA differs")
+    payload = capture.sound.torch.load(
+        artifact_path, map_location="cpu", weights_only=False)
+    if (payload.get("schema") != INPUT_CAPTURE_SCHEMA
+            or payload.get("identity") != manifest.get("artifact_identity")
+            or set(payload.get("states") or {}) != {"pre_layernorm_input"}):
+        raise RuntimeError("pre-LayerNorm input artifact identity differs")
+    actual = _frontier_state_hashes(
+        payload["states"]["pre_layernorm_input"])
+    actual = {**actual,
+              "source_ids_sha256": actual["generator_ids_sha256"],
+              "hidden_dimension": actual["feature_dimension"]}
+    for field, value in actual.items():
+        if state_record.get(field) != value:
+            raise RuntimeError(f"pre-LayerNorm input state differs: {field}")
+    frontier_path = Path(linkage["existing_frontier_manifest_path"])
+    if (not frontier_path.is_file()
+            or cluster_common.sha256(frontier_path) !=
+            linkage["existing_frontier_manifest_sha256"]):
+        raise RuntimeError("linked frontier manifest SHA differs")
+    frontier_manifest = cluster_common.verified_json(frontier_path)
+    matches = [row for row in frontier_manifest.get("variants", [])
+               if row.get("state_key") ==
+               "post_attention_ln_pre_reduction"]
+    if len(matches) != 1:
+        raise RuntimeError("linked LayerNorm output state is absent")
+    expected_linkage = _input_linkage_identity(
+        state_hashes=actual,
+        invocation_ordinal=linkage["invocation_ordinal"],
+        frontier_manifest_sha256=linkage[
+            "existing_frontier_manifest_sha256"],
+        output_state_hashes={key: value for key, value in matches[0].items()
+                             if key != "state_key"},
+        source_capture=model)
+    if (linkage.get("linkage_identity_sha256") !=
+            expected_linkage["linkage_identity_sha256"]
+            or state_record.get("token_count") != matches[0].get("token_count")
+            or state_record.get("feature_dimension") !=
+            matches[0].get("feature_dimension")):
+        raise RuntimeError("pre/output LayerNorm invocation linkage differs")
+    return {"schema": INPUT_MANIFEST_SCHEMA, "verified": True,
+            "artifact_sha256": state_record["tensor_artifact_sha256"],
+            "linkage_identity_sha256": linkage["linkage_identity_sha256"]}
+
+
+def _persist_pre_layernorm_input_capture(
+        output_root: Path, captured: PostAttentionLayerNormInputCapture,
+        source_capture: dict, result: dict, frontier_record: dict,
+        harness: LayerNormExperimentHarness) -> dict:
+    captured.validate()
+    snapshot = captured.snapshot
+    state_hashes = _frontier_state_hashes(snapshot)
+    state_hashes = {
+        **state_hashes,
+        "source_ids_sha256": state_hashes["generator_ids_sha256"],
+        "hidden_dimension": state_hashes["feature_dimension"],
+    }
+    frontier_path = Path(frontier_record["manifest_path"])
+    frontier_manifest = cluster_common.verified_json(frontier_path)
+    matches = [row for row in frontier_manifest["variants"]
+               if row["state_key"] == "post_attention_ln_pre_reduction"]
+    if len(matches) != 1:
+        raise RuntimeError("post-attention LayerNorm output linkage is absent")
+    output_hashes = {key: value for key, value in matches[0].items()
+                     if key != "state_key"}
+    linkage_fields = _input_linkage_identity(
+        state_hashes=state_hashes,
+        invocation_ordinal=captured.invocation_ordinal,
+        frontier_manifest_sha256=frontier_record["manifest_sha256"],
+        output_state_hashes=output_hashes, source_capture=source_capture)
+    identity = {
+        "property_id": PROPERTY_ID, "tested_radius": TESTED_RADIUS,
+        "tested_radius_hex": TESTED_RADIUS_HEX,
+        "operator": {
+            "block_index": INPUT_BLOCK_INDEX,
+            "layernorm_index": INPUT_LAYERNORM_INDEX,
+            "stage": experiment.TARGET_LABEL,
+            "parameter_name": INPUT_OPERATOR,
+            "invocation_ordinal": captured.invocation_ordinal},
+        "pinned_deept_revision": source_capture["pinned_deept_revision"],
+        "checkpoint_sha256": capture.prefix.CHECKPOINT_SHA256,
+    }
+    artifact_path = output_root / "pre_layernorm_input_state.pt"
+    capture._write_torch_atomic(artifact_path, {
+        "schema": INPUT_CAPTURE_SCHEMA, "identity": identity,
+        "states": {"pre_layernorm_input": snapshot},
+        "input_unchanged": captured.input_unchanged,
+    })
+    model_authentication = {
+        "pinned_revision": source_capture["pinned_deept_revision"],
+        "checkpoint_sha256": capture.prefix.CHECKPOINT_SHA256,
+        "scientific_manifest_sha256": source_capture[
+            "scientific_manifest_sha256"],
+        "production_manifest_sha256": source_capture[
+            "production_manifest_sha256"],
+    }
+    linkage = {
+        "verified": True,
+        "existing_output_state_name": "post_attention_ln_pre_reduction",
+        "existing_frontier_manifest_path": str(frontier_path),
+        **linkage_fields,
+    }
+    manifest_path = output_root / "pre_layernorm_input_manifest.json"
+    manifest = _atomic_json(manifest_path, {
+        "schema": INPUT_MANIFEST_SCHEMA,
+        "property_id": PROPERTY_ID, "tested_radius": TESTED_RADIUS,
+        "tested_radius_hex": TESTED_RADIUS_HEX,
+        "operator": identity["operator"],
+        "tensor_artifact_path": _relative(artifact_path, output_root),
+        "artifact_identity": identity,
+        "state": {**state_hashes,
+                  "tensor_artifact_sha256": cluster_common.sha256(
+                      artifact_path)},
+        "invocation_linkage": linkage,
+        "model_authentication": model_authentication,
+        "passive_reproduction": {
+            "psd_application_count": harness.psd_certificate_applications,
+            "psd_rejection_count": harness.psd_certificate_rejections,
+            "next_failure_stage": result.get("failure_stage"),
+            "next_failure_reason": result.get("failure_reason"),
+            "scientific_queries": 1,
+            "input_unchanged": captured.input_unchanged,
+        },
+    })
+    verified = _verify_pre_layernorm_input_capture(manifest_path)
+    return {"artifact_path": str(artifact_path),
+            "artifact_sha256": cluster_common.sha256(artifact_path),
+            "manifest_path": str(manifest_path),
+            "manifest_sha256": cluster_common.sha256(manifest_path),
+            "manifest_record_sha256": manifest["record_sha256"],
+            "verified_identity": verified}
+
+
+def _frontier_output_state_record(manifest_path: Path) -> dict:
+    _verify_ffn_frontier_capture(manifest_path)
+    manifest = cluster_common.verified_json(manifest_path)
+    matches = [row for row in manifest["variants"]
+               if row["state_key"] == "post_attention_ln_pre_reduction"]
+    if len(matches) != 1:
+        raise RuntimeError("authenticated frontier LayerNorm output is absent")
+    return matches[0]
+
+
+def _authenticate_prior_experiment(report_path: Path) -> dict:
+    report = cluster_common.verified_json(report_path)
+    if (report.get("schema") != SCHEMA
+            or report.get("verdict") !=
+            "CORET_PSD_LAYERNORM_EXPERIMENT_COMPLETE"
+            or report.get("property_id") != PROPERTY_ID
+            or report.get("tested_radius") != TESTED_RADIUS
+            or report.get("tested_radius_hex") != TESTED_RADIUS_HEX
+            or report.get("terminal_status") != "UNCERTIFIED_DOMAIN_FAILURE"
+            or report.get("generic_fallback_count") != 0):
+        raise RuntimeError("prior PSD experiment identity differs")
+    capture_record = report.get("capture_manifest") or {}
+    oracle_record = report.get("oracle_report") or {}
+    frontier_record = report.get("block2_ffn_frontier_capture") or {}
+    paths = {}
+    for name, record, path_field, sha_field in (
+            ("capture_manifest", capture_record, "path", "sha256"),
+            ("oracle_report", oracle_record, "path", "sha256"),
+            ("frontier_manifest", frontier_record,
+             "manifest_path", "manifest_sha256")):
+        path = Path(record.get(path_field, "")).expanduser()
+        if (not path.is_absolute() or not path.is_file()
+                or cluster_common.sha256(path) != record.get(sha_field)):
+            raise RuntimeError(f"prior PSD experiment {name} differs")
+        paths[name] = path
+    _frontier_output_state_record(paths["frontier_manifest"])
+    return paths
+
+
 def _validate_next_failure_result(result: dict) -> dict:
     diagnostic = result.get("domain_failure_diagnostic")
     if (result.get("terminal_status") != "UNCERTIFIED_DOMAIN_FAILURE"
@@ -888,7 +1204,8 @@ def _installed_finish_hook(harness: LayerNormExperimentHarness,
 
 
 def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
-            oracle_report: Path, output_root: Path, device_index: int) -> dict:
+            oracle_report: Path, output_root: Path, device_index: int,
+            existing_frontier_manifest: Path | None = None) -> dict:
     if output_root.exists() and any(output_root.iterdir()):
         raise RuntimeError("refusing to overwrite PSD experiment root")
     output_root.mkdir(parents=True, exist_ok=True)
@@ -942,8 +1259,10 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
             "invocation_trace_record_sha256": trace["record_sha256"],
         })
         raise
+    input_capture = PostAttentionLayerNormInputCapture()
     harness = LayerNormExperimentHarness(
-        PROPERTY_ID, TESTED_RADIUS, expected_state_identity, oracle_identity)
+        PROPERTY_ID, TESTED_RADIUS, expected_state_identity, oracle_identity,
+        input_capture=input_capture)
     next_capture = NextLayerNormFailureCapture()
     frontier_capture = FFNFrontierCapture()
     execution_root = output_root / "scientific_execution"
@@ -952,7 +1271,7 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
     campaign_error = None
     result = None
     try:
-        with frontier_capture.installed(), \
+        with input_capture.installed(), frontier_capture.installed(), \
                 _installed_finish_hook(harness, next_capture):
             result = campaign.execute_property(row, execution_root, device)
     except Exception as error:
@@ -1004,6 +1323,23 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
         output_root, next_capture, capture_identity, result_path)
     frontier_capture_record = _persist_ffn_frontier_capture(
         output_root, frontier_capture, capture_identity, result_path)
+    linkage_frontier_record = frontier_capture_record
+    if existing_frontier_manifest is not None:
+        existing_row = _frontier_output_state_record(
+            existing_frontier_manifest)
+        reproduced_row = _frontier_output_state_record(
+            Path(frontier_capture_record["manifest_path"]))
+        if existing_row != reproduced_row:
+            raise RuntimeError(
+                "reproduced/job-2995 LayerNorm output identity differs")
+        linkage_frontier_record = {
+            "manifest_path": str(existing_frontier_manifest),
+            "manifest_sha256": cluster_common.sha256(
+                existing_frontier_manifest),
+        }
+    input_capture_record = _persist_pre_layernorm_input_capture(
+        output_root, input_capture, capture_identity, result,
+        linkage_frontier_record, harness)
     return _atomic_json(output_root / "experiment_report.json", {
         "schema": SCHEMA,
         "verdict": "CORET_PSD_LAYERNORM_EXPERIMENT_COMPLETE",
@@ -1035,6 +1371,9 @@ def execute(campaign_root: Path, artifact_root: Path, capture_manifest: Path,
         "generic_fallback_count": result.get("generic_fallback_count"),
         "next_layernorm_capture": next_capture_record,
         "block2_ffn_frontier_capture": frontier_capture_record,
+        "post_attention_layernorm_input_capture": input_capture_record,
+        "input_capture_linked_to_existing_job2995": (
+            existing_frontier_manifest is not None),
         "scientific_queries": 1,
         "bound_calls": 1,
     })
@@ -1044,15 +1383,33 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--campaign-root", required=True, type=Path)
     parser.add_argument("--artifact-root", required=True, type=Path)
-    parser.add_argument("--capture-manifest", required=True, type=Path)
-    parser.add_argument("--oracle-report", required=True, type=Path)
+    parser.add_argument("--capture-manifest", type=Path)
+    parser.add_argument("--oracle-report", type=Path)
+    parser.add_argument("--prior-experiment-report", type=Path)
+    parser.add_argument("--existing-frontier-manifest", type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--device-index", type=int, default=0)
     args = parser.parse_args()
+    if args.prior_experiment_report is not None:
+        if (args.capture_manifest is not None or args.oracle_report is not None
+                or args.existing_frontier_manifest is not None):
+            parser.error("prior experiment report cannot be mixed with explicit inputs")
+        inputs = _authenticate_prior_experiment(
+            args.prior_experiment_report.resolve())
+        capture_manifest = inputs["capture_manifest"]
+        oracle_report = inputs["oracle_report"]
+        existing_frontier = inputs["frontier_manifest"]
+    else:
+        if args.capture_manifest is None or args.oracle_report is None:
+            parser.error("capture manifest and oracle report are required")
+        capture_manifest = args.capture_manifest.resolve()
+        oracle_report = args.oracle_report.resolve()
+        existing_frontier = (args.existing_frontier_manifest.resolve()
+                             if args.existing_frontier_manifest else None)
     report = execute(
         args.campaign_root.resolve(), args.artifact_root.resolve(),
-        args.capture_manifest.resolve(), args.oracle_report.resolve(),
-        args.output_root.resolve(), args.device_index)
+        capture_manifest, oracle_report, args.output_root.resolve(),
+        args.device_index, existing_frontier)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
