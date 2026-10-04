@@ -6,7 +6,9 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import time
 
+import numpy as np
 import pytest
 
 
@@ -133,6 +135,29 @@ def test_degree_two_algebraic_witness_replays_exactly():
     replay = ORACLE.replay_algebraic_perspective_witness(changed, algebraic)
     assert replay["verified"] is True
     assert replay["polynomial_degree"] == 2
+
+
+def test_bareiss_fixed_pattern_reconstruction_produces_exact_witness():
+    fixture = ORACLE.ExactPerspectiveProblem(
+        x0=(F(0), F(0)), X=((F(1), F(-1)),),
+        low=(F(-1),), high=(F(1),),
+        gamma=(F(1), F(1)), beta=(F(0), F(0)), epsilon=F(1),
+        W1=((F(1), F(0)), (F(0), F(1))), b1=(F(0), F(0)),
+        W2=((F(0), F(0)), (F(0), F(0))), b2=(F(0), F(0)))
+    # Layout needed here is xi, c[0], c[1], t; derived g/u are irrelevant to
+    # reconstruction because the exact fixture is supplied explicitly.
+    proposal = np.asarray([0.25, 0.0, 0.0, 2.0])
+    recovered, evidence = ORACLE.reconstruct_exact_fixed_pattern_witness(
+        fixture, proposal, [True, False], 1, 2.0)
+    assert recovered is not None
+    assert evidence["verified"] is True
+    assert evidence["method"] == \
+        "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT"
+    if "source_values" in recovered:
+        replay = ORACLE.replay_exact_perspective_witness(fixture, recovered)
+    else:
+        replay = ORACLE.replay_algebraic_perspective_witness(fixture, recovered)
+    assert replay["verified"] is True
 
 
 def test_source_box_violation_rejected():
@@ -682,3 +707,77 @@ def test_highs_warning_about_ignored_coefficient_remains_fatal(tmp_path):
             diagnostic, tmp_path / "absent.log")
     assert captured.value.diagnostic["failure_classification"] == \
         "HIGHS_COEFFICIENT_MAGNITUDE_REJECTED"
+
+
+def continuation_fixture():
+    source_count = 1
+    solution = np.zeros(source_count + 3 * ORACLE.DIMENSION + 1)
+    g0 = source_count + ORACLE.DIMENSION + 1
+    u0 = g0 + ORACLE.DIMENSION
+    solution[g0] = 0.0       # deterministic active tie
+    solution[u0] = 0.25      # largest relaxation violation
+    solution[g0 + 1] = -0.5
+    solution[u0 + 1] = 0.0
+    bounds = {
+        "stable_active": [],
+        "stable_inactive": list(range(2, ORACLE.DIMENSION)),
+        "unstable": [0, 1],
+    }
+    return source_count, solution, bounds
+
+
+def test_feasible_root_attempts_exact_witness_before_branching():
+    source_count, solution, bounds = continuation_fixture()
+    calls = []
+
+    def witness(pattern, candidate, node_id):
+        calls.append((pattern, node_id))
+        return {"verified": True}, {"attempted": True, "verified": True}
+
+    found, branch = ORACLE.run_phase_continuation(
+        solution, bounds, source_count, 8, 4,
+        time.perf_counter() + 2.0,
+        lambda *_: pytest.fail("root witness should precede node solves"),
+        witness)
+    assert found == {"verified": True}
+    assert calls[0][1] == "root"
+    assert calls[0][0][0] is True  # g == 0 tie is active
+    assert branch["nodes_created"] == 1
+    assert branch["phase_patterns_attempted"] == 1
+
+
+def test_failed_root_witness_initializes_phase_bab():
+    source_count, solution, bounds = continuation_fixture()
+    calls = []
+
+    def witness(pattern, candidate, node_id):
+        calls.append(node_id)
+        return None, {"attempted": True, "verified": False,
+                      "failure": "synthetic exact replay failure"}
+
+    def solve_node(_phases, _node_id):
+        return {"solver_status": "Optimal", "feasible": True,
+                "infeasible": False, "solution": solution,
+                "certificate": None}
+
+    found, branch = ORACLE.run_phase_continuation(
+        solution, bounds, source_count, 3, 4,
+        time.perf_counter() + 2.0, solve_node, witness)
+    assert found is None
+    assert calls[0] == "root"
+    assert branch["attempted"] is True
+    assert branch["nodes_created"] >= 1
+    assert branch["phase_patterns_attempted"] > 0
+    assert branch["limit_reason"] == "MAXIMUM_NODES"
+
+
+def test_feasible_root_zero_continuation_state_is_forbidden_by_flow():
+    source_count, solution, bounds = continuation_fixture()
+    found, branch = ORACLE.run_phase_continuation(
+        solution, bounds, source_count, 1, 1,
+        time.perf_counter() + 2.0,
+        lambda *_: pytest.fail("no child solve expected"),
+        lambda *_: (None, {"attempted": True, "verified": False}))
+    assert found is None
+    assert not (branch["nodes_created"] == 0
+                and branch["phase_patterns_attempted"] == 0)

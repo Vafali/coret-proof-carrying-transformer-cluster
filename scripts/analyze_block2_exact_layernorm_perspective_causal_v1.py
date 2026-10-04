@@ -2136,6 +2136,403 @@ def _empty_exact_witness_record():
     }
 
 
+def candidate_relu_phase_pattern(solution, bounds: dict, source_count: int):
+    solution = np.asarray(solution, dtype=np.float64)
+    expected = source_count + 3 * DIMENSION + 1
+    if solution.shape != (expected,) or not np.isfinite(solution).all():
+        raise RuntimeError("root LP primal solution topology differs")
+    g0 = source_count + DIMENSION + 1
+    u0 = g0 + DIMENSION
+    g = solution[g0:g0 + DIMENSION]
+    u = solution[u0:u0 + DIMENSION]
+    pattern = [False] * DIMENSION
+    for index in bounds["stable_active"]:
+        pattern[index] = True
+    for index in bounds["stable_inactive"]:
+        pattern[index] = False
+    for index in bounds["unstable"]:
+        pattern[index] = bool(g[index] >= 0.0)  # exact deterministic zero tie
+    violations = {
+        int(index): max(0.0, float(u[index] - max(0.0, g[index])))
+        for index in bounds["unstable"]}
+    return pattern, {
+        "phase_pattern_sha256": _sha_json(pattern),
+        "stable_active_count": len(bounds["stable_active"]),
+        "stable_inactive_count": len(bounds["stable_inactive"]),
+        "unstable_count": len(bounds["unstable"]),
+        "zero_tie_rule": "g_i >= 0 selects active",
+        "relu_hull_violation_scores": {
+            str(key): value for key, value in violations.items()},
+    }
+
+
+def lp_with_relu_phases(lp: ExactCanonicalLP, phases: dict[int, bool],
+                        source_count: int) -> ExactCanonicalLP:
+    g0 = source_count + DIMENSION + 1
+    u0 = g0 + DIMENSION
+    rows = list(lp.rows)
+    for neuron, active in sorted(phases.items()):
+        if not 0 <= neuron < DIMENSION or type(active) is not bool:
+            raise RuntimeError("branch ReLU phase differs")
+        if active:
+            indices, values = _coalesced(
+                [(g0 + neuron, -1), (u0 + neuron, 1)])
+            rows.append(ExactLPRow(
+                f"branch_active_value[{neuron}]", indices, values,
+                Fraction(0), Fraction(0)))
+            rows.append(ExactLPRow(
+                f"branch_active_sign[{neuron}]", (g0 + neuron,),
+                (Fraction(-1),), None, Fraction(0)))
+        else:
+            rows.append(ExactLPRow(
+                f"branch_inactive_value[{neuron}]", (u0 + neuron,),
+                (Fraction(1),), Fraction(0), Fraction(0)))
+            rows.append(ExactLPRow(
+                f"branch_inactive_sign[{neuron}]", (g0 + neuron,),
+                (Fraction(1),), None, Fraction(0)))
+    return ExactCanonicalLP(
+        lp.variable_names, lp.column_lower, lp.column_upper, tuple(rows))
+
+
+def _branch_neuron(solution, bounds: dict, phases: dict, source_count: int):
+    pattern, proposal = candidate_relu_phase_pattern(
+        solution, bounds, source_count)
+    scores = proposal["relu_hull_violation_scores"]
+    remaining = [int(index) for index in bounds["unstable"]
+                 if int(index) not in phases]
+    if not remaining:
+        return None, pattern, proposal
+    # Largest violation first; lower neuron index wins an exact tie.
+    selected = min(remaining, key=lambda index: (-scores[str(index)], index))
+    return selected, pattern, proposal
+
+
+def run_phase_continuation(
+        root_solution, bounds: dict, source_count: int,
+        maximum_nodes: int, maximum_patterns: int, deadline: float,
+        solve_node, attempt_witness):
+    """Minimal deterministic ReLU-phase BaB with proof-carrying leaves."""
+    nodes = {"root": {"phases": {}, "children": None,
+                      "certificate": None, "status": "OPEN"}}
+    queue = [("root", {}, root_solution, 0)]
+    patterns, closed, maximum_depth = 0, 0, 0
+    witness = None
+    attempts = []
+    limit_reason = None
+    while queue and witness is None:
+        if time.perf_counter() >= deadline:
+            limit_reason = "WALL_CLOCK_LIMIT"
+            break
+        node_id, phases, inherited_solution, depth = queue.pop(0)
+        maximum_depth = max(maximum_depth, depth)
+        if inherited_solution is None:
+            solved = solve_node(phases, node_id)
+            nodes[node_id]["solver_status"] = solved.get("solver_status")
+            if solved.get("infeasible"):
+                certificate = solved.get("certificate")
+                if certificate is not None:
+                    nodes[node_id].update(
+                        {"status": "CLOSED_EXACT_FARKAS",
+                         "certificate": certificate})
+                    closed += 1
+                else:
+                    nodes[node_id]["status"] = "OPEN_UNCERTIFIED_INFEASIBLE"
+                continue
+            if not solved.get("feasible") or solved.get("solution") is None:
+                nodes[node_id]["status"] = "OPEN_SOLVER_UNRESOLVED"
+                continue
+            solution = solved["solution"]
+        else:
+            solution = inherited_solution
+            nodes[node_id]["solver_status"] = "ROOT_OPTIMAL"
+        neuron, pattern, proposal = _branch_neuron(
+            solution, bounds, phases, source_count)
+        nodes[node_id]["phase_proposal"] = proposal
+        if patterns < maximum_patterns:
+            patterns += 1
+            found, evidence = attempt_witness(pattern, solution, node_id)
+            attempts.append({"node_id": node_id, **evidence})
+            if found is not None:
+                witness = found
+                nodes[node_id]["status"] = "EXACT_WITNESS_VERIFIED"
+                break
+        if neuron is None:
+            nodes[node_id]["status"] = "OPEN_FIXED_PHASE_WITHOUT_PROOF"
+            continue
+        if len(nodes) + 2 > maximum_nodes:
+            nodes[node_id]["status"] = "OPEN_NODE_LIMIT"
+            limit_reason = "MAXIMUM_NODES"
+            break
+        children = {}
+        nodes[node_id].update({"branch_neuron": neuron,
+                               "children": children,
+                               "status": "BRANCHED"})
+        for label, active in (("inactive", False), ("active", True)):
+            child_id = f"{node_id}.{label[0]}{neuron}"
+            child_phases = {**phases, neuron: active}
+            children[label] = child_id
+            nodes[child_id] = {"phases": {
+                str(key): value for key, value in child_phases.items()},
+                "children": None, "certificate": None, "status": "QUEUED"}
+            queue.append((child_id, child_phases, None, depth + 1))
+    open_nodes = sum(
+        node.get("children") is None and node.get("certificate") is None
+        and node.get("status") != "EXACT_WITNESS_VERIFIED"
+        for node in nodes.values())
+    tree = {"schema": TREE_SCHEMA, "root": "root", "nodes": nodes}
+    return witness, {
+        "attempted": True, "nodes_created": len(nodes),
+        "nodes_closed_by_certificate": closed,
+        "nodes_open": open_nodes, "maximum_depth": maximum_depth,
+        "phase_patterns_attempted": patterns,
+        "witness_attempts": attempts, "limit_reason": limit_reason,
+        "tree": tree,
+    }
+
+
+def _exact_problem_from_arrays(weights, token, low, high, gamma, beta,
+                               W1, b1, W2, b2, epsilon):
+    return ExactPerspectiveProblem(
+        x0=tuple(_fr(value) for value in weights[0, token]),
+        X=tuple(tuple(_fr(value) for value in row)
+                for row in weights[1:, token]),
+        low=tuple(_fr(value) for value in low),
+        high=tuple(_fr(value) for value in high),
+        gamma=tuple(_fr(value) for value in gamma),
+        beta=tuple(_fr(value) for value in beta),
+        epsilon=_fr(epsilon), W1=tuple(tuple(_fr(value) for value in row)
+                                      for row in W1),
+        b1=tuple(_fr(value) for value in b1),
+        W2=tuple(tuple(_fr(value) for value in row) for row in W2),
+        b2=tuple(_fr(value) for value in b2))
+
+
+def attempt_exact_lp_candidate_witness(problem: ExactPerspectiveProblem,
+                                       solution, pattern, source_count):
+    """Exact replay of the dyadic LP proposal; failure is never exclusion."""
+    solution = np.asarray(solution, dtype=np.float64)
+    t_index = source_count + DIMENSION
+    witness = {
+        "schema": WITNESS_SCHEMA,
+        "source_values": [_fs(_fr(value))
+                          for value in solution[:source_count]],
+        "t": _fs(_fr(solution[t_index])),
+        "relu_active": [bool(value) for value in pattern],
+    }
+    try:
+        replay = replay_exact_perspective_witness(problem, witness)
+        return witness, {"attempted": True, "verified": True,
+                         "method": "EXACT_DYADIC_LP_CANDIDATE_REPLAY",
+                         **replay}
+    except RuntimeError as error:
+        return None, {"attempted": True, "verified": False,
+                      "method": "EXACT_DYADIC_LP_CANDIDATE_REPLAY",
+                      "failure": f"{type(error).__name__}: {error}"}
+
+
+def _fraction_square_root(value: Fraction):
+    if value < 0:
+        return None
+    numerator, denominator = (math.isqrt(value.numerator),
+                              math.isqrt(value.denominator))
+    if (numerator * numerator == value.numerator
+            and denominator * denominator == value.denominator):
+        return Fraction(numerator, denominator)
+    return None
+
+
+def _isolate_quadratic_root(coefficients, approximation: float):
+    a, b, c = coefficients
+
+    def evaluate(value):
+        return a * value * value + b * value + c
+
+    left_float = math.nextafter(approximation, -math.inf)
+    right_float = math.nextafter(approximation, math.inf)
+    for _ in range(256):
+        left, right = (_fr(left_float), _fr(right_float))
+        left_value, right_value = evaluate(left), evaluate(right)
+        if left_value and right_value and left_value * right_value < 0:
+            return left, right
+        left_float = math.nextafter(left_float, -math.inf)
+        right_float = math.nextafter(right_float, math.inf)
+    raise ExactSolveFailure("could not isolate the quadratic witness root")
+
+
+def reconstruct_exact_fixed_pattern_witness(
+        problem: ExactPerspectiveProblem, solution, pattern,
+        source_count: int, timeout_seconds: float):
+    """Exact 127-correction-variable/one-root reconstruction."""
+    started = time.perf_counter()
+    deadline = started + timeout_seconds
+    d = problem.d
+    candidate = np.asarray(solution[:source_count], dtype=np.float64)
+    t_candidate = _fr(solution[source_count + d])
+    if len(problem.X) != source_count or len(pattern) != d:
+        raise RuntimeError("fixed-pattern reconstruction topology differs")
+    active = [index for index, value in enumerate(pattern) if value]
+    gamma = list(problem.gamma)
+    w1_beta = _matvec(problem.W1, problem.beta)
+    h_matrix = []
+    h_t = []
+    for output in range(d):
+        row = []
+        for feature in range(d):
+            value = gamma[feature] if output == feature else Fraction(0)
+            value += sum((problem.W2[output][neuron]
+                          * problem.W1[neuron][feature] * gamma[feature]
+                          for neuron in active), Fraction(0))
+            row.append(value)
+        h_matrix.append(row)
+        h_t.append(problem.beta[output] + problem.b2[output] + sum(
+            (problem.W2[output][neuron]
+             * (w1_beta[neuron] + problem.b1[neuron])
+             for neuron in active), Fraction(0)))
+    difference_matrix = [[h_matrix[row][feature] - h_matrix[0][feature]
+                          for feature in range(d)]
+                         for row in range(1, d)]
+    difference_t = [h_t[row] - h_t[0] for row in range(1, d)]
+    x_numeric = np.asarray([[float(value) for value in row]
+                            for row in problem.X], dtype=np.float64)
+    x_numeric -= x_numeric.mean(axis=1, keepdims=True)
+    m_numeric = np.asarray([[float(value) for value in row]
+                            for row in difference_matrix], dtype=np.float64)
+    sensitivity = m_numeric @ x_numeric.T
+    widths = np.asarray([float(hi - lo) for lo, hi in
+                         zip(problem.low, problem.high)])
+    free = np.flatnonzero(widths > 0.0)
+    if len(free) < d - 1:
+        raise ExactSolveFailure("fewer than 127 correction sources are free")
+    _q, r, pivots = qr(sensitivity[:, free], mode="economic", pivoting=True)
+    tolerance = (max(sensitivity.shape) * np.finfo(np.float64).eps
+                 * (abs(r[0, 0]) if r.size else 0.0))
+    rank = int(np.sum(np.abs(np.diag(r)) > tolerance))
+    if rank != d - 1:
+        raise ExactSolveFailure(
+            f"fixed-pattern cancellation correction rank {rank} != {d - 1}")
+    columns = free[np.asarray(pivots[:d - 1], dtype=np.int64)]
+    selected = set(int(value) for value in columns)
+    xi_candidate = [_fr(value) for value in candidate]
+    centered_x0 = [value - sum(problem.x0, Fraction(0)) / d
+                   for value in problem.x0]
+    centered_rows = []
+    for column in columns:
+        row = problem.X[int(column)]
+        mean = sum(row, Fraction(0)) / d
+        centered_rows.append([value - mean for value in row])
+    c_candidate = list(centered_x0)
+    for source, row in enumerate(problem.X):
+        mean = sum(row, Fraction(0)) / d
+        value = xi_candidate[source]
+        for feature, coefficient in enumerate(row):
+            c_candidate[feature] += (coefficient - mean) * value
+    residual = [_dot(row, c_candidate) + coefficient * t_candidate
+                for row, coefficient in
+                zip(difference_matrix, difference_t)]
+    exact_matrix = [[_dot(row, centered_rows[column])
+                     for column in range(d - 1)]
+                    for row in difference_matrix]
+    integer_matrix, constant_rhs, slope_rhs = [], [], []
+    for row, residual_value, t_value in zip(
+            exact_matrix, residual, difference_t):
+        integers = _integerize([
+            *row, -residual_value + t_value * t_candidate, -t_value])
+        integer_matrix.append(integers[:d - 1])
+        constant_rhs.append(integers[-2]); slope_rhs.append(integers[-1])
+    remaining = max(0.1, deadline - time.perf_counter())
+    constant_delta = _bareiss_solve(
+        integer_matrix, constant_rhs, remaining / 2)
+    remaining = max(0.1, deadline - time.perf_counter())
+    slope_delta = _bareiss_solve(
+        integer_matrix, slope_rhs, remaining)
+    source_constant = list(xi_candidate)
+    source_slope = [Fraction(0) for _ in range(source_count)]
+    c_constant, c_slope = list(c_candidate), [Fraction(0)] * d
+    for ordinal, column in enumerate(columns):
+        index = int(column)
+        source_constant[index] += constant_delta[ordinal]
+        source_slope[index] = slope_delta[ordinal]
+        for feature in range(d):
+            c_constant[feature] += (centered_rows[ordinal][feature]
+                                    * constant_delta[ordinal])
+            c_slope[feature] += (centered_rows[ordinal][feature]
+                                 * slope_delta[ordinal])
+    polynomial = (
+        Fraction(d) - sum((value * value for value in c_slope),
+                                  Fraction(0)),
+        -2 * _dot(c_constant, c_slope),
+        -sum((value * value for value in c_constant), Fraction(0))
+        - d * problem.epsilon)
+    while polynomial and polynomial[0] == 0:
+        polynomial = polynomial[1:]
+    if len(polynomial) not in (2, 3):
+        raise ExactSolveFailure("reconstructed LayerNorm polynomial is invalid")
+    roots = []
+    if len(polynomial) == 2:
+        roots = [("rational", -polynomial[1] / polynomial[0], None)]
+    else:
+        a, b, c = polynomial
+        discriminant = b * b - 4 * a * c
+        if discriminant < 0:
+            raise ExactSolveFailure("reconstructed quadratic has no real root")
+        exact_sqrt = _fraction_square_root(discriminant)
+        if exact_sqrt is not None:
+            roots = [("rational", (-b + sign * exact_sqrt) / (2 * a), None)
+                     for sign in (-1, 1)]
+        else:
+            square = math.sqrt(float(discriminant))
+            approximations = [(-float(b) + sign * square) / (2 * float(a))
+                              for sign in (-1, 1)]
+            roots = [("algebraic", None,
+                      _isolate_quadratic_root(polynomial, value))
+                     for value in approximations]
+    failures = []
+    for kind, rational_root, interval in roots:
+        try:
+            if kind == "rational":
+                values = [constant + slope * rational_root for
+                          constant, slope in zip(source_constant,
+                                                 source_slope)]
+                witness = {
+                    "schema": WITNESS_SCHEMA,
+                    "source_values": [_fs(value) for value in values],
+                    "t": _fs(rational_root),
+                    "relu_active": [bool(value) for value in pattern]}
+                replay = replay_exact_perspective_witness(problem, witness)
+            else:
+                witness = {
+                    "schema": WITNESS_SCHEMA,
+                    "algebraic_root": {
+                        "polynomial": [_fs(value) for value in polynomial],
+                        "isolating_interval": [_fs(value) for value in interval]},
+                    "source_affine": [
+                        {"constant": _fs(constant), "slope": _fs(slope)}
+                        for constant, slope in zip(source_constant,
+                                                   source_slope)],
+                    "t_affine": {"constant": "0/1", "slope": "1/1"},
+                    "relu_active": [bool(value) for value in pattern]}
+                replay = replay_algebraic_perspective_witness(problem, witness)
+            return witness, {
+                "attempted": True, "verified": True,
+                "method": "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
+                "selected_correction_variables": len(selected),
+                "selected_columns_sha256": _sha_json(
+                    [int(value) for value in columns]),
+                "polynomial": [_fs(value) for value in polynomial],
+                "runtime_seconds": time.perf_counter() - started,
+                **replay}
+        except RuntimeError as error:
+            failures.append(f"{type(error).__name__}: {error}")
+    return None, {
+        "attempted": True, "verified": False,
+        "method": "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
+        "selected_correction_variables": len(selected),
+        "selected_columns_sha256": _sha_json([int(value) for value in columns]),
+        "polynomial": [_fs(value) for value in polynomial],
+        "root_replay_failures": failures,
+        "runtime_seconds": time.perf_counter() - started}
+
+
 def execute(capture_root: Path, downstream_report: Path, output: Path,
             artifact_dir: Path, maximum_nodes: int,
             wall_seconds: float, maximum_patterns: int) -> dict:
@@ -2286,10 +2683,131 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             "largest deterministic triangle-hull violation; ties by neuron index"),
         "continuous_source_branching": False,
     }
+    complete_tree_replay = None
+    if solver is not None and solver["feasible"]:
+        if (solver["column_values"] is None
+                or len(solver["column_values"]) != lp.column_count
+                or solver["solver_scaling"][
+                    "original_canonical_lp_sha256"] != lp.identity()
+                or solver["solver_scaling"]["solver_scaled_lp_sha256"] !=
+                    solver["construction_diagnostic"][
+                        "solver_scaled_lp_sha256"]):
+            raise RuntimeError("feasible root LP solution identity differs")
+        exact_problem = _exact_problem_from_arrays(
+            weights, token, low, high, gamma, beta, W1, b1, W2, b2,
+            epsilon)
+        node_lps_by_identity = {}
+
+        def solve_phase_node(phases, node_id):
+            node_lp = lp_with_relu_phases(lp, phases, EXPECTED_SOURCES)
+            node_lps_by_identity[node_lp.identity()] = node_lp
+            safe = node_id.replace(".", "_")
+            node_solver = solve_highspy(
+                node_lp, artifact_dir / f"bab_{safe}_highspy.log",
+                artifact_dir / f"bab_{safe}_row_scaling.json")
+            node_certificate = None
+            if node_solver["infeasible"]:
+                if node_solver["original_row_dual_ray"] is not None:
+                    node_certificate, _attempts, _status = \
+                        repair_direct_dual_ray(
+                            node_lp, node_solver["original_row_dual_ray"],
+                            min(300.0, max(1.0, wall_seconds / 8)))
+                if node_certificate is None:
+                    node_certificate, _fallback = \
+                        phase1_exact_farkas_fallback(
+                            node_lp,
+                            min(300.0, max(1.0, wall_seconds / 8)))
+                if node_certificate is not None:
+                    verify_exact_lp_farkas(node_lp, node_certificate)
+            return {
+                "solver_status": node_solver["model_status"],
+                "feasible": node_solver["feasible"],
+                "infeasible": node_solver["infeasible"],
+                "solution": node_solver["column_values"],
+                "certificate": node_certificate,
+            }
+
+        def attempt_witness(pattern, solution, node_id):
+            found, direct = attempt_exact_lp_candidate_witness(
+                exact_problem, solution, pattern, EXPECTED_SOURCES)
+            reconstruction = None
+            if found is None:
+                try:
+                    found, reconstruction = \
+                        reconstruct_exact_fixed_pattern_witness(
+                            exact_problem, solution, pattern,
+                            EXPECTED_SOURCES,
+                            min(600.0, max(
+                                0.1, started + wall_seconds
+                                - time.perf_counter())))
+                except (RuntimeError, ExactSolveFailure) as error:
+                    reconstruction = {
+                        "attempted": True, "verified": False,
+                        "method":
+                            "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
+                        "failure": f"{type(error).__name__}: {error}"}
+            evidence = {
+                "attempted": True, "verified": found is not None,
+                "direct_dyadic_replay": direct,
+                "correction_reconstruction": reconstruction}
+            if found is None:
+                return None, evidence
+            record = _atomic_json(
+                artifact_dir / "exact_layernorm_cancellation_witness.json",
+                found)
+            replay = replay_exact_perspective_witness(exact_problem, record)
+            return record, {
+                **evidence, "witness_path": str(
+                    artifact_dir / "exact_layernorm_cancellation_witness.json"),
+                "witness_sha256": cluster_common.sha256(
+                    artifact_dir / "exact_layernorm_cancellation_witness.json"),
+                "exact_replay": replay,
+            }
+
+        found, continuation = run_phase_continuation(
+            solver["column_values"], bounds, EXPECTED_SOURCES,
+            maximum_nodes, maximum_patterns, started + wall_seconds,
+            solve_phase_node, attempt_witness)
+        tree = continuation.pop("tree")
+        if found is None and continuation["nodes_open"] == 0:
+            complete_tree_replay = verify_branch_tree(
+                tree, lambda cert: verify_exact_lp_farkas(
+                    node_lps_by_identity[cert["canonical_lp_sha256"]], cert))
+        tree_record = _atomic_json(
+            artifact_dir / "relu_phase_proof_tree.json",
+            tree)
+        branch.update({
+            **continuation,
+            "proof_tree_path": str(artifact_dir /
+                                   "relu_phase_proof_tree.json"),
+            "proof_tree_sha256": cluster_common.sha256(
+                artifact_dir / "relu_phase_proof_tree.json"),
+            "complete_tree_exact_replay": complete_tree_replay})
+        if found is not None:
+            latest = branch["witness_attempts"][-1]
+            exact_witness.update({
+                "attempted": True, "verified": True,
+                "phase_pattern_sha256": found.get(
+                    "phase_pattern_sha256",
+                    _sha_json(found["relu_active"])),
+                "bases_attempted": branch["phase_patterns_attempted"],
+                "source_box_check": True,
+                "layernorm_equality_check": True,
+                "relu_sign_check": True,
+                "maximum_exact_residual": "0",
+                "witness_path": latest["witness_path"],
+                "witness_sha256": latest["witness_sha256"],
+            })
     final_status = scientific_status_from_proof(
-        root_certificate_verified=certificate_replay is not None)
+        exact_witness_verified=exact_witness["verified"],
+        root_certificate_verified=certificate_replay is not None,
+        complete_tree_verified=(complete_tree_replay or {}).get(
+            "permits_excluded", False),
+        open_nodes=branch["nodes_open"])
     if final_status == EXCLUDED:
         interpretation = "POST_ATTENTION_LAYERNORM_ABSTRACTION_CAUSAL"
+    elif final_status == FEASIBLE:
+        interpretation = "LAYERNORM_ABSTRACTION_EXONERATED_SEARCH_UPSTREAM"
     else:
         interpretation = "LP_RESULT_WITHOUT_DECISIVE_EXACT_PROOF"
     report = {
