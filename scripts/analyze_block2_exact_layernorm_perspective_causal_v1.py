@@ -15,6 +15,8 @@ import argparse
 import ast
 from dataclasses import dataclass
 from fractions import Fraction
+from functools import cached_property
+import gzip
 import hashlib
 import importlib.metadata
 import importlib.util
@@ -28,6 +30,8 @@ import time
 from typing import Iterable, Sequence
 
 import numpy as np
+from scipy.linalg import qr
+from scipy.optimize import linprog
 import torch
 
 
@@ -221,6 +225,159 @@ class CanonicalConeProgram:
         return len(rows[0]) if rows else 0
 
 
+@dataclass(frozen=True)
+class ExactLPRow:
+    name: str
+    indices: tuple[int, ...]
+    coefficients: tuple[Fraction, ...]
+    lower: Fraction | None
+    upper: Fraction | None
+
+    def __post_init__(self):
+        if (len(self.indices) != len(self.coefficients)
+                or tuple(sorted(self.indices)) != self.indices
+                or len(set(self.indices)) != len(self.indices)
+                or (self.lower is not None and self.upper is not None
+                    and self.lower > self.upper)):
+            raise RuntimeError(f"invalid canonical LP row: {self.name}")
+
+
+@dataclass(frozen=True)
+class ExactCanonicalLP:
+    variable_names: tuple[str, ...]
+    column_lower: tuple[Fraction | None, ...]
+    column_upper: tuple[Fraction | None, ...]
+    rows: tuple[ExactLPRow, ...]
+
+    def __post_init__(self):
+        n = len(self.variable_names)
+        if (len(self.column_lower) != n or len(self.column_upper) != n
+                or len(set(self.variable_names)) != n):
+            raise RuntimeError("canonical LP variable topology differs")
+        for lo, hi in zip(self.column_lower, self.column_upper):
+            if lo is not None and hi is not None and lo > hi:
+                raise RuntimeError("canonical LP variable bounds differ")
+        if any(index < 0 or index >= n for row in self.rows
+               for index in row.indices):
+            raise RuntimeError("canonical LP row index is outside variables")
+
+    @property
+    def column_count(self):
+        return len(self.variable_names)
+
+    @property
+    def nnz(self):
+        return sum(len(row.indices) for row in self.rows)
+
+    @cached_property
+    def identity_sha256(self):
+        digest = hashlib.sha256()
+        digest.update(b"CORET_EXACT_CANONICAL_LP_V1\n")
+        for index, (name, lo, hi) in enumerate(zip(
+                self.variable_names, self.column_lower, self.column_upper)):
+            digest.update(
+                f"V\t{index}\t{name}\t{_optional_fs(lo)}\t"
+                f"{_optional_fs(hi)}\n".encode())
+        for index, row in enumerate(self.rows):
+            digest.update(
+                f"R\t{index}\t{row.name}\t{_optional_fs(row.lower)}\t"
+                f"{_optional_fs(row.upper)}\t".encode())
+            for column, coefficient in zip(row.indices, row.coefficients):
+                digest.update(f"{column}:{_fs(coefficient)},".encode())
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    def identity(self):
+        return self.identity_sha256
+
+
+@dataclass(frozen=True)
+class CanonicalInequalityRef:
+    """A signed base row or a finite variable bound in a*x <= b form."""
+
+    kind: str
+    index: int
+    orientation: int
+
+
+def _optional_fs(value):
+    return "inf" if value is None else _fs(value)
+
+
+def _inequality(lp: ExactCanonicalLP,
+                reference: CanonicalInequalityRef):
+    if reference.orientation not in (-1, 1):
+        raise RuntimeError("canonical inequality orientation differs")
+    if reference.kind == "row":
+        row = lp.rows[reference.index]
+        if reference.orientation == 1:
+            if row.upper is None:
+                raise RuntimeError("canonical row has no upper side")
+            return row.indices, row.coefficients, row.upper
+        if row.lower is None:
+            raise RuntimeError("canonical row has no lower side")
+        return (row.indices, tuple(-value for value in row.coefficients),
+                -row.lower)
+    if reference.kind == "column":
+        if reference.orientation == 1:
+            value = lp.column_upper[reference.index]
+            if value is None:
+                raise RuntimeError("canonical column has no upper bound")
+            return (reference.index,), (Fraction(1),), value
+        value = lp.column_lower[reference.index]
+        if value is None:
+            raise RuntimeError("canonical column has no lower bound")
+        return (reference.index,), (Fraction(-1),), -value
+    raise RuntimeError("unknown canonical inequality kind")
+
+
+def canonicalize_all_inequalities(lp: ExactCanonicalLP):
+    result = []
+    for index, row in enumerate(lp.rows):
+        if row.upper is not None:
+            result.append(CanonicalInequalityRef("row", index, 1))
+        if row.lower is not None:
+            result.append(CanonicalInequalityRef("row", index, -1))
+    for index, (lo, hi) in enumerate(zip(
+            lp.column_lower, lp.column_upper)):
+        if hi is not None:
+            result.append(CanonicalInequalityRef("column", index, 1))
+        if lo is not None:
+            result.append(CanonicalInequalityRef("column", index, -1))
+    return tuple(result)
+
+
+def verify_exact_lp_farkas(lp: ExactCanonicalLP, certificate: dict) -> dict:
+    if certificate.get("schema") != "CORET_EXACT_LP_FARKAS_CERTIFICATE_V1":
+        raise RuntimeError("LP Farkas certificate schema differs")
+    if certificate.get("canonical_lp_sha256") != lp.identity():
+        raise RuntimeError("LP Farkas certificate model identity differs")
+    q = [Fraction(0) for _ in range(lp.column_count)]
+    r = Fraction(0)
+    entries = certificate.get("multipliers")
+    if not isinstance(entries, list) or not entries:
+        raise RuntimeError("LP Farkas certificate multipliers are absent")
+    for entry in entries:
+        multiplier = _fr(entry["multiplier"])
+        if multiplier < 0:
+            raise RuntimeError("LP Farkas multiplier is negative")
+        reference = CanonicalInequalityRef(
+            entry["kind"], int(entry["index"]), int(entry["orientation"]))
+        indices, coefficients, rhs = _inequality(lp, reference)
+        for index, coefficient in zip(indices, coefficients):
+            q[index] += multiplier * coefficient
+        r += multiplier * rhs
+    nonzero = [index for index, value in enumerate(q) if value]
+    if nonzero:
+        raise RuntimeError(
+            f"LP Farkas stationarity differs at column {nonzero[0]}")
+    if r >= 0:
+        raise RuntimeError("LP Farkas contradiction is not strict")
+    return {"verified": True, "exact_stationarity": True,
+            "exact_lambda_b": _fs(r), "strict_contradiction": True,
+            "multiplier_count": len(entries)}
+
+
 def _cone_dual_member(values: Sequence[Fraction], cones) -> bool:
     offset = 0
     for kind, size in cones:
@@ -271,6 +428,223 @@ def verify_rational_conic_certificate(program: CanonicalConeProgram,
     return {"verified": True, "maximum_exact_residual": "0",
             "strict_separator": _fs(separator),
             "dual_cone_membership": True}
+
+
+class ExactSolveFailure(RuntimeError):
+    pass
+
+
+def _integerize(values: Sequence[Fraction]):
+    denominators = [value.denominator for value in values]
+    common = 1
+    for denominator in denominators:
+        common = math.lcm(common, denominator)
+    integers = [value.numerator * (common // value.denominator)
+                for value in values]
+    divisor = 0
+    for value in integers:
+        divisor = math.gcd(divisor, abs(value))
+    if divisor > 1:
+        integers = [value // divisor for value in integers]
+    return integers
+
+
+def _bareiss_solve(matrix, rhs, timeout_seconds=30.0):
+    """Deterministic exact square solve; Fraction only in back substitution."""
+    n = len(matrix)
+    if n != len(rhs) or any(len(row) != n for row in matrix):
+        raise ExactSolveFailure("exact repair system is not square")
+    augmented = [list(map(int, row)) + [int(value)]
+                 for row, value in zip(matrix, rhs)]
+    deadline = time.perf_counter() + timeout_seconds
+    previous = 1
+    for column in range(n - 1):
+        if time.perf_counter() > deadline:
+            raise ExactSolveFailure("exact repair Bareiss timeout")
+        pivot = next((row for row in range(column, n)
+                      if augmented[row][column]), None)
+        if pivot is None:
+            raise ExactSolveFailure("exact repair system is singular")
+        if pivot != column:
+            augmented[column], augmented[pivot] = \
+                augmented[pivot], augmented[column]
+        pivot_value = augmented[column][column]
+        for row in range(column + 1, n):
+            factor = augmented[row][column]
+            for target in range(column + 1, n + 1):
+                numerator = (augmented[row][target] * pivot_value
+                             - factor * augmented[column][target])
+                if numerator % previous:
+                    raise ExactSolveFailure("Bareiss division is nonexact")
+                augmented[row][target] = numerator // previous
+            augmented[row][column] = 0
+        previous = pivot_value
+    if n and augmented[-1][-2] == 0:
+        raise ExactSolveFailure("exact repair system is singular")
+    solution = [Fraction(0) for _ in range(n)]
+    for row in range(n - 1, -1, -1):
+        value = Fraction(augmented[row][-1]) - sum(
+            (Fraction(augmented[row][column]) * solution[column]
+             for column in range(row + 1, n)), Fraction(0))
+        solution[row] = value / augmented[row][row]
+    return solution
+
+
+def _oriented_ray_rows(lp: ExactCanonicalLP, raw_ray, convention: int,
+                       threshold: float):
+    result = []
+    for index, raw in enumerate(raw_ray):
+        value = float(raw)
+        if not math.isfinite(value):
+            raise RuntimeError("HiGHS dual ray contains a nonfinite value")
+        if abs(value) <= threshold:
+            continue
+        orientation = 1 if convention * value > 0 else -1
+        row = lp.rows[index]
+        if ((orientation == 1 and row.upper is None)
+                or (orientation == -1 and row.lower is None)):
+            return None
+        result.append((CanonicalInequalityRef("row", index, orientation),
+                       abs(value)))
+    return result
+
+
+def _support_stationarity_matrix(lp: ExactCanonicalLP, support,
+                                 include_bounded=False):
+    bounded = [lo is not None or hi is not None for lo, hi in zip(
+        lp.column_lower, lp.column_upper)]
+    unbounded_columns = [index for index, value in enumerate(bounded)
+                         if include_bounded or not value]
+    sparse_columns = []
+    for reference, _proposal in support:
+        indices, coefficients, _rhs = _inequality(lp, reference)
+        sparse_columns.append(dict(zip(indices, coefficients)))
+    rows = []
+    for column in unbounded_columns:
+        values = [values.get(column, Fraction(0))
+                  for values in sparse_columns]
+        if any(values):
+            rows.append(values)
+    rows.append([Fraction(1) for _ in support])
+    rhs = [Fraction(0) for _ in range(len(rows) - 1)] + [Fraction(1)]
+    return rows, rhs
+
+
+def _exact_vertex_from_support(equations, rhs, timeout_seconds):
+    numeric = np.asarray([[float(value) for value in row]
+                          for row in equations], dtype=np.float64)
+    target = np.asarray([float(value) for value in rhs], dtype=np.float64)
+    proposal = linprog(
+        np.zeros(numeric.shape[1]), A_eq=numeric, b_eq=target,
+        bounds=[(0.0, None)] * numeric.shape[1], method="highs",
+        options={"presolve": False})
+    if not proposal.success:
+        raise ExactSolveFailure("ray support has no numerical nonnegative repair")
+    scale = max(1.0, float(np.max(np.abs(proposal.x))))
+    positive = np.flatnonzero(proposal.x > scale * 1e-10)
+    if not len(positive):
+        raise ExactSolveFailure("ray repair returned empty support")
+    sub = numeric[:, positive]
+    _q, r, row_pivots = qr(sub.T, mode="economic", pivoting=True)
+    rank = int(np.linalg.matrix_rank(sub))
+    if rank != len(positive):
+        raise ExactSolveFailure("ray repair vertex is rank deficient")
+    selected_rows = np.asarray(row_pivots[:rank], dtype=np.int64)
+    integer_matrix, integer_rhs = [], []
+    for row in selected_rows:
+        integers = _integerize(
+            [*(equations[int(row)][int(column)] for column in positive),
+             rhs[int(row)]])
+        integer_matrix.append(integers[:-1])
+        integer_rhs.append(integers[-1])
+    solved = _bareiss_solve(integer_matrix, integer_rhs, timeout_seconds)
+    values = [Fraction(0) for _ in range(numeric.shape[1])]
+    for column, value in zip(positive, solved):
+        values[int(column)] = value
+    if any(value < 0 for value in values):
+        raise ExactSolveFailure("exact repaired ray has a negative multiplier")
+    for row, expected in zip(equations, rhs):
+        if _dot(row, values) != expected:
+            raise ExactSolveFailure("exact repaired ray stationarity replay failed")
+    return values, {
+        "numerical_repair_status": int(proposal.status),
+        "input_support_size": numeric.shape[1],
+        "repaired_support_size": len(positive),
+        "exact_repair_rank": rank,
+    }
+
+
+def _complete_farkas_with_bounds(lp: ExactCanonicalLP, support, multipliers):
+    entries, q = [], [Fraction(0) for _ in range(lp.column_count)]
+    for (reference, _proposal), multiplier in zip(support, multipliers):
+        if not multiplier:
+            continue
+        indices, coefficients, _rhs = _inequality(lp, reference)
+        entries.append({"kind": reference.kind, "index": reference.index,
+                        "orientation": reference.orientation,
+                        "multiplier": _fs(multiplier)})
+        for index, coefficient in zip(indices, coefficients):
+            q[index] += multiplier * coefficient
+    for index, value in enumerate(q):
+        if not value:
+            continue
+        if value > 0:
+            reference = CanonicalInequalityRef("column", index, -1)
+            multiplier = value
+        else:
+            reference = CanonicalInequalityRef("column", index, 1)
+            multiplier = -value
+        _inequality(lp, reference)  # require the needed finite side
+        entries.append({"kind": "column", "index": index,
+                        "orientation": reference.orientation,
+                        "multiplier": _fs(multiplier)})
+    certificate = {
+        "schema": "CORET_EXACT_LP_FARKAS_CERTIFICATE_V1",
+        "canonical_lp_sha256": lp.identity(), "multipliers": entries,
+    }
+    replay = verify_exact_lp_farkas(lp, certificate)
+    return certificate, replay
+
+
+def repair_direct_dual_ray(lp: ExactCanonicalLP, raw_ray,
+                           timeout_seconds=60.0,
+                           denominator_caps=(2**12, 2**16, 2**20, 2**24,
+                                             2**28, 2**32)):
+    """Use ray support/sign only; reconstruct an exact normalized Farkas ray."""
+    raw = np.asarray(raw_ray, dtype=np.float64)
+    if raw.shape != (len(lp.rows),):
+        raise RuntimeError("HiGHS dual ray row count differs")
+    maximum = float(np.max(np.abs(raw))) if raw.size else 0.0
+    attempts = []
+    thresholds = [0.0] + [maximum / cap for cap in denominator_caps]
+    deadline = time.perf_counter() + timeout_seconds
+    for convention in (1, -1):
+        for ordinal, threshold in enumerate(thresholds):
+            if time.perf_counter() >= deadline:
+                return None, attempts, "DIRECT_RAY_REPAIR_TIMEOUT"
+            support = _oriented_ray_rows(lp, raw, convention, threshold)
+            row = {"convention": convention, "threshold": threshold,
+                   "ordinal": ordinal,
+                   "support_size": None if support is None else len(support)}
+            if not support:
+                row["result"] = "ORIENTATION_OR_SUPPORT_INVALID"
+                attempts.append(row)
+                continue
+            try:
+                equations, rhs = _support_stationarity_matrix(lp, support)
+                multipliers, repair = _exact_vertex_from_support(
+                    equations, rhs, max(0.1, deadline - time.perf_counter()))
+                certificate, replay = _complete_farkas_with_bounds(
+                    lp, support, multipliers)
+                row.update({"result": "EXACT_FARKAS_VERIFIED", **repair,
+                            "exact_lambda_b": replay["exact_lambda_b"]})
+                attempts.append(row)
+                return certificate, attempts, "EXACT_FARKAS_VERIFIED"
+            except (RuntimeError, ExactSolveFailure) as error:
+                row.update({"result": "EXACT_REPAIR_FAILED",
+                            "failure": f"{type(error).__name__}: {error}"})
+                attempts.append(row)
+    return None, attempts, "DIRECT_RAY_SUPPORT_REPAIR_FAILED"
 
 
 @dataclass(frozen=True)
@@ -610,6 +984,19 @@ def verify_branch_tree(tree: dict, certificate_checker) -> dict:
             "permits_excluded": open_leaves == 0}
 
 
+def scientific_status_from_proof(*, exact_witness_verified=False,
+                                 root_certificate_verified=False,
+                                 complete_tree_verified=False,
+                                 open_nodes=0):
+    if exact_witness_verified:
+        return FEASIBLE
+    if root_certificate_verified:
+        return EXCLUDED
+    if complete_tree_verified and open_nodes == 0:
+        return EXCLUDED
+    return INCONCLUSIVE
+
+
 def _authenticate_downstream_token(path: Path) -> dict:
     report = cluster_common.verified_json(path)
     witness = report.get("exact_relu_witness") or {}
@@ -738,16 +1125,18 @@ def _centered_coordinate_bounds(center, generators, low, high):
                        for value in center_exact]
     lower = list(centered_center)
     upper = list(centered_center)
+    coefficients_by_coordinate = [[] for _ in range(d)]
     for row, lo_raw, hi_raw in zip(generators, low, high):
         values = [_fr(value) for value in row]
         mean = sum(values, Fraction(0)) / d
         lo, hi = _fr(lo_raw), _fr(hi_raw)
         for coordinate, value in enumerate(values):
             coefficient = value - mean
+            coefficients_by_coordinate[coordinate].append(coefficient)
             first, second = coefficient * lo, coefficient * hi
             lower[coordinate] += min(first, second)
             upper[coordinate] += max(first, second)
-    return centered_center, lower, upper
+    return centered_center, lower, upper, coefficients_by_coordinate
 
 
 def _linear_interval(weights, lower, upper, bias=Fraction(0)):
@@ -763,7 +1152,7 @@ def _linear_interval(weights, lower, upper, bias=Fraction(0)):
 def _derive_exact_bounds(center, generators, low, high, gamma, beta,
                          W1, b1, epsilon):
     started = time.perf_counter()
-    c0, c_lower, c_upper = _centered_coordinate_bounds(
+    c0, c_lower, c_upper, c_coefficients = _centered_coordinate_bounds(
         center, generators, low, high)
     max_norm_squared = sum((max(abs(lo), abs(hi)) ** 2
                             for lo, hi in zip(c_lower, c_upper)), Fraction(0))
@@ -794,6 +1183,7 @@ def _derive_exact_bounds(center, generators, low, high, gamma, beta,
                       for lo, hi in zip(g_lower, g_upper)]
     return {
         "centered_center": c0,
+        "centered_coefficients": c_coefficients,
         "centered_lower": c_lower, "centered_upper": c_upper,
         "max_norm_squared": max_norm_squared, "t_upper": upper,
         "g_lower": g_lower, "g_upper": g_upper,
@@ -805,23 +1195,279 @@ def _derive_exact_bounds(center, generators, low, high, gamma, beta,
 
 def _backend_inventory() -> dict:
     packages = {}
-    for name in ("cvxpy", "clarabel", "scs"):
+    for name in ("highspy", "scipy"):
         try:
             packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             packages[name] = None
-    # No adapter in this program may call a backend unless it can export a ray
-    # that the exact rational checker above can replay.  The current frozen
-    # environment has no such installed backend.
+    selected = "HIGHSPY_DIRECT_DUAL_RAY" if packages["highspy"] else \
+        "SCIPY_HIGHS_PHASE_I"
     return {
         "packages": packages,
-        "selected": "NONE_CERTIFICATE_CAPABLE_INSTALLED",
-        "certificate_extraction_supported": False,
-        "limitation": (
-            "No installed conic backend exposes a usable infeasibility ray; "
-            "model construction/checking remain available and the result "
-            "must stay INCONCLUSIVE."),
+        "selected": selected,
+        "certificate_extraction_supported": bool(packages["highspy"]),
+        "priority": ["highspy.getDualRay", "scipy_highs_phase_i"],
+        "gurobi_permitted": False,
     }
+
+
+def _coalesced(items):
+    values = {}
+    for index, coefficient in items:
+        values[int(index)] = values.get(int(index), Fraction(0)) + _fr(coefficient)
+    pairs = [(index, value) for index, value in sorted(values.items()) if value]
+    return tuple(index for index, _ in pairs), tuple(value for _, value in pairs)
+
+
+def build_exact_perspective_lp(low, high, gamma, beta, W1, b1, W2, b2,
+                               bounds: dict) -> ExactCanonicalLP:
+    n, d = len(low), DIMENSION
+    xi0 = 0
+    c0 = n
+    t_index = c0 + d
+    g0 = t_index + 1
+    u0 = g0 + d
+    names = ([f"xi[{index}]" for index in range(n)]
+             + [f"c[{index}]" for index in range(d)] + ["t"]
+             + [f"g[{index}]" for index in range(d)]
+             + [f"u[{index}]" for index in range(d)])
+    column_lower = [_fr(value) for value in low] + [None] * d + [Fraction(0)] \
+        + [None] * (2 * d)
+    column_upper = [_fr(value) for value in high] + [None] * d \
+        + [bounds["t_upper"]] + [None] * (2 * d)
+    rows = []
+    source_indices = tuple(range(n))
+    for coordinate in range(d):
+        coefficients = bounds["centered_coefficients"][coordinate]
+        indices, values = _coalesced([
+            *((source_indices[index], -value)
+              for index, value in enumerate(coefficients)),
+            (c0 + coordinate, Fraction(1)),
+        ])
+        rhs = bounds["centered_center"][coordinate]
+        rows.append(ExactLPRow(f"centered[{coordinate}]", indices, values,
+                               rhs, rhs))
+    gamma_exact = [_fr(value) for value in gamma]
+    beta_exact = [_fr(value) for value in beta]
+    b1_exact = [_fr(value) for value in b1]
+    b2_exact = [_fr(value) for value in b2]
+    W1_exact = _fraction_matrix(W1)
+    W2_exact = _fraction_matrix(W2)
+    w1_beta = _matvec(W1_exact, beta_exact)
+    for output in range(d):
+        items = [(c0 + feature,
+                  -W1_exact[output][feature] * gamma_exact[feature])
+                 for feature in range(d)]
+        items.extend(((t_index, -(w1_beta[output] + b1_exact[output])),
+                      (g0 + output, Fraction(1))))
+        indices, values = _coalesced(items)
+        rows.append(ExactLPRow(f"preactivation[{output}]", indices, values,
+                               Fraction(0), Fraction(0)))
+    for coordinate in range(1, d):
+        items = [(c0, -gamma_exact[0]),
+                 (c0 + coordinate, gamma_exact[coordinate]),
+                 (t_index, beta_exact[coordinate] + b2_exact[coordinate]
+                  - beta_exact[0] - b2_exact[0])]
+        items.extend((u0 + feature,
+                      W2_exact[coordinate][feature] - W2_exact[0][feature])
+                     for feature in range(d))
+        indices, values = _coalesced(items)
+        rows.append(ExactLPRow(f"cancellation[{coordinate}]", indices, values,
+                               Fraction(0), Fraction(0)))
+    active = set(bounds["stable_active"])
+    inactive = set(bounds["stable_inactive"])
+    for neuron in range(d):
+        if neuron in active:
+            indices, values = _coalesced(
+                [(g0 + neuron, -1), (u0 + neuron, 1)])
+            rows.append(ExactLPRow(f"relu_active_value[{neuron}]",
+                                   indices, values, Fraction(0), Fraction(0)))
+            rows.append(ExactLPRow(f"relu_active_sign[{neuron}]",
+                                   (g0 + neuron,), (Fraction(-1),), None,
+                                   Fraction(0)))
+        elif neuron in inactive:
+            rows.append(ExactLPRow(f"relu_inactive_value[{neuron}]",
+                                   (u0 + neuron,), (Fraction(1),),
+                                   Fraction(0), Fraction(0)))
+            rows.append(ExactLPRow(f"relu_inactive_sign[{neuron}]",
+                                   (g0 + neuron,), (Fraction(1),), None,
+                                   Fraction(0)))
+        else:
+            lower, upper = bounds["g_lower"][neuron], bounds["g_upper"][neuron]
+            if not lower < 0 < upper:
+                raise RuntimeError("unstable ReLU exact bounds differ")
+            slope = upper / (upper - lower)
+            rows.append(ExactLPRow(f"relu_triangle_nonnegative[{neuron}]",
+                                   (u0 + neuron,), (Fraction(-1),), None,
+                                   Fraction(0)))
+            indices, values = _coalesced(
+                [(g0 + neuron, 1), (u0 + neuron, -1)])
+            rows.append(ExactLPRow(f"relu_triangle_above_input[{neuron}]",
+                                   indices, values, None, Fraction(0)))
+            indices, values = _coalesced(
+                [(g0 + neuron, -slope), (u0 + neuron, 1)])
+            rows.append(ExactLPRow(f"relu_triangle_upper[{neuron}]",
+                                   indices, values, None, -slope * lower))
+    return ExactCanonicalLP(tuple(names), tuple(column_lower),
+                            tuple(column_upper), tuple(rows))
+
+
+def persist_exact_lp(lp: ExactCanonicalLP, path: Path):
+    """Deterministic gzip JSONL serialization of every exact coefficient."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    with temporary.open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as stream:
+            header = {"schema": "CORET_EXACT_CANONICAL_LP_V1",
+                      "canonical_lp_sha256": lp.identity(),
+                      "column_count": lp.column_count,
+                      "row_count": len(lp.rows), "nnz": lp.nnz,
+                      "variables": [{"name": name,
+                                     "lower": _optional_fs(lo),
+                                     "upper": _optional_fs(hi)}
+                                    for name, lo, hi in zip(
+                                        lp.variable_names, lp.column_lower,
+                                        lp.column_upper)]}
+            stream.write((json.dumps(header, sort_keys=True,
+                                     separators=(",", ":")) + "\n").encode())
+            for index, row in enumerate(lp.rows):
+                record = {"row": index, "name": row.name,
+                          "lower": _optional_fs(row.lower),
+                          "upper": _optional_fs(row.upper),
+                          "entries": [[column, _fs(value)] for column, value
+                                      in zip(row.indices, row.coefficients)]}
+                stream.write((json.dumps(record, sort_keys=True,
+                                         separators=(",", ":")) + "\n").encode())
+    os.replace(temporary, path)
+    return {"path": str(path), "sha256": cluster_common.sha256(path),
+            "canonical_lp_sha256": lp.identity()}
+
+
+def solve_highspy(lp: ExactCanonicalLP):
+    import highspy
+    highs = highspy.Highs()
+    options = {"output_flag": False, "presolve": "off", "threads": 1,
+               "parallel": "off", "random_seed": 0,
+               "solver": "simplex"}
+    for name, value in options.items():
+        status = highs.setOptionValue(name, value)
+        if status != highspy.HighsStatus.kOk:
+            raise RuntimeError(f"HiGHS rejected deterministic option {name}")
+    model = highspy.HighsLp()
+    model.num_col_ = lp.column_count
+    model.num_row_ = len(lp.rows)
+    model.col_cost_ = np.zeros(lp.column_count, dtype=np.float64)
+    infinity = highspy.kHighsInf
+    model.col_lower_ = np.asarray([
+        -infinity if value is None else float(value)
+        for value in lp.column_lower], dtype=np.float64)
+    model.col_upper_ = np.asarray([
+        infinity if value is None else float(value)
+        for value in lp.column_upper], dtype=np.float64)
+    model.row_lower_ = np.asarray([
+        -infinity if row.lower is None else float(row.lower)
+        for row in lp.rows], dtype=np.float64)
+    model.row_upper_ = np.asarray([
+        infinity if row.upper is None else float(row.upper)
+        for row in lp.rows], dtype=np.float64)
+    starts, indices, values = [0], [], []
+    for row in lp.rows:
+        indices.extend(row.indices)
+        values.extend(float(value) for value in row.coefficients)
+        starts.append(len(indices))
+    model.a_matrix_.format_ = highspy.MatrixFormat.kRowwise
+    model.a_matrix_.start_ = np.asarray(starts, dtype=np.int64)
+    model.a_matrix_.index_ = np.asarray(indices, dtype=np.int32)
+    model.a_matrix_.value_ = np.asarray(values, dtype=np.float64)
+    if highs.passModel(model) != highspy.HighsStatus.kOk:
+        raise RuntimeError("HiGHS rejected the canonical LP")
+    started = time.perf_counter()
+    run_status = highs.run()
+    runtime = time.perf_counter() - started
+    status = highs.getModelStatus()
+    status_name = highs.modelStatusToString(status)
+    ray_status, ray_exists = highs.getDualRayExist()
+    raw_ray = None
+    ray_call_status = ray_status
+    if ray_status == highspy.HighsStatus.kOk and ray_exists:
+        ray_call_status, returned, values = highs.getDualRay()
+        if ray_call_status == highspy.HighsStatus.kOk and returned:
+            raw_ray = np.asarray(values, dtype=np.float64)
+    solution = highs.getSolution()
+    return {
+        "run_status": str(run_status), "model_status": status_name,
+        "infeasible": status == highspy.HighsModelStatus.kInfeasible,
+        "feasible": status in (highspy.HighsModelStatus.kOptimal,
+                               highspy.HighsModelStatus.kObjectiveBound),
+        "direct_dual_ray_available": raw_ray is not None,
+        "raw_dual_ray": raw_ray,
+        "column_values": (np.asarray(solution.col_value, dtype=np.float64)
+                          if solution.value_valid else None),
+        "runtime_seconds": runtime, "highs_runtime_seconds": highs.getRunTime(),
+        "highspy_version": importlib.metadata.version("highspy"),
+        "highs_version": highs.version(), "options": options,
+        "ray_exist_status": str(ray_status),
+        "ray_call_status": str(ray_call_status),
+    }
+
+
+def phase1_exact_farkas_fallback(lp: ExactCanonicalLP,
+                                 timeout_seconds=60.0):
+    """SciPy/HiGHS L1-violation Phase-I proposal.
+
+    This is invoked only when an infeasible HiGHS model has no direct row ray.
+    It minimizes sum(s) subject to C*x-s<=b, s>=0 for the fully canonicalized
+    inequalities.  A positive floating optimum is not proof: inequality
+    marginals merely select support for exact repair/replay.
+    """
+    from scipy.sparse import coo_matrix, eye, hstack
+    references = canonicalize_all_inequalities(lp)
+    row_indices, column_indices, data, rhs = [], [], [], []
+    for row, reference in enumerate(references):
+        indices, coefficients, bound = _inequality(lp, reference)
+        rhs.append(float(bound))
+        for index, coefficient in zip(indices, coefficients):
+            row_indices.append(row); column_indices.append(index)
+            data.append(float(coefficient))
+    canonical = coo_matrix(
+        (data, (row_indices, column_indices)),
+        shape=(len(references), lp.column_count)).tocsr()
+    phase_matrix = hstack([
+        canonical, -eye(len(references), format="csr")], format="csr")
+    objective = np.concatenate([
+        np.zeros(lp.column_count), np.ones(len(references))])
+    result = linprog(
+        objective, A_ub=phase_matrix, b_ub=np.asarray(rhs),
+        bounds=[(None, None)] * lp.column_count
+               + [(0.0, None)] * len(references), method="highs",
+        options={"presolve": False, "time_limit": timeout_seconds})
+    record = {"solver": "scipy.optimize.linprog/highs",
+              "formulation": "L1 canonical-inequality violation Phase-I",
+              "status": int(result.status), "message": result.message,
+              "numerical_objective": (float(result.fun)
+                                      if result.fun is not None else None)}
+    if not result.success or result.fun is None or result.fun <= 0:
+        return None, record
+    marginals = -np.asarray(result.ineqlin.marginals, dtype=np.float64)
+    maximum = max(1.0, float(np.max(np.abs(marginals))))
+    selected = np.flatnonzero(marginals > maximum * 1e-10)
+    support = [(references[int(index)], float(marginals[int(index)]))
+               for index in selected]
+    try:
+        equations, target = _support_stationarity_matrix(
+            lp, support, include_bounded=True)
+        multipliers, repair = _exact_vertex_from_support(
+            equations, target, timeout_seconds)
+        certificate, replay = _complete_farkas_with_bounds(
+            lp, support, multipliers)
+        record.update({"certificate_verified": True, **repair,
+                       "exact_lambda_b": replay["exact_lambda_b"]})
+        return certificate, record
+    except (RuntimeError, ExactSolveFailure) as error:
+        record.update({"certificate_verified": False,
+                       "exact_repair_failure":
+                           f"{type(error).__name__}: {error}"})
+        return None, record
 
 
 def _verify_cross_authentication(authentication: dict, downstream: dict,
@@ -864,10 +1510,10 @@ def _root_model_summary(source_count: int, bounds: dict) -> dict:
         "variable_count": variables,
         "equality_count": equalities,
         "inequality_count": inequalities,
-        "cone_dimension": DIMENSION + 2,
-        "cone_encoding": (
-            "||(2*c_0,...,2*c_127,(1-128)*t)||_2 <= (1+128)*t"),
-        "cone_equivalent_inequality": "sum(c_j^2) <= 128*t^2",
+        "cone_dimension": 0,
+        "dropped_outer_constraint": (
+            "sum(c_j^2) <= 128*t^2 (dropping a constraint remains an outer relaxation)"),
+        "proof_backend_form": "rational polyhedral outer relaxation",
         "epsilon_restored_only_in_exact_witness_replay": True,
         "source_correlation_preserved": True,
         "cancellation_equations": DIMENSION - 1,
@@ -920,21 +1566,97 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
         gamma, beta, W1, b1, epsilon)
     backend = _backend_inventory()
     model = _root_model_summary(EXPECTED_SOURCES, bounds)
+    lp_started = time.perf_counter()
+    lp = build_exact_perspective_lp(
+        low, high, gamma, beta, W1, b1, W2, b2, bounds)
+    lp_build_seconds = time.perf_counter() - lp_started
+    lp_artifact = persist_exact_lp(
+        lp, artifact_dir / "root_canonical_exact_lp.jsonl.gz")
+    canonical_inequality_count = len(canonicalize_all_inequalities(lp))
+    solver = None
+    raw_ray_record = None
+    certificate = None
+    certificate_replay = None
+    reconstruction_attempts = []
+    fallback = {"attempted": False}
+    if backend["packages"]["highspy"]:
+        solver = solve_highspy(lp)
+        if solver["raw_dual_ray"] is not None:
+            raw_ray_record = _atomic_json(
+                artifact_dir / "root_highspy_raw_dual_ray.json", {
+                    "schema": "CORET_HIGHSPY_RAW_DUAL_RAY_V1",
+                    "canonical_lp_sha256": lp.identity(),
+                    "row_order_sha256": _sha_json(
+                        [row.name for row in lp.rows]),
+                    "values": [float(value)
+                               for value in solver["raw_dual_ray"]],
+                    "highs_version": solver["highs_version"],
+                    "model_status": solver["model_status"],
+                })
+            certificate, reconstruction_attempts, _repair_status = \
+                repair_direct_dual_ray(
+                    lp, solver["raw_dual_ray"],
+                    min(600.0, max(1.0, wall_seconds / 4)))
+        elif solver["infeasible"]:
+            fallback["attempted"] = True
+            certificate, fallback = phase1_exact_farkas_fallback(
+                lp, min(600.0, max(1.0, wall_seconds / 4)))
+    else:
+        fallback["attempted"] = True
+        certificate, fallback = phase1_exact_farkas_fallback(
+            lp, min(600.0, max(1.0, wall_seconds / 4)))
+    certificate_record = None
+    if certificate is not None:
+        certificate_replay = verify_exact_lp_farkas(lp, certificate)
+        certificate_record = _atomic_json(
+            artifact_dir / "root_exact_farkas_certificate.json", certificate)
 
-    # With no ray-exporting conic backend, neither exclusion, a phase proposal,
-    # exact witness reconstruction, nor sound phase branching may begin.  This
-    # is deliberately a typed proof limitation rather than solver inference.
     root = {
-        **{key: model[key] for key in (
-            "variable_count", "equality_count", "inequality_count",
-            "cone_dimension")},
+        "variable_count": lp.column_count,
+        "row_count": len(lp.rows), "nnz": lp.nnz,
+        "canonical_inequality_count": canonical_inequality_count,
+        "cone_dimension": 0,
+        "canonical_lp_sha256": lp.identity(),
+        "canonical_lp_path": lp_artifact["path"],
+        "canonical_lp_artifact_sha256": lp_artifact["sha256"],
+        "lp_build_seconds": lp_build_seconds,
         "solver_backend": backend["selected"],
-        "solver_version": None, "solver_status": "BACKEND_UNAVAILABLE",
-        "primal_residuals": None, "dual_residuals": None,
-        "runtime_seconds": 0.0, "feasible": None,
-        "certificate_attempted": False, "certificate_verified": False,
-        "certificate_path": None, "certificate_sha256": None,
-        "certificate_extraction_path": None,
+        "highspy_version": None if solver is None else solver["highspy_version"],
+        "highs_version": None if solver is None else solver["highs_version"],
+        "options": None if solver is None else solver["options"],
+        "solver_status": ("HIGHSPY_UNAVAILABLE" if solver is None
+                          else solver["model_status"]),
+        "runtime_seconds": (None if solver is None
+                            else solver["runtime_seconds"]),
+        "feasible": None if solver is None else solver["feasible"],
+        "infeasible": None if solver is None else solver["infeasible"],
+        "direct_dual_ray_available": (
+            False if solver is None else solver["direct_dual_ray_available"]),
+        "raw_dual_ray_path": (None if raw_ray_record is None else
+                              str(artifact_dir /
+                                  "root_highspy_raw_dual_ray.json")),
+        "raw_dual_ray_sha256": (None if raw_ray_record is None else
+                                cluster_common.sha256(
+                                    artifact_dir /
+                                    "root_highspy_raw_dual_ray.json")),
+        "certificate_attempted": bool(reconstruction_attempts) or
+                                 fallback.get("attempted", False),
+        "certificate_reconstruction_attempts": reconstruction_attempts,
+        "phase_i_fallback": fallback,
+        "certificate_verified": certificate_replay is not None,
+        "certificate_path": (None if certificate_record is None else
+                             str(artifact_dir /
+                                 "root_exact_farkas_certificate.json")),
+        "certificate_sha256": (None if certificate_record is None else
+                               cluster_common.sha256(
+                                   artifact_dir /
+                                   "root_exact_farkas_certificate.json")),
+        "certificate_exact_replay": certificate_replay,
+        "certificate_extraction_path": (
+            "highspy.getDualRay -> exact support repair -> exact Farkas replay"
+            if reconstruction_attempts else
+            ("scipy HiGHS Phase-I/Farkas proposal -> exact replay"
+             if fallback.get("attempted") else None)),
     }
     exact_witness = _empty_exact_witness_record()
     branch = {
@@ -949,8 +1671,12 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             "largest deterministic triangle-hull violation; ties by neuron index"),
         "continuous_source_branching": False,
     }
-    final_status = INCONCLUSIVE
-    interpretation = "CONIC_BACKEND_LIMITATION_NO_CAUSAL_CONCLUSION"
+    final_status = scientific_status_from_proof(
+        root_certificate_verified=certificate_replay is not None)
+    if final_status == EXCLUDED:
+        interpretation = "POST_ATTENTION_LAYERNORM_ABSTRACTION_CAUSAL"
+    else:
+        interpretation = "LP_RESULT_WITHOUT_DECISIVE_EXACT_PROOF"
     report = {
         "schema": SCHEMA,
         "authentication": {**authentication,
@@ -993,7 +1719,7 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             "derivation_runtime_seconds": bounds["runtime_seconds"],
             "all_coefficients_exact_rationals": True,
         },
-        "conic_backend": backend, "root_conic": root,
+        "proof_backend": backend, "root_lp": root,
         "exact_witness": exact_witness, "branch_and_bound": branch,
         "final_status": final_status,
         "causal_interpretation": interpretation,

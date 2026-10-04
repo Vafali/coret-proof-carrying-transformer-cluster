@@ -244,7 +244,143 @@ def test_exact_shared_source_authentication_accepts_complete_identity():
         valid_parameters()) is True
 
 
-def test_backend_without_certificate_adapter_is_never_decisive():
+def synthetic_infeasible_lp():
+    # x >= 1 and x <= 0.
+    return ORACLE.ExactCanonicalLP(
+        ("x",), (F(1),), (None,),
+        (ORACLE.ExactLPRow("x_le_zero", (0,), (F(1),), None, F(0)),))
+
+
+def test_highspy_synthetic_infeasible_lp_direct_ray_extraction():
+    result = ORACLE.solve_highspy(synthetic_infeasible_lp())
+    assert result["infeasible"] is True
+    assert result["direct_dual_ray_available"] is True
+    certificate, attempts, status = ORACLE.repair_direct_dual_ray(
+        synthetic_infeasible_lp(), result["raw_dual_ray"])
+    assert status == "EXACT_FARKAS_VERIFIED"
+    assert any(row["result"] == "EXACT_FARKAS_VERIFIED" for row in attempts)
+    assert ORACLE.verify_exact_lp_farkas(
+        synthetic_infeasible_lp(), certificate)["verified"] is True
+
+
+def test_canonicalization_covers_row_senses_and_variable_bounds():
+    lp = ORACLE.ExactCanonicalLP(
+        ("x",), (F(-2),), (F(3),), (
+            ORACLE.ExactLPRow("le", (0,), (F(1),), None, F(1)),
+            ORACLE.ExactLPRow("ge", (0,), (F(1),), F(-1), None),
+            ORACLE.ExactLPRow("eq", (0,), (F(2),), F(0), F(0)),
+        ))
+    refs = ORACLE.canonicalize_all_inequalities(lp)
+    assert [(ref.kind, ref.index, ref.orientation) for ref in refs] == [
+        ("row", 0, 1), ("row", 1, -1),
+        ("row", 2, 1), ("row", 2, -1),
+        ("column", 0, 1), ("column", 0, -1)]
+    assert ORACLE._inequality(lp, refs[1]) == ((0,), (F(-1),), F(1))
+
+
+def exact_certificate():
+    lp = synthetic_infeasible_lp()
+    return lp, {
+        "schema": "CORET_EXACT_LP_FARKAS_CERTIFICATE_V1",
+        "canonical_lp_sha256": lp.identity(),
+        "multipliers": [
+            {"kind": "row", "index": 0, "orientation": 1,
+             "multiplier": "1/1"},
+            {"kind": "column", "index": 0, "orientation": -1,
+             "multiplier": "1/1"},
+        ],
+    }
+
+
+def test_valid_exact_rational_farkas_replay():
+    lp, certificate = exact_certificate()
+    assert ORACLE.verify_exact_lp_farkas(
+        lp, certificate)["exact_lambda_b"] == "-1/1"
+
+
+def test_farkas_multiplier_sign_mutation_rejected():
+    lp, certificate = exact_certificate()
+    certificate["multipliers"][0]["multiplier"] = "-1/1"
+    with pytest.raises(RuntimeError, match="negative"):
+        ORACLE.verify_exact_lp_farkas(lp, certificate)
+
+
+def test_farkas_stationarity_mutation_rejected():
+    lp, certificate = exact_certificate()
+    certificate["multipliers"].pop()
+    with pytest.raises(RuntimeError, match="stationarity"):
+        ORACLE.verify_exact_lp_farkas(lp, certificate)
+
+
+def test_non_strict_farkas_contradiction_rejected():
+    lp = ORACLE.ExactCanonicalLP(
+        ("x",), (F(0),), (None,),
+        (ORACLE.ExactLPRow("x_le_zero", (0,), (F(1),), None, F(0)),))
+    certificate = {
+        "schema": "CORET_EXACT_LP_FARKAS_CERTIFICATE_V1",
+        "canonical_lp_sha256": lp.identity(),
+        "multipliers": [
+            {"kind": "row", "index": 0, "orientation": 1,
+             "multiplier": "1/1"},
+            {"kind": "column", "index": 0, "orientation": -1,
+             "multiplier": "1/1"},
+        ]}
+    with pytest.raises(RuntimeError, match="not strict"):
+        ORACLE.verify_exact_lp_farkas(lp, certificate)
+
+
+def test_direct_float_ray_is_repaired_to_exact_stationarity():
+    lp = synthetic_infeasible_lp()
+    certificate, _attempts, status = ORACLE.repair_direct_dual_ray(
+        lp, [-0.9999999999997])
+    assert status == "EXACT_FARKAS_VERIFIED"
+    assert ORACLE.verify_exact_lp_farkas(lp, certificate)["verified"] is True
+
+
+def test_support_repair_failure_remains_unresolved():
+    certificate, attempts, status = ORACLE.repair_direct_dual_ray(
+        synthetic_infeasible_lp(), [0.0])
+    assert certificate is None
+    assert status == "DIRECT_RAY_SUPPORT_REPAIR_FAILED"
+    assert attempts
+
+
+def test_phase_i_exact_dual_fallback_synthetic():
+    certificate, record = ORACLE.phase1_exact_farkas_fallback(
+        synthetic_infeasible_lp())
+    assert record["certificate_verified"] is True
+    assert ORACLE.verify_exact_lp_farkas(
+        synthetic_infeasible_lp(), certificate)["verified"] is True
+
+
+def test_lp_feasible_never_implies_exact_feasibility():
+    lp = ORACLE.ExactCanonicalLP(
+        ("x",), (F(0),), (F(1),),
+        (ORACLE.ExactLPRow("loose", (0,), (F(1),), None, F(2)),))
+    assert ORACLE.solve_highspy(lp)["feasible"] is True
+    assert ORACLE.scientific_status_from_proof() == ORACLE.INCONCLUSIVE
+
+
+def test_lp_infeasible_without_verified_certificate_is_inconclusive():
+    assert ORACLE.scientific_status_from_proof(
+        root_certificate_verified=False) == ORACLE.INCONCLUSIVE
+
+
+def test_certified_root_infeasible_is_excluded():
+    assert ORACLE.scientific_status_from_proof(
+        root_certificate_verified=True) == ORACLE.EXCLUDED
+
+
+def test_certified_tree_and_open_tree_statuses():
+    assert ORACLE.scientific_status_from_proof(
+        complete_tree_verified=True, open_nodes=0) == ORACLE.EXCLUDED
+    assert ORACLE.scientific_status_from_proof(
+        complete_tree_verified=True, open_nodes=1) == ORACLE.INCONCLUSIVE
+
+
+def test_highspy_backend_is_primary_and_gurobi_forbidden():
     backend = ORACLE._backend_inventory()
-    assert backend["selected"] == "NONE_CERTIFICATE_CAPABLE_INSTALLED"
-    assert backend["certificate_extraction_supported"] is False
+    assert backend["selected"] == "HIGHSPY_DIRECT_DUAL_RAY"
+    assert backend["certificate_extraction_supported"] is True
+    assert backend["priority"][0] == "highspy.getDualRay"
+    assert backend["gurobi_permitted"] is False
