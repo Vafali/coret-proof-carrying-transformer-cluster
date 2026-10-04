@@ -440,6 +440,281 @@ class HighsCanonicalLPDiagnosticError(RuntimeError):
         self.diagnostic = diagnostic
 
 
+@dataclass(frozen=True)
+class SolverScaledLP:
+    lp: ExactCanonicalLP
+    scales: tuple[int, ...]
+    exponents: tuple[int, ...]
+    report: dict
+
+
+def _semantic_family(name: str) -> str:
+    return name.split("[", 1)[0]
+
+
+def build_highs_row_scaled_lp(
+        lp: ExactCanonicalLP, *, small_matrix_value: float,
+        large_matrix_value: float, infinite_bound: float,
+        target_min_abs: float = 1e-8) -> SolverScaledLP:
+    """Build an exactly equivalent power-of-two row-scaled solver copy."""
+    if not (0 < small_matrix_value < target_min_abs < large_matrix_value):
+        raise RuntimeError("HiGHS row-scaling thresholds are invalid")
+    target = Fraction.from_float(float(target_min_abs))
+    scales, exponents, scaled_rows = [], [], []
+    tiny_entries, scaled_families = [], {}
+    pre_nonzero, post_nonzero, post_bounds = [], [], []
+    for side, bounds in (("column_lower", lp.column_lower),
+                         ("column_upper", lp.column_upper)):
+        for column, bound in enumerate(bounds):
+            if bound is None:
+                continue
+            converted = float(bound)
+            post_bounds.append(abs(converted))
+            if (not math.isfinite(converted)
+                    or abs(converted) >= infinite_bound):
+                raise HighsCanonicalLPDiagnosticError(
+                    "a finite column bound is unsafe for HiGHS", {
+                        "failure_classification":
+                            "HIGHS_SAFE_ROW_SCALING_IMPOSSIBLE",
+                        "column_index": column, "bound_side": side,
+                        "exact_bound": _fs(bound),
+                        "infinite_bound": infinite_bound,
+                    })
+    for row_index, row in enumerate(lp.rows):
+        exact_nonzero = [abs(value) for value in row.coefficients if value]
+        if not exact_nonzero:
+            scale, exponent = 1, 0
+        else:
+            minimum = min(exact_nonzero)
+            problematic = any(
+                0 < abs(float(value)) <= small_matrix_value
+                for value in row.coefficients)
+            scale, exponent = 1, 0
+            if problematic:
+                while minimum * scale < target:
+                    scale <<= 1
+                    exponent += 1
+            family = _semantic_family(row.name)
+            if exponent:
+                scaled_families[family] = scaled_families.get(family, 0) + 1
+        scaled_coefficients = tuple(value * scale for value in row.coefficients)
+        scaled_lower = None if row.lower is None else row.lower * scale
+        scaled_upper = None if row.upper is None else row.upper * scale
+        for column, original, scaled in zip(
+                row.indices, row.coefficients, scaled_coefficients):
+            original_float, scaled_float = float(original), float(scaled)
+            if original:
+                pre_nonzero.append(abs(original_float))
+                post_nonzero.append(abs(scaled_float))
+            if original and abs(original_float) <= small_matrix_value:
+                variable_name = lp.variable_names[column]
+                tiny_entries.append({
+                    "row_index": row_index, "row_name": row.name,
+                    "row_family": _semantic_family(row.name),
+                    "column_index": column, "variable_name": variable_name,
+                    "variable_family": _semantic_family(variable_name),
+                    "exact_rational_value": _fs(original),
+                    "float_value": original_float,
+                    "scaled_exact_rational_value": _fs(scaled),
+                    "scaled_float_value": scaled_float,
+                    "scale_exponent": exponent,
+                })
+            if original and (not math.isfinite(scaled_float)
+                             or abs(scaled_float) <= small_matrix_value
+                             or abs(scaled_float) >= large_matrix_value):
+                raise HighsCanonicalLPDiagnosticError(
+                    "no safe exact power-of-two row scaling exists", {
+                        "failure_classification":
+                            "HIGHS_SAFE_ROW_SCALING_IMPOSSIBLE",
+                        "row_index": row_index, "row_name": row.name,
+                        "column_index": column,
+                        "exact_coefficient": _fs(original),
+                        "scaled_exact_coefficient": _fs(scaled),
+                        "scale_exponent": exponent,
+                        "small_matrix_value": small_matrix_value,
+                        "large_matrix_value": large_matrix_value,
+                    })
+        for side, bound in (("lower", scaled_lower),
+                            ("upper", scaled_upper)):
+            if bound is None:
+                continue
+            converted = float(bound)
+            post_bounds.append(abs(converted))
+            if (not math.isfinite(converted)
+                    or abs(converted) >= infinite_bound):
+                raise HighsCanonicalLPDiagnosticError(
+                    "row scaling makes a finite bound unsafe", {
+                        "failure_classification":
+                            "HIGHS_SAFE_ROW_SCALING_IMPOSSIBLE",
+                        "row_index": row_index, "row_name": row.name,
+                        "bound_side": side, "exact_bound": _fs(bound),
+                        "scale_exponent": exponent,
+                        "infinite_bound": infinite_bound,
+                    })
+        scales.append(scale); exponents.append(exponent)
+        scaled_rows.append(ExactLPRow(
+            row.name, row.indices, scaled_coefficients,
+            scaled_lower, scaled_upper))
+    scaled_lp = ExactCanonicalLP(
+        lp.variable_names, lp.column_lower, lp.column_upper,
+        tuple(scaled_rows))
+    scales_exact = [_fs(Fraction(value)) for value in scales]
+    row_scaling_sha256 = _sha_json(scales_exact)
+    tiny_by_row, tiny_by_variable = {}, {}
+    for entry in tiny_entries:
+        row_family = entry["row_family"]
+        variable_family = entry["variable_family"]
+        tiny_by_row[row_family] = tiny_by_row.get(row_family, 0) + 1
+        tiny_by_variable[variable_family] = \
+            tiny_by_variable.get(variable_family, 0) + 1
+    report = {
+        "schema": "CORET_HIGHS_EXACT_ROW_SCALING_V1",
+        "method": "POSITIVE_POWER_OF_TWO_ROW_SCALING",
+        "target_min_abs": target_min_abs,
+        "target_min_abs_exact_binary64": _fs(target),
+        "rows_scaled": sum(exponent > 0 for exponent in exponents),
+        "maximum_scale_exponent": max(exponents, default=0),
+        "minimum_pre_scale_nonzero_abs": min(pre_nonzero, default=None),
+        "minimum_post_scale_nonzero_abs": min(post_nonzero, default=None),
+        "maximum_pre_scale_abs": max(pre_nonzero, default=None),
+        "maximum_post_scale_abs": max(post_nonzero, default=None),
+        "maximum_post_scale_finite_bound": max(post_bounds, default=None),
+        "original_canonical_lp_sha256": lp.identity(),
+        "solver_scaled_lp_sha256": scaled_lp.identity(),
+        "row_scaling_sha256": row_scaling_sha256,
+        "row_scale_exponents": exponents,
+        "row_scales_exact": scales_exact,
+        "sub_threshold_entries_before": len(tiny_entries),
+        "sub_threshold_entries_after": sum(
+            value != 0 and abs(value) <= small_matrix_value
+            for value in post_nonzero),
+        "semantic_distribution_of_scaled_rows": scaled_families,
+        "sub_threshold_distribution_by_row_family": tiny_by_row,
+        "sub_threshold_distribution_by_variable_family": tiny_by_variable,
+        "sub_threshold_entries": tiny_entries,
+        "small_matrix_value": small_matrix_value,
+        "large_matrix_value": large_matrix_value,
+        "infinite_bound": infinite_bound,
+    }
+    if report["sub_threshold_entries_after"]:
+        raise HighsCanonicalLPDiagnosticError(
+            "scaled solver LP still has sub-threshold coefficients", {
+                **report,
+                "failure_classification":
+                    "HIGHS_SAFE_ROW_SCALING_IMPOSSIBLE"})
+    return SolverScaledLP(scaled_lp, tuple(scales), tuple(exponents), report)
+
+
+def map_solver_row_ray_to_original(raw_ray, scales):
+    raw = np.asarray(raw_ray, dtype=np.float64)
+    scales = np.asarray(scales, dtype=np.float64)
+    if raw.ndim != 1 or scales.shape != raw.shape:
+        raise RuntimeError("HiGHS row ray/scaling topology differs")
+    mapped = raw * scales
+    if not np.isfinite(mapped).all():
+        raise RuntimeError("mapped HiGHS row ray is nonfinite")
+    return mapped
+
+
+def map_solver_row_multipliers_exact(multipliers, scales):
+    if len(multipliers) != len(scales):
+        raise RuntimeError("solver multiplier/scaling topology differs")
+    return tuple(_fr(value) * int(scale)
+                 for value, scale in zip(multipliers, scales))
+
+
+def persist_solver_row_scaling(scaling: SolverScaledLP, path: Path):
+    return _atomic_json(path, scaling.report)
+
+
+def _highs_numeric_arrays(lp: ExactCanonicalLP, infinity: float):
+    starts, indices, values = [0], [], []
+    for row in lp.rows:
+        indices.extend(row.indices)
+        values.extend(float(value) for value in row.coefficients)
+        starts.append(len(indices))
+    return {
+        "objective": np.zeros(lp.column_count, dtype=np.float64),
+        "column_lower": np.asarray([
+            -infinity if value is None else float(value)
+            for value in lp.column_lower], dtype=np.float64),
+        "column_upper": np.asarray([
+            infinity if value is None else float(value)
+            for value in lp.column_upper], dtype=np.float64),
+        "row_lower": np.asarray([
+            -infinity if row.lower is None else float(row.lower)
+            for row in lp.rows], dtype=np.float64),
+        "row_upper": np.asarray([
+            infinity if row.upper is None else float(row.upper)
+            for row in lp.rows], dtype=np.float64),
+        "starts": starts, "indices": indices, "values": values,
+        "finite_bound_masks": (
+            [value is not None for value in lp.column_lower],
+            [value is not None for value in lp.column_upper],
+            [row.lower is not None for row in lp.rows],
+            [row.upper is not None for row in lp.rows]),
+    }
+
+
+def _diagnose_highs_lp(lp: ExactCanonicalLP, arrays: dict,
+                       thresholds: dict):
+    return diagnose_highs_arrays(
+        column_count=lp.column_count, row_count=len(lp.rows),
+        objective=arrays["objective"],
+        column_lower=arrays["column_lower"],
+        column_upper=arrays["column_upper"],
+        row_lower=arrays["row_lower"], row_upper=arrays["row_upper"],
+        starts=arrays["starts"], indices=arrays["indices"],
+        values=arrays["values"],
+        small_matrix_value=thresholds["small_matrix_value"],
+        large_matrix_value=thresholds["large_matrix_value"],
+        infinite_bound=thresholds["infinite_bound"],
+        finite_bound_masks=arrays["finite_bound_masks"])
+
+
+def _require_solver_scaling_applied(
+        original_lp: ExactCanonicalLP, solver_lp: ExactCanonicalLP,
+        scaling: SolverScaledLP | None, original_diagnostic: dict,
+        scaled_diagnostic: dict, scaling_path: Path | None):
+    report = None if scaling is None else scaling.report
+    valid = bool(
+        report
+        and report.get("method") == "POSITIVE_POWER_OF_TWO_ROW_SCALING"
+        and report.get("original_canonical_lp_sha256") ==
+            original_lp.identity()
+        and report.get("solver_scaled_lp_sha256") == solver_lp.identity()
+        and report.get("row_scaling_sha256")
+        and report.get("sub_threshold_entries_before") ==
+            original_diagnostic.get("sub_small_matrix_value_count")
+        and report.get("sub_threshold_entries_after") == 0
+        and scaled_diagnostic.get("sub_small_matrix_value_count") == 0)
+    persisted = True
+    if scaling_path is not None:
+        persisted = scaling_path.is_file()
+        if persisted:
+            persisted_record = cluster_common.verified_json(scaling_path)
+            persisted = (
+                persisted_record.get("row_scaling_sha256") ==
+                    report.get("row_scaling_sha256")
+                and persisted_record.get("solver_scaled_lp_sha256") ==
+                    solver_lp.identity())
+    if not valid or not persisted:
+        raise HighsCanonicalLPDiagnosticError(
+            "solver-scaled LP was not applied before passModel", {
+                "failure_classification": "HIGHS_SOLVER_SCALING_NOT_APPLIED",
+                "failed_api_call": "pre_passModel_scaling_gate",
+                "original_canonical_lp_sha256": original_lp.identity(),
+                "solver_lp_sha256": solver_lp.identity(),
+                "solver_scaling": report,
+                "original_diagnostic": original_diagnostic,
+                "scaled_diagnostic": scaled_diagnostic,
+                "scaling_path": (None if scaling_path is None
+                                 else str(scaling_path)),
+                "scaling_artifact_persisted": persisted,
+            })
+    return True
+
+
 def _numeric_distribution(values, *, allow_infinity=False):
     array = np.asarray(values, dtype=np.float64)
     finite = np.isfinite(array)
@@ -1572,7 +1847,8 @@ def persist_exact_lp(lp: ExactCanonicalLP, path: Path):
             "canonical_lp_sha256": lp.identity()}
 
 
-def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None):
+def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
+                  scaling_path: Path | None = None):
     import highspy
     highs = highspy.Highs()
     if log_path is not None:
@@ -1601,51 +1877,77 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None):
             }
             raise HighsCanonicalLPDiagnosticError(
                 f"HiGHS rejected deterministic option {name}", diagnostic)
-    model = highspy.HighsLp()
-    model.num_col_ = lp.column_count
-    model.num_row_ = len(lp.rows)
-    model.col_cost_ = np.zeros(lp.column_count, dtype=np.float64)
-    infinity = highspy.kHighsInf
-    model.col_lower_ = np.asarray([
-        -infinity if value is None else float(value)
-        for value in lp.column_lower], dtype=np.float64)
-    model.col_upper_ = np.asarray([
-        infinity if value is None else float(value)
-        for value in lp.column_upper], dtype=np.float64)
-    model.row_lower_ = np.asarray([
-        -infinity if row.lower is None else float(row.lower)
-        for row in lp.rows], dtype=np.float64)
-    model.row_upper_ = np.asarray([
-        infinity if row.upper is None else float(row.upper)
-        for row in lp.rows], dtype=np.float64)
-    starts, indices, values = [0], [], []
-    for row in lp.rows:
-        indices.extend(row.indices)
-        values.extend(float(value) for value in row.coefficients)
-        starts.append(len(indices))
     threshold_statuses = {}
     thresholds = {}
     for name in ("small_matrix_value", "large_matrix_value", "infinite_bound"):
         status, value = highs.getOptionValue(name)
         threshold_statuses[name] = str(status)
+        if status != highspy.HighsStatus.kOk:
+            raise HighsCanonicalLPDiagnosticError(
+                f"HiGHS rejected threshold query {name}", {
+                    "failure_classification":
+                        "UNKNOWN_HIGHS_MODEL_REJECTION",
+                    "failed_api_call": f"getOptionValue({name})",
+                    "failed_highs_status": str(status),
+                    "option_statuses": option_statuses,
+                    "threshold_option_statuses": threshold_statuses,
+                    "column_count": lp.column_count,
+                    "row_count": len(lp.rows), "nnz": lp.nnz,
+                })
         thresholds[name] = float(value)
-    diagnostic = diagnose_highs_arrays(
-        column_count=lp.column_count, row_count=len(lp.rows),
-        objective=model.col_cost_, column_lower=model.col_lower_,
-        column_upper=model.col_upper_, row_lower=model.row_lower_,
-        row_upper=model.row_upper_, starts=starts, indices=indices,
-        values=values,
-        small_matrix_value=thresholds["small_matrix_value"],
+    infinity = highspy.kHighsInf
+    original_arrays = _highs_numeric_arrays(lp, infinity)
+    original_diagnostic = _diagnose_highs_lp(
+        lp, original_arrays, thresholds)
+    original_structural_failure = original_diagnostic[
+        "preflight_failure_classification"] in {
+            "NONFINITE_CANONICAL_COEFFICIENT", "NONFINITE_CANONICAL_BOUND",
+            "HIGHS_MATRIX_INDEX_INVALID", "HIGHS_MATRIX_STRUCTURE_INVALID",
+            "HIGHS_BOUND_MAGNITUDE_REJECTED"}
+    if original_structural_failure:
+        original_diagnostic.update({
+            "failure_classification": original_diagnostic[
+                "preflight_failure_classification"],
+            "failed_api_call": "original_pre_scaling_validation",
+            "failed_highs_status": None,
+        })
+        raise HighsCanonicalLPDiagnosticError(
+            "original canonical LP failed structural validation",
+            original_diagnostic)
+    scaling = build_highs_row_scaled_lp(
+        lp, small_matrix_value=thresholds["small_matrix_value"],
         large_matrix_value=thresholds["large_matrix_value"],
-        infinite_bound=thresholds["infinite_bound"],
-        finite_bound_masks=(
-            [value is not None for value in lp.column_lower],
-            [value is not None for value in lp.column_upper],
-            [row.lower is not None for row in lp.rows],
-            [row.upper is not None for row in lp.rows]))
+        infinite_bound=thresholds["infinite_bound"])
+    if scaling_path is not None:
+        persist_solver_row_scaling(scaling, scaling_path)
+    solver_lp = scaling.lp
+    solver_arrays = _highs_numeric_arrays(solver_lp, infinity)
+    scaled_diagnostic = _diagnose_highs_lp(
+        solver_lp, solver_arrays, thresholds)
+    _require_solver_scaling_applied(
+        lp, solver_lp, scaling, original_diagnostic,
+        scaled_diagnostic, scaling_path)
+    model = highspy.HighsLp()
+    model.num_col_ = solver_lp.column_count
+    model.num_row_ = len(solver_lp.rows)
+    model.col_cost_ = solver_arrays["objective"]
+    model.col_lower_ = solver_arrays["column_lower"]
+    model.col_upper_ = solver_arrays["column_upper"]
+    model.row_lower_ = solver_arrays["row_lower"]
+    model.row_upper_ = solver_arrays["row_upper"]
+    starts, indices, values = (solver_arrays["starts"],
+                               solver_arrays["indices"],
+                               solver_arrays["values"])
+    diagnostic = dict(scaled_diagnostic)
     diagnostic.update({
         "schema": "CORET_HIGHSPY_CANONICAL_LP_DIAGNOSTIC_V1",
         "canonical_lp_sha256": lp.identity(),
+        "original_canonical_lp_sha256": lp.identity(),
+        "solver_scaled_lp_sha256": solver_lp.identity(),
+        "row_scaling_sha256": scaling.report["row_scaling_sha256"],
+        "solver_scaling": scaling.report,
+        "original_diagnostic": original_diagnostic,
+        "scaled_diagnostic": dict(scaled_diagnostic),
         "highspy_version": importlib.metadata.version("highspy"),
         "highs_version": highs.version(), "options": options,
         "option_statuses": option_statuses,
@@ -1653,18 +1955,16 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None):
         "api_statuses": [],
         "highs_log_path": None if log_path is None else str(log_path),
     })
-    structural_failure = diagnostic["preflight_failure_classification"] in {
-        "NONFINITE_CANONICAL_COEFFICIENT", "NONFINITE_CANONICAL_BOUND",
-        "HIGHS_MATRIX_INDEX_INVALID", "HIGHS_MATRIX_STRUCTURE_INVALID"}
-    if structural_failure:
+    scaled_failure = diagnostic["preflight_failure_classification"] is not None
+    if scaled_failure:
         diagnostic.update({
             "failure_classification": diagnostic[
                 "preflight_failure_classification"],
-            "failed_api_call": "pre_passModel_validation",
+            "failed_api_call": "scaled_pre_passModel_validation",
             "failed_highs_status": None,
         })
         raise HighsCanonicalLPDiagnosticError(
-            "canonical LP failed pre-passModel validation", diagnostic)
+            "scaled LP failed pre-passModel validation", diagnostic)
     model.a_matrix_.format_ = highspy.MatrixFormat.kRowwise
     model.a_matrix_.start_ = np.asarray(starts, dtype=np.int64)
     model.a_matrix_.index_ = np.asarray(indices, dtype=np.int32)
@@ -1686,6 +1986,9 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None):
         ray_call_status, returned, values = highs.getDualRay()
         if ray_call_status == highspy.HighsStatus.kOk and returned:
             raw_ray = np.asarray(values, dtype=np.float64)
+    original_row_ray = (None if raw_ray is None else
+                        map_solver_row_ray_to_original(raw_ray,
+                                                       scaling.scales))
     solution = highs.getSolution()
     return {
         "run_status": str(run_status), "model_status": status_name,
@@ -1694,6 +1997,7 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None):
                                highspy.HighsModelStatus.kObjectiveBound),
         "direct_dual_ray_available": raw_ray is not None,
         "raw_dual_ray": raw_ray,
+        "original_row_dual_ray": original_row_ray,
         "column_values": (np.asarray(solution.col_value, dtype=np.float64)
                           if solution.value_valid else None),
         "runtime_seconds": runtime, "highs_runtime_seconds": highs.getRunTime(),
@@ -1701,6 +2005,7 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None):
         "highs_version": highs.version(), "options": options,
         "ray_exist_status": str(ray_status),
         "ray_call_status": str(ray_call_status),
+        "solver_scaling": scaling.report,
         "construction_diagnostic": diagnostic,
     }
 
@@ -1874,22 +2179,31 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
     reconstruction_attempts = []
     fallback = {"attempted": False}
     if backend["packages"]["highspy"]:
-        solver = solve_highspy(lp, artifact_dir / "root_highspy.log")
+        solver = solve_highspy(
+            lp, artifact_dir / "root_highspy.log",
+            artifact_dir / "root_highspy_exact_row_scaling.json")
         if solver["raw_dual_ray"] is not None:
             raw_ray_record = _atomic_json(
                 artifact_dir / "root_highspy_raw_dual_ray.json", {
                     "schema": "CORET_HIGHSPY_RAW_DUAL_RAY_V1",
                     "canonical_lp_sha256": lp.identity(),
+                    "solver_scaled_lp_sha256": solver[
+                        "solver_scaling"]["solver_scaled_lp_sha256"],
+                    "row_scaling_sha256": solver[
+                        "solver_scaling"]["row_scaling_sha256"],
                     "row_order_sha256": _sha_json(
                         [row.name for row in lp.rows]),
-                    "values": [float(value)
-                               for value in solver["raw_dual_ray"]],
+                    "solver_scaled_row_values": [
+                        float(value) for value in solver["raw_dual_ray"]],
+                    "original_row_values": [
+                        float(value)
+                        for value in solver["original_row_dual_ray"]],
                     "highs_version": solver["highs_version"],
                     "model_status": solver["model_status"],
                 })
             certificate, reconstruction_attempts, _repair_status = \
                 repair_direct_dual_ray(
-                    lp, solver["raw_dual_ray"],
+                    lp, solver["original_row_dual_ray"],
                     min(600.0, max(1.0, wall_seconds / 4)))
         elif solver["infeasible"]:
             fallback["attempted"] = True
@@ -1913,6 +2227,13 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
         "canonical_lp_sha256": lp.identity(),
         "canonical_lp_path": lp_artifact["path"],
         "canonical_lp_artifact_sha256": lp_artifact["sha256"],
+        "solver_scaling": (None if solver is None else
+                           solver["solver_scaling"]),
+        "solver_scaling_path": (None if solver is None else str(
+            artifact_dir / "root_highspy_exact_row_scaling.json")),
+        "solver_scaling_artifact_sha256": (
+            None if solver is None else cluster_common.sha256(
+                artifact_dir / "root_highspy_exact_row_scaling.json")),
         "lp_build_seconds": lp_build_seconds,
         "solver_backend": backend["selected"],
         "highspy_version": None if solver is None else solver["highspy_version"],

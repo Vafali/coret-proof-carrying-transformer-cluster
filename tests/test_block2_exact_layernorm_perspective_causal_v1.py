@@ -492,16 +492,193 @@ def test_highspy_api_rejection_classification_is_persisted(tmp_path):
     assert ORACLE.cluster_common.verified_json(output) == record
 
 
-def test_real_highspy_tiny_coefficient_warning_is_not_discarded(tmp_path):
+def tiny_lp(rows=None):
+    return ORACLE.ExactCanonicalLP(
+        ("xi[0]",), (F(0),), (F(1),),
+        tuple(rows or (ORACLE.ExactLPRow(
+            "tiny[0]", (0,),
+            (F.from_float(4.113201943316126e-14),), None, F(1)),)))
+
+
+def scale(lp, **kwargs):
+    return ORACLE.build_highs_row_scaled_lp(
+        lp, small_matrix_value=1e-9, large_matrix_value=1e15,
+        infinite_bound=1e20, **kwargs)
+
+
+@pytest.mark.parametrize("lower,upper", [
+    (None, F(3)), (F(-2), None), (F(1), F(1))])
+def test_positive_row_scaling_preserves_all_row_senses(lower, upper):
     lp = ORACLE.ExactCanonicalLP(
-        ("x",), (F(0),), (F(1),),
-        (ORACLE.ExactLPRow(
-            "tiny", (0,), (F(1, 10 ** 12),), None, F(1)),))
+        ("xi[0]",), (None,), (None,),
+        (ORACLE.ExactLPRow("sense[0]", (0,), (F(1, 10 ** 12),),
+                           lower, upper),))
+    result = scale(lp)
+    original, scaled = lp.rows[0], result.lp.rows[0]
+    factor = result.scales[0]
+    assert scaled.coefficients == tuple(value * factor for value in
+                                        original.coefficients)
+    assert scaled.lower == (None if lower is None else lower * factor)
+    assert scaled.upper == (None if upper is None else upper * factor)
+    assert (scaled.lower is None) == (original.lower is None)
+    assert (scaled.upper is None) == (original.upper is None)
+
+
+def test_tiny_exact_coefficient_survives_real_highspy_export(tmp_path):
+    lp = tiny_lp()
+    original_identity = lp.identity()
+    result = ORACLE.solve_highspy(
+        lp, tmp_path / "highs.log", tmp_path / "scaling.json")
+    report = result["solver_scaling"]
+    diagnostic = result["construction_diagnostic"]
+    assert report["sub_threshold_entries_before"] == 1
+    assert report["sub_threshold_entries_after"] == 0
+    assert diagnostic["original_diagnostic"][
+        "sub_small_matrix_value_count"] == 1
+    assert diagnostic["scaled_diagnostic"][
+        "sub_small_matrix_value_count"] == 0
+    assert diagnostic["sub_small_matrix_value_count"] == 0
+    assert report["minimum_post_scale_nonzero_abs"] > 1e-9
+    assert lp.identity() == original_identity
+    assert ORACLE.cluster_common.verified_json(
+        tmp_path / "scaling.json")["row_scaling_sha256"] == \
+        report["row_scaling_sha256"]
+
+
+def test_pre_passmodel_gate_rejects_deliberate_scaling_bypass():
+    lp = tiny_lp()
+    arrays = ORACLE._highs_numeric_arrays(lp, 1e30)
+    thresholds = {"small_matrix_value": 1e-9,
+                  "large_matrix_value": 1e15, "infinite_bound": 1e20}
+    original = ORACLE._diagnose_highs_lp(lp, arrays, thresholds)
     with pytest.raises(ORACLE.HighsCanonicalLPDiagnosticError) as captured:
-        ORACLE.solve_highspy(lp, tmp_path / "highs.log")
-    diagnostic = captured.value.diagnostic
-    assert diagnostic["failed_api_call"] == "passModel"
-    assert diagnostic["failed_highs_status"] == "HighsStatus.kWarning"
-    assert diagnostic["failure_classification"] == \
+        ORACLE._require_solver_scaling_applied(
+            lp, lp, None, original, original, None)
+    assert captured.value.diagnostic["failure_classification"] == \
+        "HIGHS_SOLVER_SCALING_NOT_APPLIED"
+    assert captured.value.diagnostic["failed_api_call"] == \
+        "pre_passModel_scaling_gate"
+
+
+def test_all_128_style_tiny_coefficients_survive_scaling():
+    rows = tuple(ORACLE.ExactLPRow(
+        f"preactivation[{index}]", (0,),
+        (F(1 + index, 10 ** 14),), None, F(1)) for index in range(128))
+    result = scale(tiny_lp(rows))
+    assert result.report["sub_threshold_entries_before"] == 128
+    assert result.report["sub_threshold_entries_after"] == 0
+    assert result.report["sub_threshold_distribution_by_row_family"] == {
+        "preactivation": 128}
+    assert result.report["sub_threshold_distribution_by_variable_family"] == {
+        "xi": 128}
+
+
+def test_minimal_deterministic_power_of_two_is_selected():
+    result = scale(tiny_lp())
+    exponent = result.exponents[0]
+    original = abs(tiny_lp().rows[0].coefficients[0])
+    target = F.from_float(1e-8)
+    assert original * (2 ** exponent) >= target
+    assert exponent > 0
+    assert original * (2 ** (exponent - 1)) < target
+    assert scale(tiny_lp()).exponents == result.exponents
+
+
+def test_reported_real_minimum_requires_scale_exponent_18():
+    coefficient = F.from_float(4.113201943316126e-14)
+    lp = ORACLE.ExactCanonicalLP(
+        ("xi[0]",), (None,), (None,),
+        (ORACLE.ExactLPRow(
+            "centered[0]", (0,), (coefficient,), None, F(1)),))
+    result = scale(lp)
+    assert result.exponents == (18,)
+    assert float(coefficient * result.scales[0]) >= 1e-8
+    assert float(coefficient * (result.scales[0] // 2)) < 1e-8
+
+
+def test_unsafe_overflow_row_scaling_fails_closed():
+    lp = ORACLE.ExactCanonicalLP(
+        ("xi[0]", "c[0]"), (None, None), (None, None),
+        (ORACLE.ExactLPRow(
+            "mixed[0]", (0, 1), (F(1, 10 ** 14), F(10 ** 14)),
+            None, F(1)),))
+    with pytest.raises(ORACLE.HighsCanonicalLPDiagnosticError) as captured:
+        scale(lp)
+    assert captured.value.diagnostic["failure_classification"] == \
+        "HIGHS_SAFE_ROW_SCALING_IMPOSSIBLE"
+
+
+def test_solver_scaling_preserves_original_identity_and_has_own_identity():
+    lp = tiny_lp()
+    original = lp.identity()
+    result = scale(lp)
+    assert lp.identity() == original
+    assert result.report["original_canonical_lp_sha256"] == original
+    assert result.report["solver_scaled_lp_sha256"] == result.lp.identity()
+    assert result.lp.identity() != original
+    assert result.report["row_scaling_sha256"] == ORACLE._sha_json(
+        result.report["row_scales_exact"])
+
+
+def test_exact_dual_ray_back_mapping_multiplies_scale_once():
+    assert ORACLE.map_solver_row_multipliers_exact(
+        (F(3, 5), F(7, 11)), (8, 4)) == (F(24, 5), F(28, 11))
+
+
+def scaled_infeasible_lp():
+    # The tiny row is x <= 0; x >= 100 makes the scaled violation exceed
+    # HiGHS' feasibility tolerance while retaining a sub-threshold source row.
+    return ORACLE.ExactCanonicalLP(
+        ("xi[0]",), (F(100),), (None,),
+        (ORACLE.ExactLPRow(
+            "tiny_upper[0]", (0,), (F(1, 10 ** 12),),
+            None, F(0)),))
+
+
+def certificate_from_row_multiplier(lp, multiplier):
+    return {
+        "schema": "CORET_EXACT_LP_FARKAS_CERTIFICATE_V1",
+        "canonical_lp_sha256": lp.identity(),
+        "multipliers": [
+            {"kind": "row", "index": 0, "orientation": 1,
+             "multiplier": ORACLE._fs(multiplier)},
+            {"kind": "column", "index": 0, "orientation": -1,
+             "multiplier": ORACLE._fs(multiplier * F(1, 10 ** 12))},
+        ],
+    }
+
+
+def test_scale_omission_and_double_scaling_reject_but_once_accepts():
+    lp = scaled_infeasible_lp()
+    factor = scale(lp).scales[0]
+    solver_mu = F(1, factor)
+    mapped = ORACLE.map_solver_row_multipliers_exact(
+        (solver_mu,), (factor,))[0]
+    assert ORACLE.verify_exact_lp_farkas(
+        lp, certificate_from_row_multiplier(lp, mapped))["verified"]
+    # Keeping the original bound multiplier exposes omission/double scaling.
+    for wrong in (solver_mu, solver_mu * factor * factor):
+        certificate = certificate_from_row_multiplier(lp, mapped)
+        certificate["multipliers"][0]["multiplier"] = ORACLE._fs(wrong)
+        with pytest.raises(RuntimeError, match="stationarity"):
+            ORACLE.verify_exact_lp_farkas(lp, certificate)
+
+
+def test_scaled_synthetic_infeasible_ray_exact_replays_original(tmp_path):
+    lp = scaled_infeasible_lp()
+    result = ORACLE.solve_highspy(lp, tmp_path / "highs.log")
+    assert result["infeasible"] and result["direct_dual_ray_available"]
+    certificate, _attempts, status = ORACLE.repair_direct_dual_ray(
+        lp, result["original_row_dual_ray"])
+    assert status == "EXACT_FARKAS_VERIFIED"
+    assert ORACLE.verify_exact_lp_farkas(lp, certificate)["verified"]
+
+
+def test_highs_warning_about_ignored_coefficient_remains_fatal(tmp_path):
+    diagnostic = diagnose(values=[1e-12, 2.0])
+    with pytest.raises(ORACLE.HighsCanonicalLPDiagnosticError) as captured:
+        ORACLE._check_highs_status(
+            "passModel", "HighsStatus.kWarning", "HighsStatus.kOk",
+            diagnostic, tmp_path / "absent.log")
+    assert captured.value.diagnostic["failure_classification"] == \
         "HIGHS_COEFFICIENT_MAGNITUDE_REJECTED"
-    assert diagnostic["sub_small_matrix_value_count"] == 1
