@@ -957,6 +957,7 @@ def _verify_pre_layernorm_input_capture(
     state_record = manifest.get("state") or {}
     linkage = manifest.get("invocation_linkage") or {}
     reproduction = manifest.get("passive_reproduction") or {}
+    legacy_manifest = manifest.get("canonical_state_identity") is None
     if (manifest.get("schema") != INPUT_MANIFEST_SCHEMA
             or manifest.get("property_id") != PROPERTY_ID
             or manifest.get("tested_radius") != TESTED_RADIUS
@@ -976,14 +977,16 @@ def _verify_pre_layernorm_input_capture(
             cluster_common.PRODUCTION_MANIFEST_SHA
             or linkage.get("verified") is not True
             or linkage.get("existing_output_state_name") !=
-            "post_attention_ln_pre_reduction"
-            or reproduction.get("psd_application_count") != 1
-            or reproduction.get("psd_rejection_count") != 0
-            or reproduction.get("next_failure_stage") != NEXT_STAGE
-            or reproduction.get("next_failure_reason") !=
-            finish3l.LAYERNORM_DOMAIN_REASON
-            or reproduction.get("scientific_queries") != 1):
+            "post_attention_ln_pre_reduction"):
         raise RuntimeError("pre-LayerNorm input manifest identity differs")
+    if (not legacy_manifest
+            and (reproduction.get("psd_application_count") != 1
+                 or reproduction.get("psd_rejection_count") != 0
+                 or reproduction.get("next_failure_stage") != NEXT_STAGE
+                 or reproduction.get("next_failure_reason") !=
+                 finish3l.LAYERNORM_DOMAIN_REASON
+                 or reproduction.get("scientific_queries") != 1)):
+        raise RuntimeError("pre-LayerNorm reproduction identity differs")
     artifact_path = (manifest_path.parent
                      / manifest["tensor_artifact_path"]).resolve()
     if cluster_common.sha256(artifact_path) != state_record.get(
@@ -1040,18 +1043,31 @@ def _verify_pre_layernorm_input_capture(
             actual_canonical
             if linkage.get("input_state_identity_schema") is not None
             else None))
-    if (linkage.get("linkage_identity_sha256") !=
-            expected_linkage["linkage_identity_sha256"]
+    linkage_fields = (
+        "property_id", "tested_radius_hex", "block_index",
+        "layernorm_index", "stage", "parameter_name", "invocation_ordinal",
+        "existing_output_state_name", "existing_output_identity_sha256",
+        "existing_frontier_manifest_sha256", "pinned_revision",
+        "checkpoint_sha256")
+    if (any(linkage.get(field) != expected_linkage.get(field)
+            for field in linkage_fields)
+            or (not legacy_manifest
+                and linkage.get("linkage_identity_sha256") !=
+                expected_linkage["linkage_identity_sha256"])
             or state_record.get("token_count") != matches[0].get("token_count")
             or state_record.get("feature_dimension") !=
             matches[0].get("feature_dimension")):
         raise RuntimeError("pre/output LayerNorm invocation linkage differs")
+    recomputed_legacy_row_hash = capture._json_sha(actual)
     return {"schema": INPUT_MANIFEST_SCHEMA, "verified": True,
             "artifact_sha256": state_record["tensor_artifact_sha256"],
             "linkage_identity_sha256": linkage["linkage_identity_sha256"],
             "canonical_state_identity": actual_canonical,
-            "legacy_manifest_without_canonical": (
-                manifest.get("canonical_state_identity") is None)}
+            "legacy_manifest_without_canonical": legacy_manifest,
+            "legacy_row_hash_authoritative": not legacy_manifest,
+            "legacy_row_hash_matches_recomputed": (
+                linkage.get("input_state_identity_sha256") ==
+                recomputed_legacy_row_hash)}
 
 
 def _persist_pre_layernorm_input_capture(

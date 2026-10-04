@@ -303,6 +303,19 @@ def _persist_fixture(tmp_path, monkeypatch):
     return record
 
 
+def _convert_to_legacy_manifest(path):
+    manifest = RUNNER.cluster_common.verified_json(path)
+    expected = manifest.pop("canonical_state_identity")
+    manifest.pop("record_sha256")
+    linkage = manifest["invocation_linkage"]
+    linkage.pop("input_state_identity_schema")
+    linkage.pop("canonical_state_identity_sha256")
+    linkage["input_state_identity_sha256"] = "legacy-row-schema-checksum"
+    linkage["linkage_identity_sha256"] = "legacy-composite-checksum"
+    RUNNER._atomic_json(path, manifest)
+    return expected
+
+
 def test_linkage_to_frontier_output_is_verified(tmp_path, monkeypatch):
     record = _persist_fixture(tmp_path, monkeypatch)
     checked = RUNNER._verify_pre_layernorm_input_capture(
@@ -347,23 +360,88 @@ def test_job2997_legacy_manifest_authenticates_only_against_live_canonical(
         tmp_path, monkeypatch):
     record = _persist_fixture(tmp_path, monkeypatch)
     path = Path(record["manifest_path"])
-    manifest = RUNNER.cluster_common.verified_json(path)
-    expected = manifest.pop("canonical_state_identity")
-    manifest.pop("record_sha256")
-    linkage = manifest["invocation_linkage"]
-    linkage.pop("input_state_identity_schema")
-    linkage.pop("canonical_state_identity_sha256")
-    linkage.pop("linkage_identity_sha256")
-    linkage["linkage_identity_sha256"] = RUNNER.capture._json_sha(
-        {key: value for key, value in linkage.items()
-         if key not in {"verified", "existing_frontier_manifest_path"}})
-    RUNNER._atomic_json(path, manifest)
+    expected = _convert_to_legacy_manifest(path)
     checked = RUNNER._verify_pre_layernorm_input_capture(
         path, allow_legacy_missing_canonical=True,
         expected_canonical_identity=expected)
     assert checked["legacy_manifest_without_canonical"] is True
+    assert checked["legacy_row_hash_authoritative"] is False
+    assert checked["legacy_row_hash_matches_recomputed"] is False
     with pytest.raises(RuntimeError, match="canonical state identity is absent"):
         RUNNER._verify_pre_layernorm_input_capture(path)
+
+
+@pytest.mark.parametrize("mutation", (
+    "coefficient", "source_id", "range_low", "range_high", "mask",
+    "provenance", "topology"))
+def test_legacy_strict_verifier_rejects_canonical_component_mutation(
+        tmp_path, monkeypatch, mutation):
+    record = _persist_fixture(tmp_path, monkeypatch)
+    manifest_path = Path(record["manifest_path"])
+    expected = _convert_to_legacy_manifest(manifest_path)
+    artifact_path = Path(record["artifact_path"])
+    payload = RUNNER.capture.sound.torch.load(
+        artifact_path, map_location="cpu", weights_only=False)
+    snapshot = payload["states"]["pre_layernorm_input"]
+    if mutation == "coefficient":
+        snapshot["weights"][0, 0, 0] += 1.0
+    elif mutation == "source_id":
+        snapshot["proof"]["ids"][0] = "mutated-id"
+    elif mutation == "range_low":
+        snapshot["range_low"][0] -= 0.25
+    elif mutation == "range_high":
+        snapshot["range_high"][0] += 0.25
+    elif mutation == "mask":
+        snapshot["proof"]["masks"][0] ^= 1
+    elif mutation == "provenance":
+        snapshot["proof"]["reasons"][0] = "mutated-provenance"
+    else:
+        snapshot["weights"] = torch.cat(
+            (snapshot["weights"], snapshot["weights"][:, :1]), dim=1)
+        snapshot["proof"]["num_tokens"] += 1
+    RUNNER.capture._write_torch_atomic(artifact_path, payload)
+    manifest = RUNNER.cluster_common.verified_json(manifest_path)
+    manifest.pop("record_sha256")
+    hashes = RUNNER._frontier_state_hashes(snapshot)
+    manifest["state"].update({
+        **hashes,
+        "source_ids_sha256": hashes["generator_ids_sha256"],
+        "hidden_dimension": hashes["feature_dimension"],
+        "tensor_artifact_sha256": RUNNER.cluster_common.sha256(artifact_path),
+    })
+    RUNNER._atomic_json(manifest_path, manifest)
+    with pytest.raises(RuntimeError, match="canonical state identity differs"):
+        RUNNER._verify_pre_layernorm_input_capture(
+            manifest_path, allow_legacy_missing_canonical=True,
+            expected_canonical_identity=expected)
+
+
+def test_legacy_raw_artifact_manifest_mismatch_rejected_independently(
+        tmp_path, monkeypatch):
+    record = _persist_fixture(tmp_path, monkeypatch)
+    manifest_path = Path(record["manifest_path"])
+    expected = _convert_to_legacy_manifest(manifest_path)
+    artifact_path = Path(record["artifact_path"])
+    payload = RUNNER.capture.sound.torch.load(
+        artifact_path, map_location="cpu", weights_only=False)
+    payload["states"]["pre_layernorm_input"]["weights"][0, 0, 0] += 1.0
+    RUNNER.capture._write_torch_atomic(artifact_path, payload)
+    with pytest.raises(RuntimeError, match="artifact SHA differs"):
+        RUNNER._verify_pre_layernorm_input_capture(
+            manifest_path, allow_legacy_missing_canonical=True,
+            expected_canonical_identity=expected)
+
+
+def test_legacy_canonical_identity_mismatch_always_fails_closed(
+        tmp_path, monkeypatch):
+    record = _persist_fixture(tmp_path, monkeypatch)
+    path = Path(record["manifest_path"])
+    expected = _convert_to_legacy_manifest(path)
+    expected["weights_sha256"] = "0" * 64
+    with pytest.raises(RuntimeError, match="canonical state identity differs"):
+        RUNNER._verify_pre_layernorm_input_capture(
+            path, allow_legacy_missing_canonical=True,
+            expected_canonical_identity=expected)
 
 
 def test_property_or_radius_mismatch_is_rejected(tmp_path, monkeypatch):
