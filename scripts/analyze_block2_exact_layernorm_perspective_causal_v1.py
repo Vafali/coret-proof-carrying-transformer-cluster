@@ -434,6 +434,235 @@ class ExactSolveFailure(RuntimeError):
     pass
 
 
+class HighsCanonicalLPDiagnosticError(RuntimeError):
+    def __init__(self, message: str, diagnostic: dict):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+def _numeric_distribution(values, *, allow_infinity=False):
+    array = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(array)
+    nonzero = finite & (array != 0.0)
+    absolute = np.abs(array[finite])
+    nonzero_absolute = np.abs(array[nonzero])
+    buckets = {}
+    if nonzero_absolute.size:
+        exponents = np.floor(np.log10(nonzero_absolute)).astype(np.int64)
+        unique, counts = np.unique(exponents, return_counts=True)
+        buckets = {str(int(exponent)): int(count)
+                   for exponent, count in zip(unique, counts)}
+    result = {
+        "count": int(array.size), "finite_count": int(finite.sum()),
+        "nonfinite_count": int((~finite).sum()),
+        "nan_count": int(np.isnan(array).sum()),
+        "positive_infinity_count": int(np.isposinf(array).sum()),
+        "negative_infinity_count": int(np.isneginf(array).sum()),
+        "maximum_absolute_finite": (
+            None if not absolute.size else float(absolute.max())),
+        "minimum_nonzero_absolute_finite": (
+            None if not nonzero_absolute.size else
+            float(nonzero_absolute.min())),
+        "nonzero_decimal_exponent_histogram": buckets,
+        "infinity_allowed": bool(allow_infinity),
+    }
+    if (~finite).any():
+        first = int(np.flatnonzero(~finite)[0])
+        result["first_nonfinite"] = {"offset": first,
+                                     "value": repr(float(array[first]))}
+    return result
+
+
+def diagnose_highs_arrays(*, column_count, row_count, objective,
+                          column_lower, column_upper, row_lower, row_upper,
+                          starts, indices, values,
+                          small_matrix_value=1e-9,
+                          large_matrix_value=1e15,
+                          infinite_bound=1e20,
+                          finite_bound_masks=None):
+    starts = np.asarray(starts)
+    indices = np.asarray(indices)
+    values = np.asarray(values, dtype=np.float64)
+    fields = {
+        "objective": _numeric_distribution(objective),
+        "column_lower_bounds": _numeric_distribution(
+            column_lower, allow_infinity=True),
+        "column_upper_bounds": _numeric_distribution(
+            column_upper, allow_infinity=True),
+        "row_lower_bounds": _numeric_distribution(
+            row_lower, allow_infinity=True),
+        "row_upper_bounds": _numeric_distribution(
+            row_upper, allow_infinity=True),
+        "matrix_coefficients": _numeric_distribution(values),
+    }
+    malformed, duplicates, unsorted = [], [], []
+    duplicate_total = 0
+    pointer_valid = (starts.ndim == 1 and len(starts) == row_count + 1
+                     and len(starts) > 0 and int(starts[0]) == 0
+                     and np.all(starts[1:] >= starts[:-1])
+                     and int(starts[-1]) == len(indices) == len(values))
+    if pointer_valid:
+        for row in range(row_count):
+            begin, end = int(starts[row]), int(starts[row + 1])
+            row_indices = indices[begin:end]
+            duplicate_count = len(row_indices) - len(
+                set(int(value) for value in row_indices))
+            if duplicate_count:
+                duplicate_total += duplicate_count
+                duplicates.append({"row": row, "duplicate_count": duplicate_count})
+            if len(row_indices) > 1 and np.any(row_indices[1:] <= row_indices[:-1]):
+                unsorted.append({"row": row,
+                                 "indices": [int(value) for value in
+                                             row_indices[:16]]})
+    else:
+        malformed.append({"kind": "csr_pointer",
+                          "pointer_length": int(starts.size),
+                          "expected_pointer_length": row_count + 1,
+                          "terminal": (None if not starts.size
+                                       else int(starts[-1])),
+                          "expected_terminal": len(indices)})
+    outside = np.flatnonzero((indices < 0) | (indices >= column_count)) \
+        if indices.size else np.empty(0, dtype=np.int64)
+    finite_coefficients = values[np.isfinite(values)]
+    absolute_nonzero = np.abs(finite_coefficients[finite_coefficients != 0])
+    small = np.flatnonzero(
+        np.isfinite(values) & (values != 0)
+        & (np.abs(values) < float(small_matrix_value)))
+    large = np.flatnonzero(
+        np.isfinite(values) & (np.abs(values) > float(large_matrix_value)))
+    bound_arrays = [np.asarray(item, dtype=np.float64) for item in
+                    (column_lower, column_upper, row_lower, row_upper)]
+    if finite_bound_masks is None:
+        finite_bound_masks = [
+            ~np.isneginf(bound_arrays[0]), ~np.isposinf(bound_arrays[1]),
+            ~np.isneginf(bound_arrays[2]), ~np.isposinf(bound_arrays[3])]
+    finite_bound_masks = [np.asarray(mask, dtype=bool)
+                          for mask in finite_bound_masks]
+    if (len(finite_bound_masks) != 4
+            or any(mask.shape != item.shape for mask, item in
+                   zip(finite_bound_masks, bound_arrays))):
+        raise ValueError("finite bound masks differ from bound arrays")
+    finite_bounds = np.concatenate([item[np.isfinite(item)]
+                                    for item in bound_arrays])
+    large_bound_details = []
+    bound_names = ("column_lower", "column_upper",
+                   "row_lower", "row_upper")
+    for name, array, finite_mask in zip(
+            bound_names, bound_arrays, finite_bound_masks):
+        for offset in np.flatnonzero(
+                finite_mask & np.isfinite(array)
+                & (np.abs(array) >= float(infinite_bound))):
+            large_bound_details.append({
+                "field": name, "offset": int(offset),
+                "value": float(array[offset])})
+    improper_nonfinite_bounds = []
+    for name, array, finite_mask in zip(
+            bound_names, bound_arrays, finite_bound_masks):
+        for offset in np.flatnonzero(finite_mask & ~np.isfinite(array)):
+            improper_nonfinite_bounds.append({
+                "field": name, "offset": int(offset),
+                "value": repr(float(array[offset]))})
+    diagnostic = {
+        "column_count": int(column_count), "row_count": int(row_count),
+        "nnz": int(len(values)), "numeric_fields": fields,
+        "maximum_absolute_finite_coefficient": (
+            None if not finite_coefficients.size else
+            float(np.max(np.abs(finite_coefficients)))),
+        "minimum_nonzero_absolute_finite_coefficient": (
+            None if not absolute_nonzero.size else
+            float(np.min(absolute_nonzero))),
+        "maximum_finite_bound_magnitude": (
+            None if not finite_bounds.size else
+            float(np.max(np.abs(finite_bounds)))),
+        "malformed_row_count": len(malformed),
+        "malformed_rows": malformed[:16],
+        "duplicate_column_index_count": int(duplicate_total),
+        "duplicate_column_index_row_count": len(duplicates),
+        "duplicate_column_index_rows": duplicates[:16],
+        "unsorted_index_row_count": len(unsorted),
+        "unsorted_index_rows": unsorted[:16],
+        "index_minimum": None if not indices.size else int(indices.min()),
+        "index_maximum": None if not indices.size else int(indices.max()),
+        "outside_index_count": int(outside.size),
+        "first_outside_index": (None if not outside.size else {
+            "offset": int(outside[0]), "value": int(indices[outside[0]])}),
+        "sparse_encoding": "CSR_ROW_WISE",
+        "pointer_length": int(starts.size),
+        "expected_pointer_length": int(row_count + 1),
+        "pointer_terminal_nnz": (None if not starts.size
+                                 else int(starts[-1])),
+        "expected_terminal_nnz": int(len(values)),
+        "pointer_structure_valid": bool(pointer_valid),
+        "highs_thresholds": {
+            "small_matrix_value": float(small_matrix_value),
+            "large_matrix_value": float(large_matrix_value),
+            "infinite_bound": float(infinite_bound)},
+        "sub_small_matrix_value_count": int(small.size),
+        "first_sub_small_matrix_value": (None if not small.size else {
+            "offset": int(small[0]), "value": float(values[small[0]])}),
+        "over_large_matrix_value_count": int(large.size),
+        "first_over_large_matrix_value": (None if not large.size else {
+            "offset": int(large[0]), "value": float(values[large[0]])}),
+        "over_infinite_bound_magnitude_count": len(large_bound_details),
+        "first_over_infinite_bound_magnitude": (
+            None if not large_bound_details else large_bound_details[0]),
+        "improper_nonfinite_bound_count": len(improper_nonfinite_bounds),
+        "first_improper_nonfinite_bound": (
+            None if not improper_nonfinite_bounds
+            else improper_nonfinite_bounds[0]),
+    }
+    classification = None
+    if (fields["objective"]["nonfinite_count"]
+            or fields["matrix_coefficients"]["nonfinite_count"]):
+        classification = "NONFINITE_CANONICAL_COEFFICIENT"
+    elif improper_nonfinite_bounds:
+        classification = "NONFINITE_CANONICAL_BOUND"
+    elif outside.size:
+        classification = "HIGHS_MATRIX_INDEX_INVALID"
+    elif not pointer_valid or duplicates or unsorted:
+        classification = "HIGHS_MATRIX_STRUCTURE_INVALID"
+    elif small.size or large.size:
+        classification = "HIGHS_COEFFICIENT_MAGNITUDE_REJECTED"
+    elif large_bound_details:
+        classification = "HIGHS_BOUND_MAGNITUDE_REJECTED"
+    diagnostic["preflight_failure_classification"] = classification
+    diagnostic["preflight_passed"] = classification is None
+    return diagnostic
+
+
+def _api_failure_classification(api: str, diagnostic: dict):
+    preflight = diagnostic.get("preflight_failure_classification")
+    if preflight:
+        return preflight
+    return {
+        "addCols": "HIGHS_ADD_COLS_REJECTED",
+        "addRows": "HIGHS_ADD_ROWS_REJECTED",
+        "passModel": "HIGHS_PASS_MODEL_REJECTED",
+        "passLp": "HIGHS_PASS_MODEL_REJECTED",
+        "changeColsBounds": "HIGHS_ADD_COLS_REJECTED",
+        "changeRowsBounds": "HIGHS_ADD_ROWS_REJECTED",
+        "run": "HIGHS_RUN_REJECTED",
+    }.get(api, "UNKNOWN_HIGHS_MODEL_REJECTION")
+
+
+def _check_highs_status(api: str, status, ok_status, diagnostic: dict,
+                        log_path: Path | None):
+    diagnostic.setdefault("api_statuses", []).append(
+        {"api": api, "status": str(status)})
+    if status == ok_status:
+        return
+    diagnostic.update({
+        "failed_api_call": api,
+        "failed_highs_status": str(status),
+        "failure_classification": _api_failure_classification(api, diagnostic),
+        "highs_log_path": None if log_path is None else str(log_path),
+        "highs_log_text": (None if log_path is None or not log_path.is_file()
+                           else log_path.read_text(errors="replace")[-20000:]),
+    })
+    raise HighsCanonicalLPDiagnosticError(
+        f"{api} rejected canonical LP with {status}", diagnostic)
+
+
 def _integerize(values: Sequence[Fraction]):
     denominators = [value.denominator for value in values]
     common = 1
@@ -1343,16 +1572,35 @@ def persist_exact_lp(lp: ExactCanonicalLP, path: Path):
             "canonical_lp_sha256": lp.identity()}
 
 
-def solve_highspy(lp: ExactCanonicalLP):
+def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None):
     import highspy
     highs = highspy.Highs()
-    options = {"output_flag": False, "presolve": "off", "threads": 1,
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    options = {"output_flag": log_path is not None,
+               "log_to_console": False,
+               "presolve": "off", "threads": 1,
                "parallel": "off", "random_seed": 0,
                "solver": "simplex"}
+    if log_path is not None:
+        options["log_file"] = str(log_path)
+    option_statuses = []
     for name, value in options.items():
         status = highs.setOptionValue(name, value)
+        option_statuses.append({"option": name, "value": value,
+                                "status": str(status)})
         if status != highspy.HighsStatus.kOk:
-            raise RuntimeError(f"HiGHS rejected deterministic option {name}")
+            diagnostic = {
+                "failure_classification": "UNKNOWN_HIGHS_MODEL_REJECTION",
+                "failed_api_call": f"setOptionValue({name})",
+                "failed_highs_status": str(status),
+                "option_statuses": option_statuses,
+                "column_count": lp.column_count,
+                "row_count": len(lp.rows), "nnz": lp.nnz,
+                "highs_log_path": None if log_path is None else str(log_path),
+            }
+            raise HighsCanonicalLPDiagnosticError(
+                f"HiGHS rejected deterministic option {name}", diagnostic)
     model = highspy.HighsLp()
     model.num_col_ = lp.column_count
     model.num_row_ = len(lp.rows)
@@ -1375,15 +1623,60 @@ def solve_highspy(lp: ExactCanonicalLP):
         indices.extend(row.indices)
         values.extend(float(value) for value in row.coefficients)
         starts.append(len(indices))
+    threshold_statuses = {}
+    thresholds = {}
+    for name in ("small_matrix_value", "large_matrix_value", "infinite_bound"):
+        status, value = highs.getOptionValue(name)
+        threshold_statuses[name] = str(status)
+        thresholds[name] = float(value)
+    diagnostic = diagnose_highs_arrays(
+        column_count=lp.column_count, row_count=len(lp.rows),
+        objective=model.col_cost_, column_lower=model.col_lower_,
+        column_upper=model.col_upper_, row_lower=model.row_lower_,
+        row_upper=model.row_upper_, starts=starts, indices=indices,
+        values=values,
+        small_matrix_value=thresholds["small_matrix_value"],
+        large_matrix_value=thresholds["large_matrix_value"],
+        infinite_bound=thresholds["infinite_bound"],
+        finite_bound_masks=(
+            [value is not None for value in lp.column_lower],
+            [value is not None for value in lp.column_upper],
+            [row.lower is not None for row in lp.rows],
+            [row.upper is not None for row in lp.rows]))
+    diagnostic.update({
+        "schema": "CORET_HIGHSPY_CANONICAL_LP_DIAGNOSTIC_V1",
+        "canonical_lp_sha256": lp.identity(),
+        "highspy_version": importlib.metadata.version("highspy"),
+        "highs_version": highs.version(), "options": options,
+        "option_statuses": option_statuses,
+        "threshold_option_statuses": threshold_statuses,
+        "api_statuses": [],
+        "highs_log_path": None if log_path is None else str(log_path),
+    })
+    structural_failure = diagnostic["preflight_failure_classification"] in {
+        "NONFINITE_CANONICAL_COEFFICIENT", "NONFINITE_CANONICAL_BOUND",
+        "HIGHS_MATRIX_INDEX_INVALID", "HIGHS_MATRIX_STRUCTURE_INVALID"}
+    if structural_failure:
+        diagnostic.update({
+            "failure_classification": diagnostic[
+                "preflight_failure_classification"],
+            "failed_api_call": "pre_passModel_validation",
+            "failed_highs_status": None,
+        })
+        raise HighsCanonicalLPDiagnosticError(
+            "canonical LP failed pre-passModel validation", diagnostic)
     model.a_matrix_.format_ = highspy.MatrixFormat.kRowwise
     model.a_matrix_.start_ = np.asarray(starts, dtype=np.int64)
     model.a_matrix_.index_ = np.asarray(indices, dtype=np.int32)
     model.a_matrix_.value_ = np.asarray(values, dtype=np.float64)
-    if highs.passModel(model) != highspy.HighsStatus.kOk:
-        raise RuntimeError("HiGHS rejected the canonical LP")
+    pass_status = highs.passModel(model)
+    _check_highs_status("passModel", pass_status, highspy.HighsStatus.kOk,
+                        diagnostic, log_path)
     started = time.perf_counter()
     run_status = highs.run()
     runtime = time.perf_counter() - started
+    _check_highs_status("run", run_status, highspy.HighsStatus.kOk,
+                        diagnostic, log_path)
     status = highs.getModelStatus()
     status_name = highs.modelStatusToString(status)
     ray_status, ray_exists = highs.getDualRayExist()
@@ -1408,6 +1701,7 @@ def solve_highspy(lp: ExactCanonicalLP):
         "highs_version": highs.version(), "options": options,
         "ray_exist_status": str(ray_status),
         "ray_call_status": str(ray_call_status),
+        "construction_diagnostic": diagnostic,
     }
 
 
@@ -1580,7 +1874,7 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
     reconstruction_attempts = []
     fallback = {"attempted": False}
     if backend["packages"]["highspy"]:
-        solver = solve_highspy(lp)
+        solver = solve_highspy(lp, artifact_dir / "root_highspy.log")
         if solver["raw_dual_ray"] is not None:
             raw_ray_record = _atomic_json(
                 artifact_dir / "root_highspy_raw_dual_ray.json", {
@@ -1729,6 +2023,18 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
     return _atomic_json(output, report)
 
 
+def persist_highs_rejection(output: Path,
+                            error: HighsCanonicalLPDiagnosticError):
+    return _atomic_json(output, {
+        "schema": "CORET_HIGHSPY_CANONICAL_LP_REJECTION_DIAGNOSTIC_V1",
+        "final_status": "HIGHS_CANONICAL_LP_CONSTRUCTION_REJECTED",
+        "diagnostic": error.diagnostic,
+        "error": f"{type(error).__name__}: {error}",
+        "scientific_result": None,
+        "scientific_queries": 0, "bound_calls": 0, "gpu_jobs": 0,
+    })
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--capture-root", required=True, type=Path)
@@ -1742,13 +2048,18 @@ def main() -> int:
     if (args.maximum_nodes <= 0 or args.wall_clock_limit_seconds <= 0
             or args.maximum_exact_witness_patterns <= 0):
         raise RuntimeError("oracle limits must be positive")
-    report = execute(
-        args.capture_root.expanduser().resolve(),
-        args.downstream_report.expanduser().resolve(),
-        args.output.expanduser().resolve(),
-        args.artifact_dir.expanduser().resolve(),
-        args.maximum_nodes, args.wall_clock_limit_seconds,
-        args.maximum_exact_witness_patterns)
+    output = args.output.expanduser().resolve()
+    try:
+        report = execute(
+            args.capture_root.expanduser().resolve(),
+            args.downstream_report.expanduser().resolve(), output,
+            args.artifact_dir.expanduser().resolve(),
+            args.maximum_nodes, args.wall_clock_limit_seconds,
+            args.maximum_exact_witness_patterns)
+    except HighsCanonicalLPDiagnosticError as error:
+        report = persist_highs_rejection(output, error)
+        print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+        return 2
     print(json.dumps(report, indent=2, sort_keys=True), flush=True)
     return 0
 

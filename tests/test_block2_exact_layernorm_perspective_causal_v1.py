@@ -384,3 +384,124 @@ def test_highspy_backend_is_primary_and_gurobi_forbidden():
     assert backend["certificate_extraction_supported"] is True
     assert backend["priority"][0] == "highspy.getDualRay"
     assert backend["gurobi_permitted"] is False
+
+
+def numeric_model(**updates):
+    value = {
+        "column_count": 2, "row_count": 1,
+        "objective": [0.0, 0.0],
+        "column_lower": [-float("inf"), -float("inf")],
+        "column_upper": [float("inf"), float("inf")],
+        "row_lower": [-float("inf")], "row_upper": [1.0],
+        "starts": [0, 2], "indices": [0, 1], "values": [1.0, 2.0],
+    }
+    value.update(updates)
+    return value
+
+
+def diagnose(**updates):
+    return ORACLE.diagnose_highs_arrays(**numeric_model(**updates))
+
+
+def test_nan_coefficient_classified_and_located():
+    result = diagnose(values=[float("nan"), 2.0])
+    assert result["preflight_failure_classification"] == \
+        "NONFINITE_CANONICAL_COEFFICIENT"
+    assert result["numeric_fields"]["matrix_coefficients"]["nan_count"] == 1
+    assert result["numeric_fields"]["matrix_coefficients"][
+        "first_nonfinite"]["offset"] == 0
+
+
+def test_infinite_improper_coefficient_classified():
+    result = diagnose(values=[float("inf"), 2.0])
+    assert result["preflight_failure_classification"] == \
+        "NONFINITE_CANONICAL_COEFFICIENT"
+    assert result["numeric_fields"]["matrix_coefficients"][
+        "positive_infinity_count"] == 1
+
+
+def test_nonfinite_objective_and_improper_bound_are_classified():
+    objective = diagnose(objective=[float("nan"), 0.0])
+    assert objective["preflight_failure_classification"] == \
+        "NONFINITE_CANONICAL_COEFFICIENT"
+    bound = diagnose(column_lower=[float("nan"), -float("inf")])
+    assert bound["preflight_failure_classification"] == \
+        "NONFINITE_CANONICAL_BOUND"
+    assert bound["first_improper_nonfinite_bound"]["field"] == \
+        "column_lower"
+
+
+def test_highs_infinity_sentinel_is_not_a_user_bound_magnitude_failure():
+    model = numeric_model(
+        column_lower=[-1e30, -1e30], column_upper=[1e30, 1e30],
+        row_lower=[-1e30], row_upper=[1.0])
+    model["finite_bound_masks"] = (
+        [False, False], [False, False], [False], [True])
+    result = ORACLE.diagnose_highs_arrays(**model)
+    assert result["over_infinite_bound_magnitude_count"] == 0
+    assert result["preflight_failure_classification"] is None
+
+
+def test_invalid_matrix_index_classified_and_located():
+    result = diagnose(indices=[0, 2])
+    assert result["preflight_failure_classification"] == \
+        "HIGHS_MATRIX_INDEX_INVALID"
+    assert result["first_outside_index"] == {"offset": 1, "value": 2}
+
+
+def test_malformed_sparse_pointer_classified():
+    result = diagnose(starts=[0, 1])
+    assert result["preflight_failure_classification"] == \
+        "HIGHS_MATRIX_STRUCTURE_INVALID"
+    assert result["pointer_structure_valid"] is False
+    assert result["pointer_terminal_nnz"] == 1
+
+
+@pytest.mark.parametrize("indices", [[0, 0], [1, 0]])
+def test_duplicate_or_unsorted_indices_classified(indices):
+    result = diagnose(indices=indices)
+    assert result["preflight_failure_classification"] == \
+        "HIGHS_MATRIX_STRUCTURE_INVALID"
+    assert (result["duplicate_column_index_count"]
+            + result["unsorted_index_row_count"]) > 0
+
+
+@pytest.mark.parametrize("coefficient", [1e-12, 1e16])
+def test_extreme_coefficient_classified_with_distribution(coefficient):
+    result = diagnose(values=[coefficient, 2.0])
+    assert result["preflight_failure_classification"] == \
+        "HIGHS_COEFFICIENT_MAGNITUDE_REJECTED"
+    assert result["minimum_nonzero_absolute_finite_coefficient"] == \
+        min(abs(coefficient), 2.0)
+
+
+def test_highspy_api_rejection_classification_is_persisted(tmp_path):
+    diagnostic = diagnose(values=[1e-12, 2.0])
+    log = tmp_path / "highs.log"
+    log.write_text("WARNING: ignored tiny coefficient\n")
+    with pytest.raises(ORACLE.HighsCanonicalLPDiagnosticError) as captured:
+        ORACLE._check_highs_status(
+            "passModel", "HighsStatus.kWarning", "HighsStatus.kOk",
+            diagnostic, log)
+    output = tmp_path / "diagnostic.json"
+    record = ORACLE.persist_highs_rejection(output, captured.value)
+    assert record["diagnostic"]["failure_classification"] == \
+        "HIGHS_COEFFICIENT_MAGNITUDE_REJECTED"
+    assert record["diagnostic"]["failed_api_call"] == "passModel"
+    assert "ignored tiny coefficient" in record["diagnostic"]["highs_log_text"]
+    assert ORACLE.cluster_common.verified_json(output) == record
+
+
+def test_real_highspy_tiny_coefficient_warning_is_not_discarded(tmp_path):
+    lp = ORACLE.ExactCanonicalLP(
+        ("x",), (F(0),), (F(1),),
+        (ORACLE.ExactLPRow(
+            "tiny", (0,), (F(1, 10 ** 12),), None, F(1)),))
+    with pytest.raises(ORACLE.HighsCanonicalLPDiagnosticError) as captured:
+        ORACLE.solve_highspy(lp, tmp_path / "highs.log")
+    diagnostic = captured.value.diagnostic
+    assert diagnostic["failed_api_call"] == "passModel"
+    assert diagnostic["failed_highs_status"] == "HighsStatus.kWarning"
+    assert diagnostic["failure_classification"] == \
+        "HIGHS_COEFFICIENT_MAGNITUDE_REJECTED"
+    assert diagnostic["sub_small_matrix_value_count"] == 1
