@@ -1006,7 +1006,7 @@ def test_portfolio_attempts_at_most_eight_families(monkeypatch):
                       X=tuple((F(i + 1), F(-i - 1)) for i in range(n)),
                       low=(F(-1),) * n, high=(F(1),) * n, epsilon=F(1),
                       W2=((F(0), F(0)), (F(0), F(0))))
-    bases = [{"columns": (i,), "basis_sha256": str(i),
+    bases = [{"columns": (i,), "basis_sha256": ORACLE._sha_json((i,)),
               "minimum_selected_source_slack": 1.0, "numerical_rank": 1}
              for i in range(8)]
     monkeypatch.setattr(ORACLE, "box_aware_correction_bases",
@@ -1235,3 +1235,216 @@ def test_127_correction_fixture_reaches_interval_and_exact_witness():
     assert report["families"][-1]["alpha_interval"] is not None
     assert not report["families"][-1]["alpha_interval_empty"]
     assert ORACLE.replay_exact_perspective_witness(fixture, found)["verified"]
+
+
+def _production_two_direction_fixture():
+    d, n = 128, 128
+    zeros = (F(0),) * d
+    sources = tuple(tuple(F(int(j == i % 127) - int(j == 127))
+                          for j in range(d)) for i in range(n))
+    fixture = ORACLE.ExactPerspectiveProblem(
+        x0=zeros, X=sources, low=(F(-1),) * n, high=(F(1),) * n,
+        gamma=(F(1),) * d, beta=zeros, epsilon=F(1),
+        W1=(zeros,) * d, b1=zeros, W2=(zeros,) * d, b2=zeros)
+    columns = tuple(range(1, 128))
+    basis = {"columns": columns, "basis_sha256": ORACLE._sha_json(columns),
+             "minimum_selected_source_slack": 1.0, "numerical_rank": 127}
+    candidate = np.zeros(n + d + 1)
+    candidate[-1] = 1.0
+    return fixture, basis, candidate
+
+
+def test_production_127_basis_two_directions_one_setup_solve_and_interval(monkeypatch):
+    fixture, basis, candidate = _production_two_direction_fixture()
+    # Duplicate portfolio entries cannot restart either setup or elimination.
+    monkeypatch.setattr(ORACLE, "box_aware_correction_bases",
+                        lambda *_: ([basis, dict(basis)], np.ones(128)))
+    counts = {"matrix": 0, "integerization": 0, "elimination": 0}
+    for name, counter in (("_build_selected_exact_matrix", "matrix"),
+                          ("_integerize_correction_system", "integerization"),
+                          ("_exact_multi_rhs_solve", "elimination")):
+        original = getattr(ORACLE, name)
+        def counted(*args, _original=original, _counter=counter, **kwargs):
+            counts[_counter] += 1
+            assert counts[_counter] == 1, "same basis repeated exact work"
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(ORACLE, name, counted)
+    replay = ORACLE._replay_affine_family
+    reached = []
+    def collect(*args):
+        _found, evidence = replay(*args)
+        reached.append(evidence)
+        return None, evidence
+    monkeypatch.setattr(ORACLE, "_replay_affine_family", collect)
+    started = time.perf_counter()
+    found, report = ORACLE.reconstruct_exact_fixed_pattern_witness(
+        fixture, candidate, [False] * 128, 128, 15.0)
+    elapsed = time.perf_counter() - started
+    assert found is None and counts == {"matrix": 1, "integerization": 1, "elimination": 1}
+    assert len(reached) == len(report["families"]) == 2
+    assert all(row["alpha_interval"] is not None for row in report["families"])
+    system, = report["linear_systems"]
+    assert system["rhs_count"] == 4 and system["dimension"] == 127
+    assert system["shared_free_directions"] == ["t", "source_delta[0]"]
+    assert system["matrix_assembly_count"] == system["integerization_count"] == 1
+    assert system["elimination_count"] == system["basis_solve_count"] == 1
+    first, second = report["families"]
+    assert first["basis_solve_id"] == second["basis_solve_id"]
+    assert not first["elimination_reused"] and second["elimination_reused"]
+    assert first["elimination_count"] == 1 and second["elimination_count"] == 0
+    assert all(row["solved_affine_data_reused"] for row in report["families"])
+    assert all(row["exact_replay_result"]["verified"] for row in report["families"])
+    assert all(row["interval_seconds"] >= 0 and row["polynomial_seconds"] >= 0
+               and row["replay_seconds"] >= 0 for row in report["families"])
+    assert not report["permits_infeasibility_claim"]
+    print(json.dumps({"production_127_two_direction_fixture_seconds": elapsed,
+                      "counts": counts, "basis_profile": system}), flush=True)
+
+
+def test_near_old_timeout_setup_and_solve_have_separate_budgets(monkeypatch):
+    fixture = replace(problem(), X=((F(1), F(-1)), (F(2), F(-2))),
+                      low=(F(-1), F(-1)), high=(F(1), F(1)), epsilon=F(1),
+                      W2=((F(0), F(0)), (F(0), F(0))))
+    columns = (1,)
+    basis = {"columns": columns, "basis_sha256": ORACLE._sha_json(columns),
+             "minimum_selected_source_slack": 1.0, "numerical_rank": 1}
+    monkeypatch.setattr(ORACLE, "box_aware_correction_bases",
+                        lambda *_: ([basis], np.ones(2)))
+    real_clock = time.perf_counter
+    offset = [0.0]
+    monkeypatch.setattr(ORACLE.time, "perf_counter", lambda: real_clock() + offset[0])
+    alarms = []
+    monkeypatch.setattr(ORACLE, "_start_reconstruction_alarm",
+                        lambda seconds: (alarms.append(seconds) or (lambda: None)))
+    build, solve = ORACLE._build_selected_exact_matrix, ORACLE._solve_exact_correction_rhs
+    counts = {"build": 0, "solve": 0}
+    def slow_build(*args):
+        counts["build"] += 1
+        result = build(*args)
+        offset[0] += 17.9  # Simulated job3012 assembly, no sleeping.
+        return result
+    def slow_solve(*args):
+        counts["solve"] += 1
+        assert args[2] > 29.0  # Setup did not consume the solve budget.
+        result = solve(*args)
+        offset[0] += 11.64
+        return result
+    monkeypatch.setattr(ORACLE, "_build_selected_exact_matrix", slow_build)
+    monkeypatch.setattr(ORACLE, "_solve_exact_correction_rhs", slow_solve)
+    replay = ORACLE._replay_affine_family
+    def collect(*args):
+        result, evidence = replay(*args)
+        offset[0] += 1.0  # Both directions must finish past the old 30s cutoff.
+        return None, evidence
+    monkeypatch.setattr(ORACLE, "_replay_affine_family", collect)
+    found, report = ORACLE.reconstruct_exact_fixed_pattern_witness(
+        fixture, np.asarray([0., 0., 0., 0., 1.]), [True, False], 2, 120.)
+    assert found is None and counts == {"build": 1, "solve": 1}
+    assert len(report["families"]) == 2
+    assert all(row["alpha_interval"] is not None for row in report["families"])
+    assert all("failure" not in row for row in report["families"])
+    assert len(alarms) == 4 and alarms[1] > 29 and alarms[2] > 14
+    assert report["runtime_seconds"] > 30
+
+
+def test_lazy_exact_column_assembly_matches_fraction_dots_and_reuses_columns():
+    rows = [[F(1, 3), F(-2, 5)], [F(7, 8), F(9, 16)]]
+    columns = [[F(3, 7), F(5, 2)], [F(1, 2), F(-1, 2)], [F(11, 3), F(7, 9)]]
+    requests = []
+    def source(i):
+        requests.append(i)
+        return columns[i]
+    cache = {}
+    integer_rows = [ORACLE._exact_integer_vector(row) for row in rows]
+    first = ORACLE._build_selected_exact_matrix(rows, (0, 1), source, cache, integer_rows)
+    second = ORACLE._build_selected_exact_matrix(rows, (1, 2), source, cache, integer_rows)
+    assert first == [[ORACLE._dot(row, columns[i]) for i in (0, 1)] for row in rows]
+    assert second == [[ORACLE._dot(row, columns[i]) for i in (1, 2)] for row in rows]
+    assert requests == [0, 1, 2] and len(cache) == 3
+
+
+@pytest.mark.parametrize("mutation", ["lp", "phase", "basis", "matrix", "directions", "solution"])
+def test_solved_basis_cache_binds_context_and_exact_answers(mutation):
+    identity = {"canonical_lp_identity_sha256": "lp", "phase_pattern_identity_sha256": "phase",
+                "basis_sha256": "basis", "normalized_exact_matrix_sha256": "matrix",
+                "ordered_rhs_direction_identities": ["t", "source_delta[0]"]}
+    cache = {}
+    key = ORACLE._cache_solved_basis(cache, identity, [[F(1)], [F(2)], [F(3)], [F(4)]])
+    assert ORACLE._read_solved_basis_direction(cache, key, identity, 1) == [[F(3)], [F(4)]]
+    if mutation == "solution":
+        cache[key]["solutions"][0][0] = "5/1"
+    else:
+        field = {"lp": "canonical_lp_identity_sha256", "phase": "phase_pattern_identity_sha256",
+                 "basis": "basis_sha256", "matrix": "normalized_exact_matrix_sha256",
+                 "directions": "ordered_rhs_direction_identities"}[mutation]
+        identity = {**identity, field: "changed"}
+    with pytest.raises(ORACLE.ExactSolveFailure, match="cache integrity"):
+        ORACLE._read_solved_basis_direction(cache, key, identity, 1)
+
+
+def test_basis_hash_mismatch_rejects_before_any_exact_solve():
+    basis = {"columns": (0,), "basis_sha256": "wrong"}
+    with pytest.raises(RuntimeError, match="basis identity"):
+        ORACLE._group_correction_bases([basis], 1, 2)
+
+
+def test_direction_failure_does_not_discard_other_cached_direction(monkeypatch):
+    fixture = replace(problem(), X=((F(1), F(-1)), (F(2), F(-2))),
+                      low=(F(-1), F(-1)), high=(F(1), F(1)), epsilon=F(1),
+                      W2=((F(0), F(0)), (F(0), F(0))))
+    basis = {"columns": (1,), "basis_sha256": ORACLE._sha_json((1,)),
+             "minimum_selected_source_slack": 1.0, "numerical_rank": 1}
+    monkeypatch.setattr(ORACLE, "box_aware_correction_bases",
+                        lambda *_: ([basis], np.ones(2)))
+    replay = ORACLE._replay_affine_family
+    calls = []
+    def first_fails(*args):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ORACLE.ExactSolveFailure("direction replay timeout")
+        _found, evidence = replay(*args)
+        return None, evidence
+    monkeypatch.setattr(ORACLE, "_replay_affine_family", first_fails)
+    found, report = ORACLE.reconstruct_exact_fixed_pattern_witness(
+        fixture, np.asarray([0., 0., 0., 0., 1.]), [True, False], 2, 2.)
+    assert found is None and len(calls) == 2
+    assert "failure" in report["families"][0]
+    assert report["families"][1]["alpha_interval"] is not None
+    assert report["linear_systems"][0]["basis_solve_count"] == 1
+    assert not report["permits_infeasibility_claim"]
+
+
+def test_67_positive_sources_cannot_supply_127_interior_correction_columns():
+    sensitivity = np.column_stack((np.eye(127), np.ones(127)))
+    candidate = [0.0] * 67 + [1.0] * 61
+    bases, _slack = ORACLE.box_aware_correction_bases(
+        sensitivity, candidate, [F(-1)] * 128, [F(1)] * 128, maximum=2)
+    audit = bases[0]["slack_diagnostics"]
+    assert audit["source_variables_with_positive_slack"] == 67
+    assert audit["positive_slack_pool_numerical_rank"] == 67
+    assert audit["required_correction_columns"] == 127
+    assert audit["zero_minimum_slack_expected_by_cardinality"]
+    assert audit["slack_threshold_rank_searches"] == 0
+    assert all(row["minimum_selected_source_slack"] == 0.0 for row in bases)
+    slack_vectors = [tuple(sorted(map(F, row["selected_source_slacks_exact"])))
+                     for row in bases]
+    assert slack_vectors == sorted(slack_vectors, reverse=True)
+
+
+def test_production_solved_basis_identity_includes_canonical_node_lp(monkeypatch):
+    fixture = replace(problem(), X=((F(1), F(-1)), (F(2), F(-2))),
+                      low=(F(-1), F(-1)), high=(F(1), F(1)), epsilon=F(1),
+                      W2=((F(0), F(0)), (F(0), F(0))))
+    lp = ORACLE.ExactCanonicalLP(tuple(str(i) for i in range(9)),
+                                (None,) * 9, (None,) * 9, ())
+    found, report = ORACLE.reconstruct_exact_fixed_pattern_witness(
+        fixture, np.asarray([0., 0., 0., 0., 1.]), [True, False], 2, 2., lp)
+    assert found is not None and report["verified"]
+    system = report["linear_systems"][0]
+    identity = system["solved_basis_identity"]
+    assert identity["canonical_lp_identity_sha256"] == lp.identity()
+    assert not identity["standalone_fixture_without_lp"]
+    assert identity["phase_pattern_identity_sha256"] == ORACLE._sha_json([True, False])
+    assert identity["normalized_exact_matrix_sha256"] == system["column_primitive_matrix_sha256"]
+    assert report["families"][0]["basis_work_shared"]
+    assert report["families"][0]["basis_work_record_id"] == system["basis_work_record_id"]

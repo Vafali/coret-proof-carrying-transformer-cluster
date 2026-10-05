@@ -1275,6 +1275,74 @@ def _solve_exact_correction_rhs(matrix, rhs_columns, timeout_seconds,
     return solutions
 
 
+def _exact_integer_vector(values):
+    """One exact common denominator; no floating point in matrix assembly."""
+    values = tuple(_fr(value) for value in values)
+    denominator = math.lcm(*(value.denominator for value in values))
+    return (tuple(value.numerator * (denominator // value.denominator)
+                  for value in values), denominator)
+
+
+def _build_selected_exact_matrix(difference_matrix, columns, centered_source,
+                                 source_column_cache, integer_rows):
+    """Lazy exact column images shared by bases, never a full source matrix.
+
+    Dot products over common-denominator integer vectors equal the old Fraction
+    dot products exactly, while avoiding millions of intermediate Fractions.
+    Cache only columns actually selected by the bounded basis portfolio.
+    """
+    for column in columns:
+        if column not in source_column_cache:
+            values, denominator = _exact_integer_vector(centered_source(column))
+            source_column_cache[column] = tuple(
+                Fraction(sum(a * b for a, b in zip(row, values)), scale * denominator)
+                for row, scale in integer_rows)
+    return [[source_column_cache[column][i] for column in columns]
+            for i in range(len(difference_matrix))]
+
+
+def _group_correction_bases(bases, required_columns, source_count):
+    """One production solve per authenticated ordered basis, not per record."""
+    groups = {}
+    for basis in bases:
+        columns = tuple(basis["columns"])
+        if (len(columns) != required_columns or len(set(columns)) != len(columns)
+                or any(not 0 <= index < source_count for index in columns)
+                or basis["basis_sha256"] != _sha_json(columns)):
+            raise RuntimeError("correction basis identity/topology differs")
+        previous = groups.get(basis["basis_sha256"])
+        if previous is not None and previous["columns"] != columns:
+            raise RuntimeError("correction basis hash collision")
+        if previous is None:
+            groups[basis["basis_sha256"]] = {**basis, "columns": columns}
+    return list(groups.values())
+
+
+def _cache_solved_basis(cache, identity, solutions):
+    """Bind exact solved data to LP, phase, matrix, basis, and ordered RHS."""
+    key = _sha_json(identity)
+    encoded = [[_fs(value) for value in solution] for solution in solutions]
+    record = {"identity": identity, "solutions": encoded}
+    record["solved_affine_sha256"] = _sha_json(record)
+    if key in cache and cache[key] != record:
+        raise ExactSolveFailure("solved basis cache identity differs")
+    cache[key] = record
+    return key
+
+
+def _read_solved_basis_direction(cache, key, identity, ordinal):
+    record = cache[key]
+    payload = {name: value for name, value in record.items()
+               if name != "solved_affine_sha256"}
+    if (_sha_json(identity) != key or record["identity"] != identity
+            or _sha_json(payload) != record["solved_affine_sha256"]):
+        raise ExactSolveFailure("solved affine cache integrity differs")
+    solutions = record["solutions"][2 * ordinal:2 * ordinal + 2]
+    if len(solutions) != 2:
+        raise ExactSolveFailure("cached RHS direction topology differs")
+    return [[_fr(value) for value in solution] for solution in solutions]
+
+
 def _oriented_ray_rows(lp: ExactCanonicalLP, raw_ray, convention: int,
                        threshold: float):
     result = []
@@ -2807,6 +2875,8 @@ def box_aware_correction_bases(sensitivity, candidate, low, high, maximum=8):
             value: sum(s >= Fraction(value) for s in exact_slack)
             for value in ("1e-12", "1e-9", "1e-6", "1e-3")},
         "positive_slack_pool_numerical_rank": positive_rank,
+        "required_correction_columns": rows,
+        "zero_minimum_slack_expected_by_cardinality": len(positive) < rows,
         "positive_slack_full_rank_candidate_found": positive_basis is not None,
         "positive_slack_basis_classification": (
             "POSITIVE_SLACK_FULL_RANK_CANDIDATE_FOUND" if positive_basis is not None
@@ -2841,7 +2911,10 @@ def box_aware_correction_bases(sensitivity, candidate, low, high, maximum=8):
             break
     if not bases:
         raise ExactSolveFailure("fixed-pattern cancellation correction rank deficient")
-    bases.sort(key=lambda row: (-row["minimum_selected_source_slack"], row["columns"]))
+    # Lexicographically maximize the sorted exact slacks, including when the
+    # candidate has too few interior sources and the minimum must be zero.
+    bases.sort(key=lambda row: (tuple(-_fr(value) for value in sorted(
+        row["selected_source_slacks_exact"], key=_fr)), row["columns"]))
     audit["maximum_minimum_slack_among_deterministic_full_rank_candidates"] = max(
         row["minimum_selected_source_slack"] for row in bases)
     for basis in bases:
@@ -2852,6 +2925,7 @@ def box_aware_correction_bases(sensitivity, candidate, low, high, maximum=8):
 def _replay_affine_family(problem, pattern, source_constant, source_slope,
                           c_constant, c_slope, t_constant, t_slope, t_upper,
                           node_lp=None):
+    interval_started = time.perf_counter()
     conditions = [(f"source[{i}]", a, b, lo, hi) for i, (a, b, lo, hi)
                   in enumerate(zip(source_constant, source_slope,
                                    problem.low, problem.high))]
@@ -2895,9 +2969,12 @@ def _replay_affine_family(problem, pattern, source_constant, source_slope,
     interval = exact_affine_parameter_interval(conditions)
     evidence = {**interval, "polynomial_constructed": False,
                 "polynomial_degree": None, "roots_total": 0,
-                "roots_inside_interval": 0, "exact_replay_result": None}
+                "roots_inside_interval": 0, "exact_replay_result": None,
+                "interval_seconds": time.perf_counter() - interval_started,
+                "polynomial_seconds": 0.0, "replay_seconds": 0.0}
     if interval["alpha_interval_empty"]:
         return None, evidence
+    polynomial_started = time.perf_counter()
     polynomial = (
         problem.d * t_slope ** 2 - _dot(c_slope, c_slope),
         2 * (problem.d * t_constant * t_slope - _dot(c_constant, c_slope)),
@@ -2942,12 +3019,14 @@ def _replay_affine_family(problem, pattern, source_constant, source_slope,
                  min(Fraction(0), _fr(hi)) if hi is not None else Fraction(0))
         roots = [("rational", value, None)]
     evidence["roots_total"] = roots_total or len(roots)
+    evidence["polynomial_seconds"] = time.perf_counter() - polynomial_started
     failures = []
     for kind, root, isolation in roots:
         if not _root_inside_parameter_interval(kind, root, isolation,
                                                polynomial, interval):
             continue
         evidence["roots_inside_interval"] += 1
+        replay_started = time.perf_counter()
         try:
             if kind == "rational":
                 witness = {"schema": WITNESS_SCHEMA,
@@ -2974,6 +3053,8 @@ def _replay_affine_family(problem, pattern, source_constant, source_slope,
             raise
         except RuntimeError as error:
             failures.append(f"{type(error).__name__}: {error}")
+        finally:
+            evidence["replay_seconds"] += time.perf_counter() - replay_started
     evidence["exact_replay_result"] = {"verified": False, "failures": failures}
     return None, evidence
 
@@ -3052,10 +3133,15 @@ def reconstruct_exact_fixed_pattern_witness(
             centered_cache[index] = [value - mean for value in row]
         return centered_cache[index]
 
-    # Each basis supplies t and, if available, a nonbasic source direction.
-    # Fixed sources remain the exact dyadic LP proposal. All work is bounded by
-    # the existing global deadline and at most eight 30-second family budgets.
-    exact_matrix_cache, factor_cache = {}, {}
+    # Setup and elimination are basis operations. Direction checks consume
+    # solved affine data only; their deadlines cannot trigger another solve.
+    # The portfolio/global oracle limits remain unchanged.
+    basis_groups = _group_correction_bases(bases, d - 1, source_count)
+    exact_matrix_cache, factor_cache, solved_basis_cache = {}, {}, {}
+    source_column_cache = {}
+    integer_rows = [_exact_integer_vector(row) for row in difference_matrix]
+    phase_identity = _sha_json(list(pattern))
+    lp_identity = node_lp.identity() if node_lp is not None else None
     linear_systems = []
     slack_diagnostics = bases[0].get("slack_diagnostics", {})
 
@@ -3064,7 +3150,7 @@ def reconstruct_exact_fixed_pattern_witness(
         print(json.dumps({"stage": "box_aware_reconstruction_family",
                           "family": len(families) - 1, **row}), flush=True)
 
-    for basis in bases:
+    for basis in basis_groups:
         if len(families) >= 8 or time.perf_counter() >= deadline:
             break
         columns = basis["columns"]
@@ -3082,7 +3168,9 @@ def reconstruct_exact_fixed_pattern_witness(
             row.update(
                 free_parameter="t" if free_source is None else
                 f"source_delta[{free_source}]",
-                per_family_time_cap_seconds=30.0,
+                basis_setup_time_cap_seconds=30.0,
+                basis_solve_time_cap_seconds=30.0,
+                per_direction_time_cap_seconds=15.0,
                 alpha_interval=None, polynomial_degree=None,
                 roots_total=0, roots_inside_interval=0,
                 exact_replay_result=None, verified=False)
@@ -3105,33 +3193,46 @@ def reconstruct_exact_fixed_pattern_witness(
                 pending.append((free_source, row))
         if not pending:
             continue
-        shared_deadline = min(deadline, basis_started + 30.0)
-        if time.perf_counter() >= shared_deadline:
-            for _source, row in pending:
-                row.update(failure="reconstruction family deadline",
-                           runtime_seconds=time.perf_counter() - basis_started)
-                emit(row)
-            continue
-        restore_alarm = _start_reconstruction_alarm(shared_deadline - time.perf_counter())
         profile = {"basis_sha256": basis["basis_sha256"],
                    "selected_source_slacks": basis.get("selected_source_slacks"),
                    "selected_source_slacks_exact": basis.get("selected_source_slacks_exact"),
                    "minimum_selected_source_slack": basis["minimum_selected_source_slack"],
-                   "shared_free_directions": [row["free_parameter"] for _, row in pending]}
+                   "shared_free_directions": [row["free_parameter"] for _, row in pending],
+                   "matrix_assembly_count": 0, "integerization_count": 0,
+                   "elimination_count": 0, "basis_solve_count": 0,
+                   "basis_setup_time_cap_seconds": 30.0,
+                   "basis_solve_time_cap_seconds": 30.0,
+                   "per_direction_time_cap_seconds": 15.0}
+        profile["basis_work_record_id"] = _sha_json({
+            "canonical_lp_identity_sha256": lp_identity,
+            "phase_pattern_identity_sha256": phase_identity,
+            "basis_sha256": basis["basis_sha256"],
+            "ordered_directions": profile["shared_free_directions"]})
+        for _source, row in pending:
+            row.update(basis_work_record_id=profile["basis_work_record_id"],
+                       basis_work_shared=True)
         linear_systems.append(profile)
         recorded = set()
+        restore_alarm = lambda: None
+        stage = "basis_setup"
         try:
             def remaining():
-                value = shared_deadline - time.perf_counter()
+                value = stage_deadline - time.perf_counter()
                 if value <= 0:
-                    raise ExactSolveFailure("reconstruction family deadline")
+                    raise ExactSolveFailure(f"reconstruction {stage} deadline")
                 return value
+            stage_deadline = min(deadline, basis_started + 30.0)
+            restore_alarm = _start_reconstruction_alarm(remaining())
             assembly_started = time.perf_counter()
-            if columns not in exact_matrix_cache:
-                exact_matrix_cache[columns] = [
-                    [_dot(m, centered_source(column)) for column in columns]
-                    for m in difference_matrix]
-            exact_matrix = exact_matrix_cache[columns]
+            basis_sha = basis["basis_sha256"]
+            if basis_sha not in exact_matrix_cache:
+                exact_matrix_cache[basis_sha] = _build_selected_exact_matrix(
+                    difference_matrix, columns, centered_source,
+                    source_column_cache, integer_rows)
+                profile["matrix_assembly_count"] += 1
+            exact_matrix = exact_matrix_cache[basis_sha]
+            profile["rational_matrix_assembly_seconds"] = time.perf_counter() - assembly_started
+            rhs_started = time.perf_counter()
             rhs_columns, direction_data = [], []
             for free_source, row in pending:
                 t_constant = Fraction(0) if free_source is None else t_candidate
@@ -3143,55 +3244,119 @@ def reconstruct_exact_fixed_pattern_witness(
                 rhs_columns.append([-v * t_slope - _dot(m, free_c)
                                     for m, v in zip(difference_matrix, difference_t)])
                 direction_data.append((t_constant, t_slope, free_c))
-            profile["rational_assembly_seconds"] = time.perf_counter() - assembly_started
+            profile["rhs_assembly_seconds"] = time.perf_counter() - rhs_started
+            profile["rational_assembly_seconds"] = (
+                profile["rational_matrix_assembly_seconds"] + profile["rhs_assembly_seconds"])
             condition = float(np.linalg.cond(sensitivity[:, columns]))
             profile["numerical_condition_estimate"] = condition if math.isfinite(condition) else None
             profile["numerical_condition_estimate_nonfinite"] = not math.isfinite(condition)
+            profile["basis_setup_seconds"] = time.perf_counter() - basis_started
+            profile["lazy_source_columns_cached"] = len(source_column_cache)
+            remaining()
+            print(json.dumps({"stage": "reconstruction_basis_setup_complete",
+                              **profile}), flush=True)
+            restore_alarm()
+            restore_alarm = lambda: None
+            stage = "basis_solve"
+            stage_deadline = min(deadline, time.perf_counter() + 30.0)
+            restore_alarm = _start_reconstruction_alarm(remaining())
+            profile["integerization_count"] += 1
+            profile["basis_solve_count"] += 1
             solved = _solve_exact_correction_rhs(
                 exact_matrix, rhs_columns, remaining(), factor_cache, profile)
+            remaining()
+            profile.update(
+                elimination_seconds=profile["bareiss_elimination_seconds"],
+                all_rhs_backsub_seconds=profile["back_substitution_seconds"])
+            identity = {
+                "canonical_lp_identity_sha256": lp_identity,
+                "standalone_fixture_without_lp": node_lp is None,
+                "phase_pattern_identity_sha256": phase_identity,
+                "basis_sha256": basis_sha,
+                "rational_matrix_sha256": profile["rational_matrix_sha256"],
+                "normalized_exact_matrix_sha256": profile["column_primitive_matrix_sha256"],
+                "ordered_rhs_direction_identities": [
+                    {"direction": row["free_parameter"], "roles": ["constant", "slope"]}
+                    for _, row in pending],
+                "ordered_rational_rhs_sha256": _integer_rows_sha256([
+                    [part for value in rhs for part in (value.numerator, value.denominator)]
+                    for rhs in rhs_columns]),
+            }
+            solved_key = _cache_solved_basis(solved_basis_cache, identity, solved)
+            profile.update(solved_basis_cache_key=solved_key,
+                           solved_basis_identity=identity,
+                           solved_affine_sha256=solved_basis_cache[solved_key]["solved_affine_sha256"])
+            print(json.dumps({"stage": "reconstruction_basis_affine_cache_ready",
+                              **profile}), flush=True)
+            restore_alarm()
+            restore_alarm = lambda: None
             for ordinal, ((free_source, row), (t_constant, t_slope, free_c)) in enumerate(
                     zip(pending, direction_data)):
-                remaining()
-                constant_delta, slope_delta = solved[2 * ordinal:2 * ordinal + 2]
-                source_constant = list(xi_candidate)
-                source_slope = [Fraction(0)] * source_count
-                c_constant, c_slope = list(c_candidate), list(free_c)
-                if free_source is not None:
-                    source_slope[free_source] = Fraction(1)
-                for j, column in enumerate(columns):
-                    source_constant[column] += constant_delta[j]
-                    source_slope[column] = slope_delta[j]
-                    for feature, value in enumerate(centered_source(column)):
-                        c_constant[feature] += value * constant_delta[j]
-                        c_slope[feature] += value * slope_delta[j]
-                if any(_dot(m, c_constant) + v * t_constant or
-                       _dot(m, c_slope) + v * t_slope
-                       for m, v in zip(difference_matrix, difference_t)):
-                    raise ExactSolveFailure("affine family cancellation replay failed")
-                remaining()
-                found, evidence = _replay_affine_family(
-                    problem, pattern, source_constant, source_slope,
-                    c_constant, c_slope, t_constant, t_slope, t_upper, node_lp)
-                row.update(evidence, linear_solve=profile)
-                row["alpha_interval"] = {
-                    key: evidence[key] for key in (
-                        "alpha_interval_lower", "alpha_interval_upper",
-                        "alpha_interval_empty", "active_constraint_at_lower",
-                        "active_constraint_at_upper")}
-                row.update(verified=found is not None,
-                           runtime_seconds=time.perf_counter() - basis_started)
-                emit(row)
-                recorded.add(id(row))
-                if found is not None:
-                    return found, {
-                        "attempted": True, "verified": True,
-                        "method": "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
-                        "families": families, "linear_systems": linear_systems,
-                        "basis_slack_diagnostics": slack_diagnostics,
-                        "selected_correction_variables": d - 1,
-                        "runtime_seconds": time.perf_counter() - started}
+                direction_started = time.perf_counter()
+                stage = "direction_replay"
+                stage_deadline = min(deadline, direction_started + 15.0)
+                # Each direction references one shared system record. Counters
+                # here are attribution only, never separate solver invocations.
+                row.update(basis_solve_id=solved_key, solved_affine_data_reused=True,
+                           elimination_reused=ordinal > 0 or profile["elimination_reused"],
+                           elimination_count=profile["elimination_count"] if ordinal == 0 else 0,
+                           linear_solve=profile)
+                try:
+                    restore_alarm = _start_reconstruction_alarm(remaining())
+                    constant_delta, slope_delta = _read_solved_basis_direction(
+                        solved_basis_cache, solved_key, identity, ordinal)
+                    source_constant = list(xi_candidate)
+                    source_slope = [Fraction(0)] * source_count
+                    c_constant, c_slope = list(c_candidate), list(free_c)
+                    if free_source is not None:
+                        source_slope[free_source] = Fraction(1)
+                    for j, column in enumerate(columns):
+                        source_constant[column] += constant_delta[j]
+                        source_slope[column] = slope_delta[j]
+                        for feature, value in enumerate(centered_source(column)):
+                            c_constant[feature] += value * constant_delta[j]
+                            c_slope[feature] += value * slope_delta[j]
+                    if any(_dot(m, c_constant) + v * t_constant or
+                           _dot(m, c_slope) + v * t_slope
+                           for m, v in zip(difference_matrix, difference_t)):
+                        raise ExactSolveFailure("affine family cancellation replay failed")
+                    remaining()
+                    found, evidence = _replay_affine_family(
+                        problem, pattern, source_constant, source_slope,
+                        c_constant, c_slope, t_constant, t_slope, t_upper, node_lp)
+                    remaining()
+                    row.update(evidence)
+                    row["alpha_interval"] = {
+                        key: evidence[key] for key in (
+                            "alpha_interval_lower", "alpha_interval_upper",
+                            "alpha_interval_empty", "active_constraint_at_lower",
+                            "active_constraint_at_upper")}
+                    row.update(verified=found is not None,
+                               direction_seconds=time.perf_counter() - direction_started,
+                               runtime_seconds=time.perf_counter() - basis_started)
+                    emit(row)
+                    recorded.add(id(row))
+                    if found is not None:
+                        return found, {
+                            "attempted": True, "verified": True,
+                            "method": "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
+                            "families": families, "linear_systems": linear_systems,
+                            "basis_slack_diagnostics": slack_diagnostics,
+                            "selected_correction_variables": d - 1,
+                            "runtime_seconds": time.perf_counter() - started}
+                except (RuntimeError, ExactSolveFailure, OverflowError) as error:
+                    row.update(failure=f"{type(error).__name__}: {error}",
+                               failure_stage=stage,
+                               direction_seconds=time.perf_counter() - direction_started,
+                               runtime_seconds=time.perf_counter() - basis_started)
+                    emit(row)
+                    recorded.add(id(row))
+                finally:
+                    restore_alarm()
+                    restore_alarm = lambda: None
         except (RuntimeError, ExactSolveFailure, OverflowError) as error:
             profile["failure"] = f"{type(error).__name__}: {error}"
+            profile["failure_stage"] = stage
             for _source, row in pending:
                 if id(row) not in recorded:
                     row.update(failure=profile["failure"], linear_solve=profile,
@@ -3205,7 +3370,9 @@ def reconstruct_exact_fixed_pattern_witness(
         "families": families, "linear_systems": linear_systems,
         "basis_slack_diagnostics": slack_diagnostics,
         "permits_infeasibility_claim": False,
-        "portfolio_limit": 8, "per_family_time_cap_seconds": 30.0,
+        "portfolio_limit": 8, "basis_setup_time_cap_seconds": 30.0,
+        "basis_solve_time_cap_seconds": 30.0,
+        "per_direction_time_cap_seconds": 15.0,
         "runtime_seconds": time.perf_counter() - started}
 
 
