@@ -2313,16 +2313,29 @@ def _check_proposal_highs_status(api, status, highs, arrays, diagnostic, log_pat
 
 def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
                   scaling_path: Path | None = None, *, objective=None,
-                  time_limit_seconds=None, proposal_only=False):
+                  time_limit_seconds=None, proposal_only=False,
+                  proposal_method="PRIMARY"):
     import highspy
+    if proposal_method not in ("PRIMARY", "IPM_FEASIBILITY", "SIMPLEX_FEASIBILITY"):
+        raise FixedPhaseInvariantError("unknown fixed-phase proposal method")
+    fallback = proposal_method != "PRIMARY"
+    if fallback and not proposal_only:
+        raise FixedPhaseInvariantError("feasibility fallback has no proof authority")
+    if fallback:
+        if objective is not None and any(_fr(v) for v in objective):
+            raise FixedPhaseInvariantError("feasibility fallback requires zero objective")
+        if time_limit_seconds is not None and (
+                not math.isfinite(time_limit_seconds) or time_limit_seconds <= 0):
+            raise FixedPhaseInvariantError("feasibility fallback time limit differs")
+        time_limit_seconds = min(30., 30. if time_limit_seconds is None else time_limit_seconds)
     highs = highspy.Highs()
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
     options = {"output_flag": log_path is not None,
                "log_to_console": False,
-               "presolve": "off", "threads": 1,
+               "presolve": "on" if fallback else "off", "threads": 1,
                "parallel": "off", "random_seed": 0,
-               "solver": "simplex"}
+               "solver": "ipm" if proposal_method == "IPM_FEASIBILITY" else "simplex"}
     if time_limit_seconds is not None:
         if not math.isfinite(time_limit_seconds) or time_limit_seconds <= 0:
             raise RuntimeError("HiGHS proposal time limit differs")
@@ -2448,6 +2461,7 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
         "threshold_option_statuses": threshold_statuses,
         "api_statuses": [],
         "proposal_only": proposal_only,
+        "solver_method": proposal_method,
         "proposal_objective_audit": objective_audit,
         "highs_log_path": None if log_path is None else str(log_path),
     })
@@ -2481,10 +2495,11 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
     status_name = highs.modelStatusToString(status)
     diagnostic["model_status_at_run"] = status_name
     check_status("run", run_status)
-    # An infeasible fixed-phase proposal may supply an UNTRUSTED row ray.
+    # Only the PRIMARY infeasible fixed-phase proposal may supply an UNTRUSTED row ray.
+    # Feasibility fallback statuses/rays are deliberately given zero proof authority.
     # Only exact Farkas replay, scoped to that LP, can authorize its use.
     ray_status, ray_exists = ((highspy.HighsStatus.kOk, False)
-        if proposal_only and status != highspy.HighsModelStatus.kInfeasible
+        if proposal_only and (fallback or status != highspy.HighsModelStatus.kInfeasible)
         else highs.getDualRayExist())
     raw_ray = None
     ray_call_status = ray_status
@@ -2497,11 +2512,15 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
                                                        scaling.scales))
     solution = highs.getSolution()
     proposal_failure_reason = None
+    primal_present = primal_finite = primal_dimensions_correct = False
     if proposal_only:
         # Even value_valid/feasibility/optimality are untrusted solver claims.
         # Any finite, correctly shaped iterate can be submitted to exact repair.
         values = None if solution is None else getattr(solution, "col_value", None)
         columns = None if values is None else np.asarray(values, dtype=np.float64)
+        primal_present = columns is not None
+        primal_finite = bool(primal_present and np.isfinite(columns).all())
+        primal_dimensions_correct = bool(primal_present and columns.shape == (lp.column_count,))
         if columns is None:
             proposal_failure_reason = "NO_PRIMAL_ARRAY"
         elif columns.shape != (lp.column_count,):
@@ -2533,6 +2552,10 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
         "proposal_usable_primal": bool(proposal_available),
         "proposal_warning": proposal_warning,
         "proposal_failure_reason": proposal_failure_reason,
+        "proposal_primal_present": primal_present,
+        "proposal_primal_finite": primal_finite,
+        "proposal_primal_dimensions_correct": primal_dimensions_correct,
+        "solver_method": proposal_method,
         "exact_replay_required": proposal_only,
         "runtime_seconds": runtime, "highs_runtime_seconds": highs.getRunTime(),
         "highspy_version": importlib.metadata.version("highspy"),
@@ -2558,6 +2581,10 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
             "proposal_usable_primal": bool(proposal_available),
             "proposal_warning": proposal_warning,
             "proposal_failure_reason": proposal_failure_reason,
+            "proposal_primal_present": primal_present,
+            "proposal_primal_finite": primal_finite,
+            "proposal_primal_dimensions_correct": primal_dimensions_correct,
+            "solver_method": proposal_method,
             "runtime_seconds": runtime,
             "exact_replay_required": True,
             "authorizes_witness_or_exclusion": False,
@@ -3903,32 +3930,48 @@ def screen_fixed_phase_anchor_proposal(lp, proposal, tolerance=1e-7):
     values = proposal.get("column_values")
     audit = {"proposal_model_status": proposal["model_status"],
         "proposal_primal_present": values is not None,
+        "proposal_primal_finite": False,
+        "proposal_primal_dimensions_correct": False,
         "proposal_primal_numerically_within_bounds": None,
         "proposal_primal_numerically_within_rows": None,
+        "max_bound_violation": None, "max_row_violation": None,
+        "max_normalized_row_violation": None,
+        "max_row_violation_nonfinite": False,
         "anchor_reconstruction_attempted": False,
         "anchor_reconstruction_skipped_reason": None,
         "fixed_phase_farkas_attempted": False,
         "fixed_phase_farkas_verified": False,
         "first_exact_replay_failure": None,
         "proposal_tolerance": tolerance}
-    if proposal["model_status"] == "Infeasible":
-        audit["anchor_reconstruction_skipped_reason"] = "REPORTED_INFEASIBLE_FIXED_PHASE"
-        return audit
     point = None if values is None else np.asarray(values, dtype=np.float64)
+    audit["proposal_primal_finite"] = bool(point is not None and np.isfinite(point).all())
+    audit["proposal_primal_dimensions_correct"] = bool(point is not None and point.shape == (lp.column_count,))
     if (point is None or point.shape != (lp.column_count,)
             or not np.isfinite(point).all()):
-        audit["anchor_reconstruction_skipped_reason"] = "NO_USABLE_PRIMAL_PROPOSAL"
+        # solve_highspy deliberately withholds invalid arrays from consumers,
+        # but retains their presence/dimension/finite diagnostics for the audit.
+        if point is None:
+            for field in ("proposal_primal_present", "proposal_primal_finite",
+                          "proposal_primal_dimensions_correct"):
+                audit[field] = proposal.get(field, audit[field])
+        audit["anchor_reconstruction_skipped_reason"] = (
+            "REPORTED_INFEASIBLE_FIXED_PHASE" if proposal["model_status"] == "Infeasible"
+            else "NO_USABLE_PRIMAL_PROPOSAL")
         return audit
+    audit["max_bound_violation"] = 0.
+    audit["max_row_violation"] = 0.
+    audit["max_normalized_row_violation"] = 0.
     audit["proposal_primal_numerically_within_bounds"] = True
     for i, (value, lo, hi) in enumerate(zip(point, lp.column_lower, lp.column_upper)):
         lo, hi = None if lo is None else float(lo), None if hi is None else float(hi)
         slack = tolerance * max(1., abs(value),
             abs(lo) if lo is not None else 0., abs(hi) if hi is not None else 0.)
+        violation = max(0., 0. if lo is None else lo - value, 0. if hi is None else value - hi)
+        audit["max_bound_violation"] = max(audit["max_bound_violation"], float(violation))
         if lo is not None and value < lo - slack or hi is not None and value > hi + slack:
             audit["proposal_primal_numerically_within_bounds"] = False
-            audit["first_numerical_bound_failure"] = {"column": i, "value": float(value),
-                "lower": lo, "upper": hi, "tolerance": float(slack)}
-            break
+            audit.setdefault("first_numerical_bound_failure", {"column": i, "value": float(value),
+                "lower": lo, "upper": hi, "tolerance": float(slack)})
     audit["proposal_primal_numerically_within_rows"] = True
     for i, row in enumerate(lp.rows):
         scale = max([abs(v) for v in row.coefficients] + [
@@ -3941,14 +3984,24 @@ def screen_fixed_phase_anchor_proposal(lp, proposal, tolerance=1e-7):
         hi = None if row.upper is None else float(row.upper / scale)
         slack = tolerance * max(1., abs(value),
             abs(lo) if lo is not None else 0., abs(hi) if hi is not None else 0.)
+        violation = max(0., 0. if lo is None else lo - value, 0. if hi is None else value - hi)
+        original_violation = violation * float(scale)
+        if not math.isfinite(value) or not math.isfinite(original_violation):
+            audit["max_row_violation_nonfinite"] = True
+        else:
+            audit["max_row_violation"] = max(audit["max_row_violation"], original_violation)
+            audit["max_normalized_row_violation"] = max(audit["max_normalized_row_violation"], violation)
         if (not math.isfinite(value) or lo is not None and value < lo - slack
                 or hi is not None and value > hi + slack):
             audit["proposal_primal_numerically_within_rows"] = False
-            audit["first_numerical_row_failure"] = {"row": i, "name": row.name,
+            audit.setdefault("first_numerical_row_failure", {"row": i, "name": row.name,
                 "normalized_activity": value if math.isfinite(value) else None,
-                "lower": lo, "upper": hi, "tolerance": slack if math.isfinite(slack) else None}
-            break
-    if (not audit["proposal_primal_numerically_within_bounds"]
+                "lower": lo, "upper": hi, "tolerance": slack if math.isfinite(slack) else None})
+    if audit["max_row_violation_nonfinite"]:
+        audit["max_row_violation"] = None
+    if proposal["model_status"] == "Infeasible":
+        audit["anchor_reconstruction_skipped_reason"] = "REPORTED_INFEASIBLE_FIXED_PHASE"
+    elif (not audit["proposal_primal_numerically_within_bounds"]
             or not audit["proposal_primal_numerically_within_rows"]):
         audit["anchor_reconstruction_skipped_reason"] = "UNUSABLE_PROPOSAL"
     return audit
@@ -3986,7 +4039,8 @@ def attempt_fixed_phase_farkas(lp, proposal, timeout_seconds):
     return audit
 
 
-def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seconds):
+def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seconds,
+                                     *, feasibility_propose=None):
     """Witness-only search: no finite failed portfolio can close a phase."""
     started = time.perf_counter()
     deadline = started + timeout_seconds
@@ -3997,6 +4051,9 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
               "exact_anchor_minimum_slack": None, "equality_nullity": None,
               "second_anchor_replay_verified": False, "attempted": True, "verified": False,
               "permits_infeasibility_claim": False, "directions": [], "anchors": [],
+              "proposal_attempts": [], "fallback_attempts": 0,
+              "fallback_usable_primals": 0, "exact_anchor_reconstruction_attempts": 0,
+              "exact_anchors_verified": 0,
               "proposal_seconds": 0.0, "direction_seconds": 0.0,
               "search_status": "INCONCLUSIVE"}
     def remaining():
@@ -4004,44 +4061,124 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
         if value <= 0:
             raise ExactSolveFailure("fixed-phase witness search timeout")
         return value
+    if feasibility_propose is None:
+        def feasibility_propose(model, seconds, method, role):
+            return solve_highspy(model, proposal_only=True, proposal_method=method,
+                                 time_limit_seconds=min(30., seconds))
+    workspace = None
+    def obtain_anchor(objective, role):
+        nonlocal workspace
+        for method in ("PRIMARY", "IPM_FEASIBILITY", "SIMPLEX_FEASIBILITY"):
+            proposal_started = time.perf_counter()
+            if method == "PRIMARY":
+                candidate = propose(lp, objective, remaining(), role)
+            else:
+                report["fallback_attempts"] += 1
+                candidate = feasibility_propose(lp, min(30., remaining()), method, role)
+            runtime = time.perf_counter() - proposal_started
+            report["proposal_seconds"] += runtime
+            if candidate.get("solver_method", method) != method:
+                raise FixedPhaseInvariantError("fixed-phase proposal method identity differs")
+            diagnostic = candidate.get("construction_diagnostic")
+            if diagnostic is not None and diagnostic.get("canonical_lp_sha256") != lp.identity():
+                raise FixedPhaseInvariantError("fixed-phase proposal canonical LP identity differs")
+            admission = screen_fixed_phase_anchor_proposal(lp, candidate)
+            if role == "anchor" and method == "PRIMARY":
+                report["fixed_phase_linear_lp_status"] = candidate["model_status"]
+                report.update(admission)
+            telemetry = {"proposal_role": role, "solver_method": method,
+                "canonical_lp_sha256": lp.identity(),
+                "presolve": candidate.get("options", {}).get("presolve", "off" if method == "PRIMARY" else "on"),
+                "numerical_run_status": candidate.get("run_status"),
+                "numerical_model_status": candidate["model_status"],
+                "proposal_warning": candidate.get("proposal_warning"),
+                "proposal_failure_reason": candidate.get("proposal_failure_reason"),
+                "runtime_seconds": runtime,
+                "solver_runtime_seconds": candidate.get("runtime_seconds"),
+                "primal_present": admission["proposal_primal_present"],
+                "finite": admission["proposal_primal_finite"],
+                "dimensions_correct": admission["proposal_primal_dimensions_correct"],
+                "within_original_bounds": admission["proposal_primal_numerically_within_bounds"],
+                "within_original_rows": admission["proposal_primal_numerically_within_rows"],
+                "max_bound_violation": admission["max_bound_violation"],
+                "max_row_violation": admission["max_row_violation"],
+                "max_normalized_row_violation": admission["max_normalized_row_violation"],
+                "max_row_violation_nonfinite": admission["max_row_violation_nonfinite"],
+                "proposal_tolerance": admission["proposal_tolerance"],
+                "admitted_to_exact_reconstruction": False,
+                "proposal_audit_path": candidate.get("proposal_audit_path")}
+            report["proposal_attempts"].append(telemetry)
+            anchor_audit = {"role": "q0" if role == "anchor" else role,
+                "solver_method": method, "proposal_warning": candidate.get("proposal_warning"),
+                "proposal_failure_reason": candidate.get("proposal_failure_reason"), **admission}
+            report["anchors"].append(anchor_audit)
+            try:
+                if candidate["model_status"] == "Infeasible" and method == "PRIMARY":
+                    report["fixed_phase_farkas_attempted"] = True
+                    try:
+                        certificate_audit = attempt_fixed_phase_farkas(lp, candidate, min(60., remaining()))
+                    except ExactSolveFailure as error:
+                        anchor_audit.update(fixed_phase_farkas_attempted=True,
+                                            fixed_phase_farkas_verified=False,
+                                            failure=str(error))
+                        report["failure"] = f"{type(error).__name__}: {error}"
+                        return None
+                    anchor_audit.update(certificate_audit)
+                    if role == "anchor":
+                        report.update(certificate_audit)
+                        if report["fixed_phase_farkas_verified"]:
+                            report["search_status"] = "FIXED_PHASE_LINEARLY_INFEASIBLE"
+                    elif certificate_audit["fixed_phase_farkas_verified"]:
+                        raise FixedPhaseInvariantError("fixed-phase Farkas contradicts authenticated anchor")
+                    return None
+                if admission["anchor_reconstruction_skipped_reason"] is not None:
+                    anchor_audit.update(replay_verified=False, heuristic_failure=True)
+                    if role == "anchor":
+                        report["failure"] = admission["anchor_reconstruction_skipped_reason"]
+                    continue
+                if method != "PRIMARY":
+                    report["fallback_usable_primals"] += 1
+                telemetry["admitted_to_exact_reconstruction"] = True
+                anchor_audit["anchor_reconstruction_attempted"] = True
+                report["exact_anchor_reconstruction_attempts"] += 1
+                if role == "anchor":
+                    report["anchor_reconstruction_attempted"] = True
+                if workspace is None:
+                    workspace_started = time.perf_counter()
+                    workspace = FixedPhaseAnchorWorkspace(problem, pattern, lp)
+                    report["workspace_setup_seconds"] = time.perf_counter() - workspace_started
+                point, profile = workspace.reconstruct_anchor(candidate["column_values"], min(60., remaining()))
+                if profile.get("exact_anchor_replay_verified") is not True:
+                    raise FixedPhaseInvariantError("anchor returned without complete exact replay")
+                anchor_audit.update(profile)
+                report["exact_anchors_verified"] += 1
+                if role == "anchor":
+                    report.pop("failure", None)
+                    report["anchor_reconstruction_skipped_reason"] = None
+                    report["authenticated_anchor_solver_method"] = method
+                print(json.dumps({"stage": "exact_fixed_phase_anchor_authenticated",
+                                  "proposal_role": role, "solver_method": method, **profile}), flush=True)
+                return point, profile
+            except ExactSolveFailure as error:
+                anchor_audit.update(heuristic_failure=True, failure=str(error),
+                                    **getattr(error, "anchor_diagnostic", {}))
+                if report["first_exact_replay_failure"] is None:
+                    report["first_exact_replay_failure"] = anchor_audit.get("first_exact_replay_failure")
+                if role == "anchor":
+                    report["failure"] = f"{type(error).__name__}: {error}"
+            finally:
+                print(json.dumps({"stage": "fixed_phase_numerical_proposal_attempt", **telemetry}), flush=True)
+        return None
     restore_alarm = _start_reconstruction_alarm(max(1e-6, timeout_seconds))
     try:
-        proposal_started = time.perf_counter()
-        first = propose(lp, [Fraction(0)] * lp.column_count, remaining(), "anchor")
-        report["proposal_seconds"] += time.perf_counter() - proposal_started
-        report["fixed_phase_linear_lp_status"] = first["model_status"]
-        admission = screen_fixed_phase_anchor_proposal(lp, first)
-        report.update(admission)
-        if first["model_status"] == "Infeasible":
-            report["fixed_phase_farkas_attempted"] = True
-            report.update(attempt_fixed_phase_farkas(lp, first, min(60., remaining())))
-            if report["fixed_phase_farkas_verified"]:
-                report["search_status"] = "FIXED_PHASE_LINEARLY_INFEASIBLE"
-            report["anchors"].append({"role": "q0", **admission,
-                "fixed_phase_farkas_attempted": True,
-                "fixed_phase_farkas_verified": report["fixed_phase_farkas_verified"]})
+        first = obtain_anchor([Fraction(0)] * lp.column_count, "anchor")
+        if first is None:
             return None, report
-        if admission["anchor_reconstruction_skipped_reason"] is not None:
-            report["failure"] = admission["anchor_reconstruction_skipped_reason"]
-            report["anchors"].append({"role": "q0", "replay_verified": False,
-                "heuristic_failure": True, "proposal_status": first["model_status"],
-                "proposal_warning": first.get("proposal_warning"),
-                "proposal_failure_reason": first.get("proposal_failure_reason"),
-                "proposal_audit_path": first.get("proposal_audit_path"), **admission})
-            return None, report
-        report["anchor_reconstruction_attempted"] = True
-        workspace_started = time.perf_counter()
-        workspace = FixedPhaseAnchorWorkspace(problem, pattern, lp)
-        report["workspace_setup_seconds"] = time.perf_counter() - workspace_started
-        anchor, anchor_profile = workspace.reconstruct_anchor(first["column_values"], min(60., remaining()))
+        anchor, anchor_profile = first
         report.update(exact_anchor_replay_verified=True,
                       exact_anchor_minimum_slack=anchor_profile["exact_anchor_minimum_slack"],
                       equality_nullity=workspace.equality_nullity,
                       equality_nullity_justification=workspace.nullity_reason)
-        report["anchors"].append({"role": "q0", **admission,
-            "anchor_reconstruction_attempted": True, **anchor_profile})
-        print(json.dumps({"stage": "exact_fixed_phase_anchor_authenticated",
-                          **anchor_profile}), flush=True)
         # First try alpha=0 itself. A verified anchor on Phi=0 needs no search.
         found, evidence = evaluate_fixed_phase_direction(problem, lp, pattern, anchor,
                                                          [Fraction(0)] * len(anchor))
@@ -4057,30 +4194,10 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
         for sense, multiplier in (("MAXIMIZE_PHI_GRADIENT", -1), ("MINIMIZE_PHI_GRADIENT", 1)):
             direction_started = time.perf_counter()
             try:
-                proposal_started = time.perf_counter()
-                second = propose(lp, [multiplier * v for v in gradient], remaining(), sense)
-                report["proposal_seconds"] += time.perf_counter() - proposal_started
-                admission = screen_fixed_phase_anchor_proposal(lp, second)
-                second_audit = {"role": sense, **admission}
-                report["anchors"].append(second_audit)
-                if second["model_status"] == "Infeasible":
-                    report["fixed_phase_farkas_attempted"] = True
-                    second_audit.update(attempt_fixed_phase_farkas(lp, second, min(60., remaining())))
-                    if second_audit["fixed_phase_farkas_verified"]:
-                        raise FixedPhaseInvariantError("fixed-phase Farkas contradicts authenticated anchor")
+                second = obtain_anchor([multiplier * v for v in gradient], sense)
+                if second is None:
                     continue
-                if admission["anchor_reconstruction_skipped_reason"] is not None:
-                    second_audit.update({"replay_verified": False,
-                        "heuristic_failure": True, "proposal_status": second["model_status"],
-                        "proposal_warning": second.get("proposal_warning"),
-                        "proposal_failure_reason": second.get("proposal_failure_reason"),
-                        "proposal_audit_path": second.get("proposal_audit_path")})
-                    continue
-                second_audit["anchor_reconstruction_attempted"] = True
-                q1, profile = workspace.reconstruct_anchor(second["column_values"], min(60., remaining()))
-                second_audit.update(profile)
-                print(json.dumps({"stage": "exact_fixed_phase_second_anchor_authenticated",
-                                  "role": sense, **profile}), flush=True)
+                q1, profile = second
                 report["second_anchor_replay_verified"] = True
                 found, evidence = evaluate_fixed_phase_direction(problem, lp, pattern, anchor,
                     [value - base for value, base in zip(q1, anchor)], q1)
@@ -4596,6 +4713,8 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
         "branch_rule": (
             "largest deterministic triangle-hull violation; ties by neuron index"),
         "continuous_source_branching": False,
+        "fallback_attempts": 0, "fallback_usable_primals": 0,
+        "exact_anchor_reconstruction_attempts": 0, "exact_anchors_verified": 0,
     }
     complete_tree_replay = None
     if solver is not None and solver["feasible"]:
@@ -4656,15 +4775,19 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             fixed_lp, audit = build_fixed_phase_linear_lp(exact_problem, pattern, parent)
             prefix = f"fixed_{fixed_lp.identity()}"
             fixed_artifact = persist_exact_lp(fixed_lp, artifact_dir / f"{prefix}.jsonl.gz")
-            def propose_fixed(model, objective, seconds, label):
+            def propose_fixed(model, objective, seconds, label, *, method="PRIMARY"):
                 print(json.dumps({"stage": "fixed_phase_linear_proposal_start", "role": label,
+                                  "solver_method": method,
                                   "canonical_lp_sha256": model.identity()}), flush=True)
+                suffix = label if method == "PRIMARY" else f"{label}_{method}"
                 proposal = solve_highspy(
-                    model, artifact_dir / f"{prefix}_{label}.log",
-                    artifact_dir / f"{prefix}_{label}_scaling.json",
-                    objective=objective, time_limit_seconds=min(60., seconds),
-                    proposal_only=True)
+                    model, artifact_dir / f"{prefix}_{suffix}.log",
+                    artifact_dir / f"{prefix}_{suffix}_scaling.json",
+                    objective=objective,
+                    time_limit_seconds=min(60. if method == "PRIMARY" else 30., seconds),
+                    proposal_only=True, proposal_method=method)
                 print(json.dumps({"stage": "fixed_phase_linear_proposal_complete", "role": label,
+                                  "solver_method": method,
                                   "status": proposal["model_status"],
                                   "run_status": proposal["run_status"],
                                   "proposal_available": proposal["proposal_available"],
@@ -4674,11 +4797,18 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
                                   "proposal_audit_sha256": proposal.get("proposal_audit_sha256"),
                                   "proposal_seconds": proposal["runtime_seconds"]}), flush=True)
                 return proposal
+            def propose_feasibility(model, seconds, method, role):
+                return propose_fixed(model, [Fraction(0)] * model.column_count,
+                                     seconds, role, method=method)
             found, reconstruction = search_fixed_phase_exact_witness(
                 exact_problem, fixed_lp, pattern, propose_fixed,
-                min(240., max(.1, started + wall_seconds - time.perf_counter())))
+                min(240., max(.1, started + wall_seconds - time.perf_counter())),
+                feasibility_propose=propose_feasibility)
             reconstruction.update(fixed_phase_lp_audit=audit,
                                   fixed_phase_lp_artifact=fixed_artifact)
+            for counter in ("fallback_attempts", "fallback_usable_primals",
+                            "exact_anchor_reconstruction_attempts", "exact_anchors_verified"):
+                branch[counter] += reconstruction[counter]
             evidence = {
                 "attempted": True, "verified": found is not None,
                 "correction_reconstruction": reconstruction}

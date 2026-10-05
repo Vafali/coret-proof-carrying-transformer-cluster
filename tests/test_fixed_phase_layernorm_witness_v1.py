@@ -35,6 +35,195 @@ def point(p, pattern, sources, t):
     return O._fixed_phase_point_from_sources(p, pattern, list(map(F, sources)), F(t))
 
 
+def unusable_feasibility_proposal(*_):
+    return {"model_status": "Unknown", "column_values": None}
+
+
+def test_unknown_unusable_primary_uses_ipm_then_exact_original_replay(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    identity = lp.identity()
+    calls, replayed = [], []
+    replay = O.replay_exact_linear_point
+    def counted_replay(model, candidate):
+        assert model is lp and model.identity() == identity
+        replayed.append(model)
+        return replay(model, candidate)
+    monkeypatch.setattr(O, "replay_exact_linear_point", counted_replay)
+    def fallback(model, seconds, method, role):
+        assert model is lp and model.identity() == identity and 0 < seconds <= 30
+        calls.append((method, role))
+        return {"model_status": "Unknown", "run_status": "HighsStatus.kWarning",
+                "solver_method": method, "options": {"presolve": "on"},
+                "column_values": np.asarray(point(p, pattern, [0], 1), dtype=float),
+                "construction_diagnostic": {"canonical_lp_sha256": identity}}
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+        unusable_feasibility_proposal, 3., feasibility_propose=fallback)
+    assert calls == [("IPM_FEASIBILITY", "anchor")] and replayed
+    assert found is not None and report["exact_anchor_replay_verified"]
+    assert report["authenticated_anchor_solver_method"] == "IPM_FEASIBILITY"
+    assert report["fallback_attempts"] == report["fallback_usable_primals"] == 1
+    assert report["exact_anchor_reconstruction_attempts"] == report["exact_anchors_verified"] == 1
+    attempts = report["proposal_attempts"]
+    assert not attempts[0]["admitted_to_exact_reconstruction"]
+    assert attempts[1]["admitted_to_exact_reconstruction"]
+    assert attempts[1]["within_original_bounds"] and attempts[1]["within_original_rows"]
+    assert attempts[1]["max_bound_violation"] == attempts[1]["max_row_violation"] == 0
+    assert {a["canonical_lp_sha256"] for a in attempts} == {identity}
+    assert lp.identity() == identity and not report["permits_infeasibility_claim"]
+
+
+@pytest.mark.parametrize("defect", ["bounds", "rows", "nonfinite", "dimensions"])
+def test_invalid_ipm_is_discarded_before_repair_and_simplex_is_next(monkeypatch, defect):
+    p, lp, pattern, _ = fixture()
+    good = np.asarray(point(p, pattern, [0], 1), dtype=float)
+    bad = good.copy()
+    if defect == "bounds":
+        bad[0] = 5
+    elif defect == "rows":
+        bad[1] = .01
+    elif defect == "nonfinite":
+        bad[0] = np.nan
+    else:
+        bad = bad[:-1]
+    calls, repaired = [], []
+    reconstruct = O.FixedPhaseAnchorWorkspace.reconstruct_anchor
+    def checked_reconstruct(workspace, candidate, seconds):
+        assert np.array_equal(candidate, good)
+        repaired.append(candidate)
+        return reconstruct(workspace, candidate, seconds)
+    monkeypatch.setattr(O.FixedPhaseAnchorWorkspace, "reconstruct_anchor", checked_reconstruct)
+    def fallback(model, seconds, method, role):
+        assert model is lp
+        calls.append(method)
+        return {"model_status": "Optimal", "solver_method": method,
+                "column_values": bad if method == "IPM_FEASIBILITY" else good}
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+        unusable_feasibility_proposal, 3., feasibility_propose=fallback)
+    assert calls == ["IPM_FEASIBILITY", "SIMPLEX_FEASIBILITY"]
+    assert len(repaired) == 1 and found is not None
+    assert report["fallback_attempts"] == 2 and report["fallback_usable_primals"] == 1
+    assert not report["proposal_attempts"][1]["admitted_to_exact_reconstruction"]
+    assert report["proposal_attempts"][2]["admitted_to_exact_reconstruction"]
+
+
+def test_fallback_exact_replay_rejection_remains_inconclusive(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    def reject(*_):
+        raise RuntimeError("fallback complete original LP replay rejected")
+    monkeypatch.setattr(O, "replay_exact_linear_point", reject)
+    def fallback(model, seconds, method, role):
+        return {"model_status": "Optimal", "solver_method": method,
+                "column_values": np.asarray(point(p, pattern, [0], 1), dtype=float)}
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+        unusable_feasibility_proposal, 3., feasibility_propose=fallback)
+    assert found is None and report["search_status"] == "INCONCLUSIVE"
+    assert report["fallback_attempts"] == report["fallback_usable_primals"] == 2
+    assert report["exact_anchor_reconstruction_attempts"] == 2
+    assert report["exact_anchors_verified"] == 0 and not report["verified"]
+    assert report["first_exact_replay_failure"] == "fallback complete original LP replay rejected"
+    assert not report["permits_infeasibility_claim"]
+
+
+def test_infeasible_fallback_has_no_farkas_or_exclusion_authority(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    monkeypatch.setattr(O, "attempt_fixed_phase_farkas", lambda *_: pytest.fail("fallback ray forbidden"))
+    monkeypatch.setattr(O, "FixedPhaseAnchorWorkspace", lambda *_: pytest.fail("infeasible anchor forbidden"))
+    def fallback(model, seconds, method, role):
+        return {"model_status": "Infeasible", "solver_method": method,
+                "column_values": point(p, pattern, [0], 1),
+                "original_row_dual_ray": np.ones(len(lp.rows))}
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+        unusable_feasibility_proposal, 3., feasibility_propose=fallback)
+    assert found is None and report["search_status"] == "INCONCLUSIVE"
+    assert report["fallback_attempts"] == 2 and report["exact_anchor_reconstruction_attempts"] == 0
+    assert not report["fixed_phase_farkas_attempted"] and not report["fixed_phase_farkas_verified"]
+    assert not report["permits_infeasibility_claim"]
+
+
+def test_primary_infeasible_bounded_repair_timeout_is_recorded(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    def timeout(*_):
+        raise O.ExactSolveFailure("exact repair Bareiss timeout")
+    monkeypatch.setattr(O, "attempt_fixed_phase_farkas", timeout)
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+        lambda *_: {"model_status": "Infeasible", "column_values": None}, 3.,
+        feasibility_propose=lambda *_: pytest.fail("primary Infeasible remains Farkas-only"))
+    assert found is None and report["search_status"] == "INCONCLUSIVE"
+    assert report["fixed_phase_farkas_attempted"] and not report["fixed_phase_farkas_verified"]
+    assert "Bareiss timeout" in report["failure"] and report["fallback_attempts"] == 0
+
+
+@pytest.mark.parametrize("method,solver", [("IPM_FEASIBILITY", "ipm"),
+                                         ("SIMPLEX_FEASIBILITY", "simplex")])
+def test_real_feasibility_solver_copy_preserves_original_canonical_lp(method, solver, tmp_path):
+    p, lp, pattern, _ = fixture()
+    identity = lp.identity()
+    result = O.solve_highspy(lp, tmp_path / f"{method}.log", proposal_only=True,
+        proposal_method=method, time_limit_seconds=2.)
+    assert lp.identity() == result["construction_diagnostic"]["canonical_lp_sha256"] == identity
+    assert result["options"]["solver"] == solver and result["options"]["presolve"] == "on"
+    assert result["options"]["threads"] == 1 and result["options"]["parallel"] == "off"
+    assert result["exact_replay_required"] and not result["feasible"] and not result["infeasible"]
+    assert not result["direct_dual_ray_available"] and result["raw_dual_ray"] is None
+    screen = O.screen_fixed_phase_anchor_proposal(lp, result)
+    assert screen["anchor_reconstruction_skipped_reason"] is None
+    anchor, profile = O.FixedPhaseAnchorWorkspace(p, pattern, lp).reconstruct_anchor(result["column_values"], 2.)
+    assert O.replay_exact_linear_point(lp, anchor)["verified"]
+    assert profile["exact_linear_replay"]["rows_replayed"] == len(lp.rows)
+
+
+def test_fallback_original_row_not_ignored_by_presolve_proposal(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    lp = replace(lp, rows=lp.rows + (O.ExactLPRow("original_extra_bound", (3,), (F(1),), F(2), None),))
+    monkeypatch.setattr(O, "FixedPhaseAnchorWorkspace", lambda *_: pytest.fail("original row was violated"))
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+        unusable_feasibility_proposal, 3., feasibility_propose=lambda *_: {
+            "model_status": "Optimal", "options": {"presolve": "on"},
+            "column_values": point(p, pattern, [0], 1)})
+    assert found is None and report["exact_anchor_reconstruction_attempts"] == 0
+    assert all(a["first_numerical_row_failure"]["name"] == "original_extra_bound"
+               for a in report["anchors"][1:])
+
+
+@pytest.mark.parametrize("method", ["IPM_FEASIBILITY", "SIMPLEX_FEASIBILITY"])
+def test_fallback_cannot_be_requested_in_strict_proof_mode(method):
+    _, lp, _, _ = fixture()
+    with pytest.raises(O.FixedPhaseInvariantError, match="no proof authority"):
+        O.solve_highspy(lp, proposal_method=method)
+    with pytest.raises(O.FixedPhaseInvariantError, match="zero objective"):
+        O.solve_highspy(lp, proposal_method=method, proposal_only=True,
+                        objective=[F(1)] * lp.column_count)
+
+
+def test_fallback_structural_corruption_is_fatal():
+    _, lp, _, _ = fixture()
+    # Simulate corruption after the canonical constructor's own validation.
+    object.__setattr__(lp, "rows", lp.rows + (
+        O.ExactLPRow("bad_index", (lp.column_count,), (F(1),), F(0), F(0)),))
+    with pytest.raises(O.HighsCanonicalLPDiagnosticError):
+        O.solve_highspy(lp, proposal_only=True, proposal_method="IPM_FEASIBILITY", time_limit_seconds=1.)
+
+
+def test_default_portfolio_executes_real_ipm_then_authenticates_original_lp():
+    p, lp, pattern, _ = fixture()
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+        unusable_feasibility_proposal, 3.)
+    assert found is not None and report["exact_anchor_replay_verified"]
+    assert report["authenticated_anchor_solver_method"] == "IPM_FEASIBILITY"
+    assert report["anchor_reconstruction_skipped_reason"] is None
+    assert O.replay_fixed_phase_semantic_witness(p, lp, found)["verified"]
+
+
+def test_fallback_invariant_defect_is_not_heuristic_failure():
+    p, lp, pattern, _ = fixture()
+    def corrupt_identity(*_):
+        return {"model_status": "Optimal", "column_values": point(p, pattern, [0], 1),
+                "construction_diagnostic": {"canonical_lp_sha256": "changed"}}
+    with pytest.raises(O.FixedPhaseInvariantError, match="canonical LP identity differs"):
+        O.search_fixed_phase_exact_witness(p, lp, pattern,
+            unusable_feasibility_proposal, 3., feasibility_propose=corrupt_identity)
+
+
 def line(p, lp, pattern, q0, q1):
     return O.evaluate_fixed_phase_direction(p, lp, pattern, q0,
                                            [b - a for a, b in zip(q0, q1)], q1)
@@ -556,7 +745,7 @@ def test_limited_proposal_cannot_bypass_failed_exact_replay(monkeypatch, tmp_pat
         raise RuntimeError("exact constraint replay failed")
     monkeypatch.setattr(O, "replay_exact_linear_point", reject_replay)
     witness, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
-                                                      lambda *_: result, 2.)
+        lambda *_: result, 2., feasibility_propose=unusable_feasibility_proposal)
     assert not calls and witness is None and not report["verified"]
     assert report["anchor_reconstruction_skipped_reason"] == "UNUSABLE_PROPOSAL"
     assert not report["anchor_reconstruction_attempted"]
@@ -704,7 +893,8 @@ def test_unknown_out_of_box_discarded_before_correction(monkeypatch):
     monkeypatch.setattr(O, "FixedPhaseAnchorWorkspace", lambda *_: pytest.fail("no blind correction"))
     proposal = {"model_status": "Unknown", "column_values": np.asarray(
         point(p, pattern, [5], 2), dtype=float), "proposal_available": True}
-    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: proposal, 2.)
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: proposal, 2.,
+        feasibility_propose=unusable_feasibility_proposal)
     assert found is None and report["search_status"] == "INCONCLUSIVE"
     assert report["proposal_primal_present"]
     assert not report["proposal_primal_numerically_within_bounds"]
@@ -719,7 +909,8 @@ def test_unknown_in_box_but_row_violation_is_discarded(monkeypatch):
     candidate[1] = .01
     monkeypatch.setattr(O, "FixedPhaseAnchorWorkspace", lambda *_: pytest.fail("no blind correction"))
     found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: {
-        "model_status": "Unknown", "column_values": candidate}, 2.)
+        "model_status": "Unknown", "column_values": candidate}, 2.,
+        feasibility_propose=unusable_feasibility_proposal)
     assert found is None and report["proposal_primal_numerically_within_bounds"]
     assert not report["proposal_primal_numerically_within_rows"]
     assert report["first_numerical_row_failure"]["name"] == "centered[0]"
