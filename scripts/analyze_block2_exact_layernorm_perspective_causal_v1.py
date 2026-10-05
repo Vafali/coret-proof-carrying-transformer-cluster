@@ -2238,9 +2238,90 @@ def persist_exact_lp(lp: ExactCanonicalLP, path: Path):
             "canonical_lp_sha256": lp.identity()}
 
 
+def _proposal_model_unchanged(highs, arrays, diagnostic):
+    """Audit the model HiGHS actually retained, not just the submitted model."""
+    import highspy
+    model = highs.getLp()
+    matrix = model.a_matrix_
+    starts = np.asarray(matrix.start_, dtype=np.int64)
+    indices = np.asarray(matrix.index_, dtype=np.int64)
+    values = np.asarray(matrix.value_, dtype=np.float64)
+    nr, nc = diagnostic["row_count"], diagnostic["column_count"]
+    rowwise = matrix.format_ == highspy.MatrixFormat.kRowwise
+    colwise = matrix.format_ == highspy.MatrixFormat.kColwise
+    major = nr if rowwise else nc
+    valid = (model.num_row_ == nr and model.num_col_ == nc
+             and (rowwise or colwise) and len(starts) == major + 1
+             and starts[0] == 0 and starts[-1] == len(values)
+             and len(indices) == len(values) and np.all(np.diff(starts) >= 0)
+             and np.all(indices >= 0)
+             and np.all(indices < (nc if rowwise else nr)))
+    if valid:
+        outer = np.repeat(np.arange(major), np.diff(starts))
+        rows, cols = (outer, indices) if rowwise else (indices, outer)
+        order = np.lexsort((cols, rows))
+        expected_rows = np.repeat(np.arange(nr), np.diff(arrays["starts"]))
+        expected_indices = np.asarray(arrays["indices"], dtype=np.int64)
+        expected_values = np.asarray(arrays["values"], dtype=np.float64)
+        expected_order = np.lexsort((expected_indices, expected_rows))
+        valid = (np.array_equal(rows[order], expected_rows[expected_order])
+                 and np.array_equal(cols[order], expected_indices[expected_order])
+                 and np.array_equal(values[order], expected_values[expected_order]))
+    checks = {"dimensions_topology_matrix_unchanged": bool(valid)}
+    for name, actual in (("column_lower", model.col_lower_),
+                         ("column_upper", model.col_upper_),
+                         ("row_lower", model.row_lower_),
+                         ("row_upper", model.row_upper_),
+                         ("objective", model.col_cost_)):
+        checks[name + "_unchanged"] = bool(np.array_equal(actual, arrays[name]))
+    diagnostic["proposal_retained_model_audit"] = checks
+    return all(checks.values())
+
+
+def _check_proposal_highs_status(api, status, highs, arrays, diagnostic, log_path):
+    """No warning is proof. Only audited heuristic proposals may continue."""
+    import highspy
+    if status != highspy.HighsStatus.kWarning:
+        return _check_highs_status(api, status, highspy.HighsStatus.kOk,
+                                   diagnostic, log_path)
+    log = ("" if log_path is None or not log_path.is_file() else
+           log_path.read_text(errors="replace")[-20000:])
+    model_status = highs.getModelStatus()
+    diagnostic.update(highs_log_text=log,
+                      model_status_at_warning=highs.modelStatusToString(model_status))
+    warnings = [line.strip() for line in log.splitlines()
+                if "WARNING:" in line]
+    cost_only = bool(warnings) and all(
+        line == "WARNING: Problem has some excessively small costs"
+        for line in warnings)
+    # A limited simplex run can return a useful *untrusted* iterate. In
+    # particular kWarning is the normal API status for kTimeLimit.
+    limited = api == "run" and model_status in (
+        highspy.HighsModelStatus.kTimeLimit,
+        highspy.HighsModelStatus.kIterationLimit)
+    reason = ("PROPOSAL_SOLVER_LIMIT" if limited else
+              "PROPOSAL_SMALL_COST_WARNING" if cost_only else None)
+    safe = (diagnostic.get("proposal_only") is True
+            and diagnostic["preflight_failure_classification"] is None
+            and diagnostic["sub_small_matrix_value_count"] == 0
+            and reason is not None
+            and (not warnings or cost_only)
+            and (api == "passModel" or model_status in (
+                highspy.HighsModelStatus.kOptimal,
+                highspy.HighsModelStatus.kObjectiveBound,
+                highspy.HighsModelStatus.kTimeLimit,
+                highspy.HighsModelStatus.kIterationLimit))
+            and _proposal_model_unchanged(highs, arrays, diagnostic))
+    if not safe:
+        return _check_highs_status(api, status, highspy.HighsStatus.kOk,
+                                   diagnostic, log_path)
+    diagnostic["api_statuses"].append({"api": api, "status": str(status),
+        "proposal_warning_reason": reason, "exact_replay_required": True})
+
+
 def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
                   scaling_path: Path | None = None, *, objective=None,
-                  time_limit_seconds=None):
+                  time_limit_seconds=None, proposal_only=False):
     import highspy
     highs = highspy.Highs()
     if log_path is not None:
@@ -2302,6 +2383,20 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
     objective_scale = max(map(abs, exact_objective), default=Fraction(0)) or Fraction(1)
     proposal_objective = np.asarray([float(value / objective_scale)
                                      for value in exact_objective])
+    objective_audit = {"normalization_exact": _fs(objective_scale),
+        "rational_objective_sha256": _sha_json([_fs(v) for v in exact_objective]),
+        "solver_only_drop_threshold": thresholds["small_matrix_value"],
+        "threshold_source": "HiGHS small_matrix_value (conservative proposal cutoff)",
+        "dropped": []}
+    if proposal_only:
+        for index, value in enumerate(proposal_objective):
+            if exact_objective[index] and abs(value) <= thresholds["small_matrix_value"]:
+                objective_audit["dropped"].append({"column": index,
+                    "exact_coefficient": _fs(exact_objective[index]),
+                    "normalized_binary64_hex": float(value).hex()})
+                proposal_objective[index] = 0.0
+    objective_audit["solver_binary64_sha256"] = hashlib.sha256(
+        proposal_objective.astype("<f8").tobytes()).hexdigest()
     original_arrays["objective"] = proposal_objective
     original_diagnostic = _diagnose_highs_lp(
         lp, original_arrays, thresholds)
@@ -2360,6 +2455,8 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
         "option_statuses": option_statuses,
         "threshold_option_statuses": threshold_statuses,
         "api_statuses": [],
+        "proposal_only": proposal_only,
+        "proposal_objective_audit": objective_audit,
         "highs_log_path": None if log_path is None else str(log_path),
     })
     scaled_failure = diagnostic["preflight_failure_classification"] is not None
@@ -2377,16 +2474,23 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
     model.a_matrix_.index_ = np.asarray(indices, dtype=np.int32)
     model.a_matrix_.value_ = np.asarray(values, dtype=np.float64)
     pass_status = highs.passModel(model)
-    _check_highs_status("passModel", pass_status, highspy.HighsStatus.kOk,
-                        diagnostic, log_path)
+    def check_status(api, result):
+        if proposal_only:
+            _check_proposal_highs_status(api, result, highs, solver_arrays,
+                                        diagnostic, log_path)
+        else:
+            _check_highs_status(api, result, highspy.HighsStatus.kOk,
+                                diagnostic, log_path)
+    check_status("passModel", pass_status)
     started = time.perf_counter()
     run_status = highs.run()
     runtime = time.perf_counter() - started
-    _check_highs_status("run", run_status, highspy.HighsStatus.kOk,
-                        diagnostic, log_path)
     status = highs.getModelStatus()
     status_name = highs.modelStatusToString(status)
-    ray_status, ray_exists = highs.getDualRayExist()
+    diagnostic["model_status_at_run"] = status_name
+    check_status("run", run_status)
+    ray_status, ray_exists = ((highspy.HighsStatus.kOk, False) if proposal_only
+                              else highs.getDualRayExist())
     raw_ray = None
     ray_call_status = ray_status
     if ray_status == highspy.HighsStatus.kOk and ray_exists:
@@ -2397,7 +2501,15 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
                         map_solver_row_ray_to_original(raw_ray,
                                                        scaling.scales))
     solution = highs.getSolution()
-    return {
+    columns = (np.asarray(solution.col_value, dtype=np.float64)
+               if solution.value_valid else None)
+    proposal_available = (proposal_only and columns is not None
+        and columns.shape == (lp.column_count,) and np.all(np.isfinite(columns))
+        and status in (highspy.HighsModelStatus.kOptimal,
+                       highspy.HighsModelStatus.kObjectiveBound,
+                       highspy.HighsModelStatus.kTimeLimit,
+                       highspy.HighsModelStatus.kIterationLimit))
+    result = {
         "run_status": str(run_status), "model_status": status_name,
         "infeasible": status == highspy.HighsModelStatus.kInfeasible,
         "feasible": status in (highspy.HighsModelStatus.kOptimal,
@@ -2405,8 +2517,9 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
         "direct_dual_ray_available": raw_ray is not None,
         "raw_dual_ray": raw_ray,
         "original_row_dual_ray": original_row_ray,
-        "column_values": (np.asarray(solution.col_value, dtype=np.float64)
-                          if solution.value_valid else None),
+        "column_values": columns,
+        "proposal_available": bool(proposal_available),
+        "exact_replay_required": proposal_only,
         "runtime_seconds": runtime, "highs_runtime_seconds": highs.getRunTime(),
         "highspy_version": importlib.metadata.version("highspy"),
         "highs_version": highs.version(), "options": options,
@@ -2415,8 +2528,26 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
         "solver_scaling": scaling.report,
         "rational_objective_sha256": _sha_json([_fs(value) for value in exact_objective]),
         "objective_is_proposal_only": True,
+        "proposal_objective_audit": objective_audit,
         "construction_diagnostic": diagnostic,
     }
+    if proposal_only and log_path is not None:
+        audit_path = log_path.with_suffix(".proposal.json")
+        _atomic_json(audit_path, {
+            "schema": "CORET_HIGHSPY_UNTRUSTED_PROPOSAL_AUDIT_V1",
+            "canonical_lp_sha256": lp.identity(),
+            "rational_objective_sha256": result["rational_objective_sha256"],
+            "proposal_objective_audit": objective_audit,
+            "construction_diagnostic": diagnostic,
+            "run_status": result["run_status"], "model_status": status_name,
+            "proposal_available": bool(proposal_available),
+            "runtime_seconds": runtime,
+            "exact_replay_required": True,
+            "authorizes_witness_or_exclusion": False,
+        })
+        result["proposal_audit_path"] = str(audit_path)
+        result["proposal_audit_sha256"] = cluster_common.sha256(audit_path)
+    return result
 
 
 def phase1_exact_farkas_fallback(lp: ExactCanonicalLP,
@@ -3654,7 +3785,7 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
         first = propose(lp, [Fraction(0)] * lp.column_count, remaining(), "anchor")
         report["proposal_seconds"] += time.perf_counter() - proposal_started
         report["fixed_phase_linear_lp_status"] = first["model_status"]
-        if not first.get("feasible") or first.get("column_values") is None:
+        if not first.get("proposal_available", first.get("feasible")) or first.get("column_values") is None:
             report["failure"] = "NO_LINEAR_FEASIBLE_PROPOSAL_IS_NOT_A_PROOF"
             return None, report
         workspace_started = time.perf_counter()
@@ -3686,7 +3817,7 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
                 proposal_started = time.perf_counter()
                 second = propose(lp, [multiplier * v for v in gradient], remaining(), sense)
                 report["proposal_seconds"] += time.perf_counter() - proposal_started
-                if not second.get("feasible") or second.get("column_values") is None:
+                if not second.get("proposal_available", second.get("feasible")) or second.get("column_values") is None:
                     report["anchors"].append({"role": sense, "replay_verified": False,
                                                "proposal_status": second["model_status"]})
                     continue
@@ -4271,9 +4402,14 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
                 proposal = solve_highspy(
                     model, artifact_dir / f"{prefix}_{label}.log",
                     artifact_dir / f"{prefix}_{label}_scaling.json",
-                    objective=objective, time_limit_seconds=min(60., seconds))
+                    objective=objective, time_limit_seconds=min(60., seconds),
+                    proposal_only=True)
                 print(json.dumps({"stage": "fixed_phase_linear_proposal_complete", "role": label,
                                   "status": proposal["model_status"],
+                                  "run_status": proposal["run_status"],
+                                  "proposal_available": proposal["proposal_available"],
+                                  "proposal_audit_path": proposal.get("proposal_audit_path"),
+                                  "proposal_audit_sha256": proposal.get("proposal_audit_sha256"),
                                   "proposal_seconds": proposal["runtime_seconds"]}), flush=True)
                 return proposal
             found, reconstruction = search_fixed_phase_exact_witness(

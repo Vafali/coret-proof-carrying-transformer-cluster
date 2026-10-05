@@ -269,7 +269,8 @@ def test_small_real_highspy_proposes_but_exact_replay_certifies():
     upper[3] = F(2)
     lp = replace(lp, column_upper=tuple(upper))
     def propose(model, objective, seconds, _role):
-        return O.solve_highspy(model, objective=objective, time_limit_seconds=min(2., seconds))
+        return O.solve_highspy(model, objective=objective,
+                              time_limit_seconds=min(2., seconds), proposal_only=True)
     witness, report = O.search_fixed_phase_exact_witness(p, lp, pattern, propose, 5.)
     assert witness is not None and report["verified"]
     assert O.replay_fixed_phase_semantic_witness(p, lp, witness)["verified"]
@@ -279,6 +280,159 @@ def test_float_point_cannot_discharge_exact_anchor_replay():
     p, lp, pattern, _ = fixture()
     with pytest.raises(RuntimeError, match="floating"):
         O.replay_exact_linear_point(lp, [float(v) for v in point(p, pattern, [0], 2)])
+
+
+def _proposal_warning_engine(monkeypatch, log_path, *, api="run", mutation=None,
+                             warning="WARNING: Problem has some excessively small costs",
+                             model_status=None):
+    import highspy
+    real = highspy.Highs
+    class Engine:
+        def __init__(self):
+            self.inner = real()
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+        def passModel(self, model):
+            result = self.inner.passModel(model)
+            if mutation is not None:
+                mutation(self.inner)
+            if api == "passModel":
+                log_path.write_text(warning + "\n")
+                return highspy.HighsStatus.kWarning
+            return result
+        def run(self):
+            self.inner.run()
+            if api == "run":
+                log_path.write_text(warning + "\n")
+                return highspy.HighsStatus.kWarning
+            return highspy.HighsStatus.kOk
+        def getModelStatus(self):
+            return self.inner.getModelStatus() if model_status is None else model_status
+    monkeypatch.setattr(highspy, "Highs", Engine)
+
+
+@pytest.mark.parametrize("api", ["passModel", "run"])
+def test_proposal_warning_scaled_matrix_tiny_cost_and_exact_replay(monkeypatch, tmp_path, api):
+    p, lp, pattern, _ = fixture()
+    lp = replace(lp, rows=lp.rows + (O.ExactLPRow(
+        "tiny_matrix_row", (0,), (F(1, 2**70),), None, F(1, 2**70)),))
+    identity = lp.identity()
+    objective = [F(0)] * lp.column_count
+    objective[0], objective[1] = F(3), F(1, 2**80)
+    expected_objective_sha = O._sha_json([O._fs(v) for v in objective])
+    log = tmp_path / "highs.log"
+    _proposal_warning_engine(monkeypatch, log, api=api)
+    result = O.solve_highspy(lp, log, objective=objective, proposal_only=True)
+    assert result["proposal_available"] and result["exact_replay_required"]
+    assert lp.identity() == identity
+    assert result["rational_objective_sha256"] == expected_objective_sha
+    audit = result["proposal_objective_audit"]
+    assert audit["normalization_exact"] == "3/1"
+    assert [v["column"] for v in audit["dropped"]] == [1]
+    assert result["solver_scaling"]["sub_threshold_entries_before"] == 1
+    assert result["solver_scaling"]["sub_threshold_entries_after"] == 0
+    assert all(result["construction_diagnostic"]["proposal_retained_model_audit"].values())
+    persisted = O.cluster_common.verified_json(Path(result["proposal_audit_path"]))
+    assert persisted["rational_objective_sha256"] == expected_objective_sha
+    assert persisted["proposal_objective_audit"] == audit
+    assert persisted["exact_replay_required"]
+    assert not persisted["authorizes_witness_or_exclusion"]
+    workspace = O.FixedPhaseAnchorWorkspace(p, pattern, lp)
+    anchor, evidence = workspace.reconstruct_anchor(result["column_values"], 2.)
+    assert evidence["exact_anchor_replay_verified"]
+    assert O.replay_exact_linear_point(lp, anchor)["verified"]
+    corrupted = list(anchor)
+    corrupted[0] = F(2)  # Violates the original exact tiny row, not an objective.
+    with pytest.raises(RuntimeError):
+        O.replay_exact_linear_point(lp, corrupted)
+    assert not result["direct_dual_ray_available"]
+
+
+@pytest.mark.parametrize("api", ["passModel", "run"])
+def test_warning_remains_fatal_without_explicit_proposal_mode(monkeypatch, tmp_path, api):
+    _, lp, _, _ = fixture()
+    log = tmp_path / "strict.log"
+    _proposal_warning_engine(monkeypatch, log, api=api)
+    with pytest.raises(O.HighsCanonicalLPDiagnosticError):
+        O.solve_highspy(lp, log, objective=[F(1)] * lp.column_count)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda h: h.changeColBounds(0, -3., 4.),
+    lambda h: h.changeRowBounds(0, -1., 1.),
+    lambda h: h.changeCoeff(0, 0, 0.5),
+])
+def test_proposal_warning_rejects_solver_changed_constraints(monkeypatch, tmp_path, mutation):
+    _, lp, _, _ = fixture()
+    log = tmp_path / "changed.log"
+    _proposal_warning_engine(monkeypatch, log, mutation=mutation)
+    with pytest.raises(O.HighsCanonicalLPDiagnosticError):
+        O.solve_highspy(lp, log, proposal_only=True)
+
+
+@pytest.mark.parametrize("warning", ["WARNING: matrix entries were dropped",
+                                     "WARNING: unknown solver warning", ""])
+def test_unknown_or_structural_warning_not_admitted(monkeypatch, tmp_path, warning):
+    _, lp, _, _ = fixture()
+    log = tmp_path / "unknown.log"
+    _proposal_warning_engine(monkeypatch, log, warning=warning)
+    with pytest.raises(O.HighsCanonicalLPDiagnosticError):
+        O.solve_highspy(lp, log, proposal_only=True)
+
+
+def test_limited_proposal_is_not_optimality_or_feasibility_proof(monkeypatch, tmp_path):
+    import highspy
+    p, lp, pattern, _ = fixture()
+    log = tmp_path / "limit.log"
+    _proposal_warning_engine(monkeypatch, log, model_status=highspy.HighsModelStatus.kTimeLimit,
+                             warning="")
+    result = O.solve_highspy(lp, log, proposal_only=True)
+    assert not result["feasible"] and result["proposal_available"]
+    assert result["exact_replay_required"]
+    assert result["construction_diagnostic"]["model_status_at_warning"] == "Time limit reached"
+    def propose(*_):
+        return result
+    witness, report = O.search_fixed_phase_exact_witness(p, lp, pattern, propose, 3.)
+    assert report["exact_anchor_replay_verified"]
+    if witness is not None:
+        assert O.replay_fixed_phase_semantic_witness(p, lp, witness)["verified"]
+
+
+def test_limited_proposal_cannot_bypass_failed_exact_replay(monkeypatch, tmp_path):
+    import highspy
+    p, lp, pattern, _ = fixture()
+    log = tmp_path / "limit.log"
+    _proposal_warning_engine(monkeypatch, log, model_status=highspy.HighsModelStatus.kTimeLimit,
+                             warning="")
+    result = O.solve_highspy(lp, log, proposal_only=True)
+    result["column_values"][:] = 1e10
+    calls = []
+    def reject_replay(*args):
+        calls.append(args)
+        raise RuntimeError("exact constraint replay failed")
+    monkeypatch.setattr(O, "replay_exact_linear_point", reject_replay)
+    witness, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+                                                      lambda *_: result, 2.)
+    assert calls and witness is None and not report["verified"]
+
+
+def test_real_highs_time_limit_warning_has_proposal_only_handling(tmp_path):
+    import highspy
+    rng = np.random.default_rng(0)
+    n = 50
+    lp = O.ExactCanonicalLP(tuple(f"x{i}" for i in range(n)),
+        (F(0),) * n, (F(1),) * n, tuple(O.ExactLPRow(
+            f"r{i}", tuple(range(n)), tuple(map(F.from_float, row)), F(1), None)
+            for i, row in enumerate(rng.uniform(0.01, 1, (n, n)))))
+    objective = [F(1)] + [F(1, 2**80)] * (n - 1)
+    result = O.solve_highspy(lp, tmp_path / "real.log", objective=objective,
+                            time_limit_seconds=1e-10, proposal_only=True)
+    assert result["run_status"] == str(highspy.HighsStatus.kWarning)
+    assert result["model_status"] == "Time limit reached"
+    assert result["proposal_available"] and result["exact_replay_required"]
+    with pytest.raises(O.HighsCanonicalLPDiagnosticError) as failure:
+        O.solve_highspy(lp, objective=objective, time_limit_seconds=1e-10)
+    assert failure.value.diagnostic["model_status_at_run"] == "Time limit reached"
 
 
 def test_direction_must_preserve_every_equality():
