@@ -25,6 +25,7 @@ import json
 import math
 import os
 from pathlib import Path
+import signal
 import sys
 import time
 from typing import Iterable, Sequence
@@ -1176,6 +1177,24 @@ class ExactPerspectiveProblem:
         return len(self.x0)
 
 
+def _start_reconstruction_alarm(seconds):
+    """Bound a CPU family, including exact matrix construction and replay."""
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    def expired(_signum, _frame):
+        raise ExactSolveFailure("reconstruction family deadline")
+    signal.signal(signal.SIGALRM, expired)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    started = time.perf_counter()
+    def restore():
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0]:
+            signal.setitimer(signal.ITIMER_REAL, max(
+                1e-6, previous_timer[0] - (time.perf_counter() - started)),
+                previous_timer[1])
+    return restore
+
+
 def replay_exact_perspective_witness(problem: ExactPerspectiveProblem,
                                      witness: dict) -> dict:
     """Replay a rational exact witness. Algebraic witnesses use the same
@@ -1653,6 +1672,24 @@ def _linear_interval(weights, lower, upper, bias=Fraction(0)):
     return lo, hi
 
 
+def exact_dyadic_sqrt_lower(epsilon, bits=64):
+    """Certify a positive implied scale bound using integers only."""
+    epsilon = _fr(epsilon)
+    if epsilon <= 0 or bits <= 0:
+        raise RuntimeError("positive epsilon and denominator bits required")
+    m = math.isqrt((epsilon.numerator << (2 * bits)) // epsilon.denominator)
+    lower = Fraction(m, 1 << bits)
+    if lower <= 0 or lower * lower > epsilon:
+        raise RuntimeError("dyadic scale lower bound certification failed")
+    return lower, {
+        "epsilon_exact": _fs(epsilon),
+        "t_lower_bound_exact": _fs(lower),
+        "t_lower_bound_float": float(lower),
+        "t_lower_bound_denominator_bits": bits,
+        "proof_check_L_squared_le_epsilon": True,
+    }
+
+
 def _derive_exact_bounds(center, generators, low, high, gamma, beta,
                          W1, b1, epsilon):
     started = time.perf_counter()
@@ -1661,6 +1698,7 @@ def _derive_exact_bounds(center, generators, low, high, gamma, beta,
     max_norm_squared = sum((max(abs(lo), abs(hi)) ** 2
                             for lo, hi in zip(c_lower, c_upper)), Fraction(0))
     upper = _exact_sqrt_upper(max_norm_squared / DIMENSION + epsilon)
+    lower, lower_proof = exact_dyadic_sqrt_lower(epsilon)
     gamma_exact = [_fr(value) for value in gamma]
     beta_exact = [_fr(value) for value in beta]
     scaled_lower, scaled_upper = [], []
@@ -1675,7 +1713,7 @@ def _derive_exact_bounds(center, generators, low, high, gamma, beta,
         affine_lo, affine_hi = _linear_interval(
             exact_row, scaled_lower, scaled_upper)
         q = _dot(exact_row, beta_exact) + _fr(bias)
-        t_first, t_second = Fraction(0), upper * q
+        t_first, t_second = lower * q, upper * q
         g_lower.append(affine_lo + min(t_first, t_second))
         g_upper.append(affine_hi + max(t_first, t_second))
         w1_beta.append(q)
@@ -1690,6 +1728,7 @@ def _derive_exact_bounds(center, generators, low, high, gamma, beta,
         "centered_coefficients": c_coefficients,
         "centered_lower": c_lower, "centered_upper": c_upper,
         "max_norm_squared": max_norm_squared, "t_upper": upper,
+        "t_lower": lower, "t_lower_proof": lower_proof,
         "g_lower": g_lower, "g_upper": g_upper,
         "stable_active": active, "stable_inactive": inactive,
         "unstable": unstable, "bounds_sha256": _sha_json(bounds_payload),
@@ -1735,7 +1774,7 @@ def build_exact_perspective_lp(low, high, gamma, beta, W1, b1, W2, b2,
              + [f"c[{index}]" for index in range(d)] + ["t"]
              + [f"g[{index}]" for index in range(d)]
              + [f"u[{index}]" for index in range(d)])
-    column_lower = [_fr(value) for value in low] + [None] * d + [Fraction(0)] \
+    column_lower = [_fr(value) for value in low] + [None] * d + [bounds["t_lower"]] \
         + [None] * (2 * d)
     column_upper = [_fr(value) for value in high] + [None] * d \
         + [bounds["t_upper"]] + [None] * (2 * d)
@@ -2113,7 +2152,8 @@ def _root_model_summary(source_count: int, bounds: dict) -> dict:
         "dropped_outer_constraint": (
             "sum(c_j^2) <= 128*t^2 (dropping a constraint remains an outer relaxation)"),
         "proof_backend_form": "rational polyhedral outer relaxation",
-        "epsilon_restored_only_in_exact_witness_replay": True,
+        "epsilon_restored_only_in_exact_witness_replay": False,
+        "epsilon_used_for_implied_scale_lower_bound": True,
         "source_correlation_preserved": True,
         "cancellation_equations": DIMENSION - 1,
     }
@@ -2359,9 +2399,253 @@ def _isolate_quadratic_root(coefficients, approximation: float):
     raise ExactSolveFailure("could not isolate the quadratic witness root")
 
 
+def exact_affine_parameter_interval(conditions):
+    """Intersect lo <= a+b*alpha <= hi; None denotes an infinite endpoint."""
+    lower = upper = None
+    lower_labels, upper_labels = [], []
+    impossible = []
+    for label, a, b, lo, hi in conditions:
+        a, b = _fr(a), _fr(b)
+        for side, bound in (("lower", lo), ("upper", hi)):
+            if bound is None:
+                continue
+            bound = _fr(bound)
+            name = f"{label}:{side}"
+            if not b:
+                if (side == "lower" and a < bound
+                        or side == "upper" and a > bound):
+                    impossible.append(name)
+                continue
+            endpoint = (bound - a) / b
+            is_lower = (side == "lower") == (b > 0)
+            if is_lower:
+                if lower is None or endpoint > lower:
+                    lower, lower_labels = endpoint, [name]
+                elif endpoint == lower:
+                    lower_labels.append(name)
+            else:
+                if upper is None or endpoint < upper:
+                    upper, upper_labels = endpoint, [name]
+                elif endpoint == upper:
+                    upper_labels.append(name)
+    return {
+        "alpha_interval_lower": _fs(lower) if lower is not None else None,
+        "alpha_interval_upper": _fs(upper) if upper is not None else None,
+        "alpha_interval_empty": bool(impossible or (
+            lower is not None and upper is not None and lower > upper)),
+        "active_constraint_at_lower": lower_labels,
+        "active_constraint_at_upper": upper_labels,
+        "constant_constraint_violations": impossible,
+        "linear_constraint_count": len(conditions),
+    }
+
+
+def _root_inside_parameter_interval(kind, root, isolation, polynomial, interval):
+    if interval["alpha_interval_empty"]:
+        return False
+    lo = interval["alpha_interval_lower"]
+    hi = interval["alpha_interval_upper"]
+    lo, hi = (_fr(lo) if lo is not None else None,
+              _fr(hi) if hi is not None else None)
+    if kind == "rational":
+        return (lo is None or root >= lo) and (hi is None or root <= hi)
+    context = QuadraticRootContext.from_record({
+        "polynomial": [_fs(value) for value in polynomial],
+        "isolating_interval": [_fs(value) for value in isolation]})
+    alpha = QuadraticElement(context, Fraction(0), Fraction(1))
+    return (lo is None or (alpha - lo).sign() >= 0) and (
+        hi is None or (hi - alpha).sign() >= 0)
+
+
+def _irrational_quadratic_branch_inside(a, b, discriminant, sign, interval):
+    """Compare (-b +/- sqrt(D))/(2a), a>0, with rational endpoints exactly."""
+    if a <= 0 or sign not in (-1, 1):
+        raise RuntimeError("quadratic branch normalization differs")
+    lo, hi = interval["alpha_interval_lower"], interval["alpha_interval_upper"]
+    if lo is not None:
+        h = 2 * a * _fr(lo) + b
+        above = ((h < 0 and discriminant <= h * h) if sign == -1
+                 else (h <= 0 or discriminant >= h * h))
+        if not above:
+            return False
+    if hi is not None:
+        h = 2 * a * _fr(hi) + b
+        below = ((h >= 0 or discriminant >= h * h) if sign == -1
+                 else (h > 0 and discriminant <= h * h))
+        if not below:
+            return False
+    return not interval["alpha_interval_empty"]
+
+
+def box_aware_correction_bases(sensitivity, candidate, low, high, maximum=8):
+    """Untrusted deterministic slack-weighted QR; exact replay is authoritative."""
+    rows = sensitivity.shape[0]
+    slack = np.asarray([max(0.0, float(min(_fr(value) - lo, hi - _fr(value))))
+                        for value, lo, hi in zip(candidate, low, high)])
+    free = np.asarray([index for index, (lo, hi) in enumerate(zip(low, high))
+                       if lo < hi], dtype=np.int64)
+    if len(free) < rows:
+        raise ExactSolveFailure("too few free correction sources")
+    scale = max(float(slack.max()), np.finfo(np.float64).tiny)
+    weights = np.maximum(slack[free] / scale, 1e-6)
+    bases, seen = [], set()
+    for ordinal in range(maximum * 2):
+        # Larger slack wins subject to rank; deterministic modulation supplies
+        # alternative pivots without relying on radius/outcome selection.
+        modulation = 0.5 + ((free * (2 * ordinal + 1) + ordinal) % 17) / 16.0
+        weighted = sensitivity[:, free] * (
+            weights ** (1.0 if ordinal % 2 == 0 else 0.5) * modulation)
+        _q, r, pivots = qr(weighted, mode="economic", pivoting=True)
+        threshold = max(weighted.shape) * np.finfo(np.float64).eps * (
+            abs(r[0, 0]) if r.size else 0.0)
+        if int(np.sum(np.abs(np.diag(r)) > threshold)) != rows:
+            continue  # Never send a numerically rank-deficient basis to Bareiss.
+        basis = tuple(int(value) for value in free[pivots[:rows]])
+        if basis in seen:
+            continue
+        seen.add(basis)
+        bases.append({"columns": basis, "basis_sha256": _sha_json(basis),
+                      "minimum_selected_source_slack": float(min(
+                          slack[list(basis)])), "numerical_rank": rows})
+        if len(bases) == maximum:
+            break
+    if not bases:
+        raise ExactSolveFailure("fixed-pattern cancellation correction rank deficient")
+    return bases, slack
+
+
+def _replay_affine_family(problem, pattern, source_constant, source_slope,
+                          c_constant, c_slope, t_constant, t_slope, t_upper,
+                          node_lp=None):
+    conditions = [(f"source[{i}]", a, b, lo, hi) for i, (a, b, lo, hi)
+                  in enumerate(zip(source_constant, source_slope,
+                                   problem.low, problem.high))]
+    lower, _proof = exact_dyadic_sqrt_lower(problem.epsilon)
+    conditions.append(("t", t_constant, t_slope, lower, t_upper))
+    scaled_a = [g * value for g, value in zip(problem.gamma, c_constant)]
+    scaled_b = [g * value for g, value in zip(problem.gamma, c_slope)]
+    w1_beta = _matvec(problem.W1, problem.beta)
+    g_constant, g_slope = [], []
+    for i, (row, active) in enumerate(zip(problem.W1, pattern)):
+        q = w1_beta[i] + problem.b1[i]
+        g_constant.append(_dot(row, scaled_a) + q * t_constant)
+        g_slope.append(_dot(row, scaled_b) + q * t_slope)
+        conditions.append((f"relu[{i}]", g_constant[-1], g_slope[-1],
+                           Fraction(0) if active else None,
+                           None if active else Fraction(0)))
+    if node_lp is not None:
+        # c, g and u are constructed from the source family and fixed pattern;
+        # their defining equalities hold by construction. Cancellation was
+        # replayed identically before this function. Check every remaining node
+        # row (triangles, stable signs/values, branch phases, any extra rows).
+        u_constant = [value if active else Fraction(0)
+                      for value, active in zip(g_constant, pattern)]
+        u_slope = [value if active else Fraction(0)
+                   for value, active in zip(g_slope, pattern)]
+        constants = [*source_constant, *c_constant, t_constant,
+                     *g_constant, *u_constant]
+        slopes = [*source_slope, *c_slope, t_slope, *g_slope, *u_slope]
+        if len(constants) != len(node_lp.variable_names):
+            raise RuntimeError("affine family/node LP topology differs")
+        for i, (lo, hi) in enumerate(zip(node_lp.column_lower, node_lp.column_upper)):
+            if lo is not None or hi is not None:
+                conditions.append((f"node_column[{i}]", constants[i], slopes[i], lo, hi))
+        for row in node_lp.rows:
+            if row.name.split("[")[0] in ("centered", "preactivation", "cancellation"):
+                continue
+            conditions.append((f"node:{row.name}",
+                               _dot(row.coefficients, [constants[i] for i in row.indices]),
+                               _dot(row.coefficients, [slopes[i] for i in row.indices]),
+                               row.lower, row.upper))
+    interval = exact_affine_parameter_interval(conditions)
+    evidence = {**interval, "polynomial_constructed": False,
+                "polynomial_degree": None, "roots_total": 0,
+                "roots_inside_interval": 0, "exact_replay_result": None}
+    if interval["alpha_interval_empty"]:
+        return None, evidence
+    polynomial = (
+        problem.d * t_slope ** 2 - _dot(c_slope, c_slope),
+        2 * (problem.d * t_constant * t_slope - _dot(c_constant, c_slope)),
+        problem.d * t_constant ** 2 - _dot(c_constant, c_constant)
+        - problem.d * problem.epsilon)
+    while polynomial and polynomial[0] == 0:
+        polynomial = polynomial[1:]
+    evidence.update(polynomial_constructed=True,
+                    polynomial=[_fs(value) for value in polynomial],
+                    polynomial_degree=len(polynomial) - 1)
+    roots = []
+    roots_total = 0
+    if len(polynomial) == 2:
+        roots = [("rational", -polynomial[1] / polynomial[0], None)]
+    elif len(polynomial) == 3:
+        a, b, c = polynomial
+        discriminant = b * b - 4 * a * c
+        if discriminant >= 0:
+            exact_sqrt = _fraction_square_root(discriminant)
+            if exact_sqrt is not None:
+                roots = [("rational", value, None) for value in sorted(set(
+                    (-b + sign * exact_sqrt) / (2 * a) for sign in (-1, 1)))]
+            else:
+                roots_total = 2
+                normalized_a, normalized_b = (a, b) if a > 0 else (-a, -b)
+                # Exact endpoint comparisons happen before any root isolation.
+                for sign in (-1, 1):
+                    if not _irrational_quadratic_branch_inside(
+                            normalized_a, normalized_b, discriminant, sign, interval):
+                        continue
+                    square = math.sqrt(float(discriminant))
+                    approximation = (-float(normalized_b) + sign * square) / (
+                        2 * float(normalized_a))
+                    roots.append(("algebraic", None,
+                                  _isolate_quadratic_root(polynomial, approximation)))
+    elif polynomial and polynomial[0]:
+        pass  # Nonzero constant: this particular line has no roots.
+    else:
+        # Identically zero polynomial: an admissible rational point suffices.
+        lo, hi = interval["alpha_interval_lower"], interval["alpha_interval_upper"]
+        value = (_fr(lo) if lo is not None else
+                 min(Fraction(0), _fr(hi)) if hi is not None else Fraction(0))
+        roots = [("rational", value, None)]
+    evidence["roots_total"] = roots_total or len(roots)
+    failures = []
+    for kind, root, isolation in roots:
+        if not _root_inside_parameter_interval(kind, root, isolation,
+                                               polynomial, interval):
+            continue
+        evidence["roots_inside_interval"] += 1
+        try:
+            if kind == "rational":
+                witness = {"schema": WITNESS_SCHEMA,
+                           "source_values": [_fs(a + b * root) for a, b in
+                                             zip(source_constant, source_slope)],
+                           "t": _fs(t_constant + t_slope * root),
+                           "relu_active": list(pattern)}
+                replay = replay_exact_perspective_witness(problem, witness)
+            else:
+                witness = {"schema": WITNESS_SCHEMA,
+                           "algebraic_root": {
+                               "polynomial": [_fs(value) for value in polynomial],
+                               "isolating_interval": [_fs(value) for value in isolation]},
+                           "source_affine": [
+                               {"constant": _fs(a), "slope": _fs(b)} for a, b
+                               in zip(source_constant, source_slope)],
+                           "t_affine": {"constant": _fs(t_constant),
+                                        "slope": _fs(t_slope)},
+                           "relu_active": list(pattern)}
+                replay = replay_algebraic_perspective_witness(problem, witness)
+            evidence["exact_replay_result"] = replay
+            return witness, evidence
+        except ExactSolveFailure:
+            raise
+        except RuntimeError as error:
+            failures.append(f"{type(error).__name__}: {error}")
+    evidence["exact_replay_result"] = {"verified": False, "failures": failures}
+    return None, evidence
+
+
 def reconstruct_exact_fixed_pattern_witness(
         problem: ExactPerspectiveProblem, solution, pattern,
-        source_count: int, timeout_seconds: float):
+        source_count: int, timeout_seconds: float, node_lp=None):
     """Exact 127-correction-variable/one-root reconstruction."""
     started = time.perf_counter()
     deadline = started + timeout_seconds
@@ -2398,28 +2682,11 @@ def reconstruct_exact_fixed_pattern_witness(
     m_numeric = np.asarray([[float(value) for value in row]
                             for row in difference_matrix], dtype=np.float64)
     sensitivity = m_numeric @ x_numeric.T
-    widths = np.asarray([float(hi - lo) for lo, hi in
-                         zip(problem.low, problem.high)])
-    free = np.flatnonzero(widths > 0.0)
-    if len(free) < d - 1:
-        raise ExactSolveFailure("fewer than 127 correction sources are free")
-    _q, r, pivots = qr(sensitivity[:, free], mode="economic", pivoting=True)
-    tolerance = (max(sensitivity.shape) * np.finfo(np.float64).eps
-                 * (abs(r[0, 0]) if r.size else 0.0))
-    rank = int(np.sum(np.abs(np.diag(r)) > tolerance))
-    if rank != d - 1:
-        raise ExactSolveFailure(
-            f"fixed-pattern cancellation correction rank {rank} != {d - 1}")
-    columns = free[np.asarray(pivots[:d - 1], dtype=np.int64)]
-    selected = set(int(value) for value in columns)
+    bases, slack = box_aware_correction_bases(
+        sensitivity, candidate, problem.low, problem.high)
     xi_candidate = [_fr(value) for value in candidate]
     centered_x0 = [value - sum(problem.x0, Fraction(0)) / d
                    for value in problem.x0]
-    centered_rows = []
-    for column in columns:
-        row = problem.X[int(column)]
-        mean = sum(row, Fraction(0)) / d
-        centered_rows.append([value - mean for value in row])
     c_candidate = list(centered_x0)
     for source, row in enumerate(problem.X):
         mean = sum(row, Fraction(0)) / d
@@ -2427,109 +2694,148 @@ def reconstruct_exact_fixed_pattern_witness(
         for feature, coefficient in enumerate(row):
             c_candidate[feature] += (coefficient - mean) * value
     residual = [_dot(row, c_candidate) + coefficient * t_candidate
-                for row, coefficient in
-                zip(difference_matrix, difference_t)]
-    exact_matrix = [[_dot(row, centered_rows[column])
-                     for column in range(d - 1)]
-                    for row in difference_matrix]
-    integer_matrix, constant_rhs, slope_rhs = [], [], []
-    for row, residual_value, t_value in zip(
-            exact_matrix, residual, difference_t):
-        integers = _integerize([
-            *row, -residual_value + t_value * t_candidate, -t_value])
-        integer_matrix.append(integers[:d - 1])
-        constant_rhs.append(integers[-2]); slope_rhs.append(integers[-1])
-    remaining = max(0.1, deadline - time.perf_counter())
-    constant_delta = _bareiss_solve(
-        integer_matrix, constant_rhs, remaining / 2)
-    remaining = max(0.1, deadline - time.perf_counter())
-    slope_delta = _bareiss_solve(
-        integer_matrix, slope_rhs, remaining)
-    source_constant = list(xi_candidate)
-    source_slope = [Fraction(0) for _ in range(source_count)]
-    c_constant, c_slope = list(c_candidate), [Fraction(0)] * d
-    for ordinal, column in enumerate(columns):
-        index = int(column)
-        source_constant[index] += constant_delta[ordinal]
-        source_slope[index] = slope_delta[ordinal]
-        for feature in range(d):
-            c_constant[feature] += (centered_rows[ordinal][feature]
-                                    * constant_delta[ordinal])
-            c_slope[feature] += (centered_rows[ordinal][feature]
-                                 * slope_delta[ordinal])
-    polynomial = (
-        Fraction(d) - sum((value * value for value in c_slope),
-                                  Fraction(0)),
-        -2 * _dot(c_constant, c_slope),
-        -sum((value * value for value in c_constant), Fraction(0))
-        - d * problem.epsilon)
-    while polynomial and polynomial[0] == 0:
-        polynomial = polynomial[1:]
-    if len(polynomial) not in (2, 3):
-        raise ExactSolveFailure("reconstructed LayerNorm polynomial is invalid")
-    roots = []
-    if len(polynomial) == 2:
-        roots = [("rational", -polynomial[1] / polynomial[0], None)]
-    else:
-        a, b, c = polynomial
-        discriminant = b * b - 4 * a * c
-        if discriminant < 0:
-            raise ExactSolveFailure("reconstructed quadratic has no real root")
-        exact_sqrt = _fraction_square_root(discriminant)
-        if exact_sqrt is not None:
-            roots = [("rational", (-b + sign * exact_sqrt) / (2 * a), None)
-                     for sign in (-1, 1)]
-        else:
-            square = math.sqrt(float(discriminant))
-            approximations = [(-float(b) + sign * square) / (2 * float(a))
-                              for sign in (-1, 1)]
-            roots = [("algebraic", None,
-                      _isolate_quadratic_root(polynomial, value))
-                     for value in approximations]
-    failures = []
-    for kind, rational_root, interval in roots:
-        try:
-            if kind == "rational":
-                values = [constant + slope * rational_root for
-                          constant, slope in zip(source_constant,
-                                                 source_slope)]
-                witness = {
-                    "schema": WITNESS_SCHEMA,
-                    "source_values": [_fs(value) for value in values],
-                    "t": _fs(rational_root),
-                    "relu_active": [bool(value) for value in pattern]}
-                replay = replay_exact_perspective_witness(problem, witness)
-            else:
-                witness = {
-                    "schema": WITNESS_SCHEMA,
-                    "algebraic_root": {
-                        "polynomial": [_fs(value) for value in polynomial],
-                        "isolating_interval": [_fs(value) for value in interval]},
-                    "source_affine": [
-                        {"constant": _fs(constant), "slope": _fs(slope)}
-                        for constant, slope in zip(source_constant,
-                                                   source_slope)],
-                    "t_affine": {"constant": "0/1", "slope": "1/1"},
-                    "relu_active": [bool(value) for value in pattern]}
-                replay = replay_algebraic_perspective_witness(problem, witness)
-            return witness, {
-                "attempted": True, "verified": True,
-                "method": "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
-                "selected_correction_variables": len(selected),
-                "selected_columns_sha256": _sha_json(
-                    [int(value) for value in columns]),
-                "polynomial": [_fs(value) for value in polynomial],
-                "runtime_seconds": time.perf_counter() - started,
-                **replay}
-        except RuntimeError as error:
-            failures.append(f"{type(error).__name__}: {error}")
+                for row, coefficient in zip(difference_matrix, difference_t)]
+    # Same authenticated box upper bound as the LP, recomputed exactly.
+    c_lower, c_upper = list(centered_x0), list(centered_x0)
+    for row, lo, hi in zip(problem.X, problem.low, problem.high):
+        mean = sum(row, Fraction(0)) / d
+        for feature, coefficient in enumerate(row):
+            a, b = (coefficient - mean) * lo, (coefficient - mean) * hi
+            c_lower[feature] += min(a, b)
+            c_upper[feature] += max(a, b)
+    t_upper = _exact_sqrt_upper(sum(
+        (max(abs(lo), abs(hi)) ** 2 for lo, hi in zip(c_lower, c_upper)),
+        Fraction(0)) / d + problem.epsilon)
+    t_lower, _lower_proof = exact_dyadic_sqrt_lower(problem.epsilon)
+    families = []
+    centered_cache = {}
+
+    def centered_source(index):
+        if index not in centered_cache:
+            row = problem.X[index]
+            mean = sum(row, Fraction(0)) / d
+            centered_cache[index] = [value - mean for value in row]
+        return centered_cache[index]
+
+    # Each basis supplies t and, if available, a nonbasic source direction.
+    # Fixed sources remain the exact dyadic LP proposal. All work is bounded by
+    # the existing global deadline and at most eight 30-second family budgets.
+    for basis in bases:
+        columns = basis["columns"]
+        remaining_sources = sorted(
+            (index for index in range(source_count)
+             if index not in columns and problem.low[index] < problem.high[index]),
+            key=lambda index: (-slack[index], index))
+        directions = [None] + remaining_sources[:1]
+        exact_matrix = None
+        for free_source in directions:
+            if len(families) >= 8 or time.perf_counter() >= deadline:
+                break
+            family_started = time.perf_counter()
+            family_deadline = min(deadline, family_started + 30.0)
+            row = {key: value for key, value in basis.items() if key != "columns"}
+            row.update(
+                free_parameter="t" if free_source is None else
+                f"source_delta[{free_source}]",
+                per_family_time_cap_seconds=30.0,
+                alpha_interval=None, polynomial_degree=None,
+                roots_total=0, roots_inside_interval=0,
+                exact_replay_result=None, verified=False)
+            restore_alarm = _start_reconstruction_alarm(
+                family_deadline - family_started)
+            try:
+                fixed_conditions = [
+                    (f"fixed_source[{index}]", value, Fraction(0), lo, hi)
+                    for index, (value, lo, hi) in enumerate(zip(
+                        xi_candidate, problem.low, problem.high))
+                    if index not in columns and index != free_source]
+                if free_source is not None:
+                    fixed_conditions.append(("fixed_t", t_candidate,
+                                             Fraction(0), t_lower, t_upper))
+                early_interval = exact_affine_parameter_interval(fixed_conditions)
+                if early_interval["alpha_interval_empty"]:
+                    row.update(early_interval, alpha_interval=early_interval,
+                               polynomial_constructed=False)
+                    raise ExactSolveFailure("fixed family constraints violate authenticated box/scale")
+                if exact_matrix is None:
+                    exact_matrix = [[_dot(m, centered_source(column))
+                                     for column in columns]
+                                    for m in difference_matrix]
+                t_constant = Fraction(0) if free_source is None else t_candidate
+                t_slope = Fraction(1) if free_source is None else Fraction(0)
+                free_c = ([Fraction(0)] * d if free_source is None
+                          else centered_source(free_source))
+                constant_rhs = [
+                    -r + v * (t_candidate - t_constant)
+                    for r, v in zip(residual, difference_t)]
+                slope_rhs = [-v * t_slope - _dot(m, free_c)
+                             for m, v in zip(difference_matrix, difference_t)]
+                integer_matrix, rhs_a, rhs_b = [], [], []
+                for m, a, b in zip(exact_matrix, constant_rhs, slope_rhs):
+                    integers = _integerize([*m, a, b])
+                    integer_matrix.append(integers[:-2])
+                    rhs_a.append(integers[-2])
+                    rhs_b.append(integers[-1])
+                def remaining():
+                    value = family_deadline - time.perf_counter()
+                    if value <= 0:
+                        raise ExactSolveFailure("reconstruction family deadline")
+                    return value
+                constant_delta = _bareiss_solve(integer_matrix, rhs_a,
+                                                remaining() / 2)
+                slope_delta = _bareiss_solve(integer_matrix, rhs_b, remaining())
+                source_constant = list(xi_candidate)
+                source_slope = [Fraction(0)] * source_count
+                c_constant, c_slope = list(c_candidate), list(free_c)
+                if free_source is not None:
+                    source_slope[free_source] = Fraction(1)
+                for ordinal, column in enumerate(columns):
+                    source_constant[column] += constant_delta[ordinal]
+                    source_slope[column] = slope_delta[ordinal]
+                    for feature, value in enumerate(centered_source(column)):
+                        c_constant[feature] += value * constant_delta[ordinal]
+                        c_slope[feature] += value * slope_delta[ordinal]
+                # Exact cancellation identities are linear node constraints.
+                # They must hold identically before this family can be searched.
+                if any(_dot(m, c_constant) + v * t_constant or
+                       _dot(m, c_slope) + v * t_slope
+                       for m, v in zip(difference_matrix, difference_t)):
+                    raise ExactSolveFailure("affine family cancellation replay failed")
+                remaining()
+                found, evidence = _replay_affine_family(
+                    problem, pattern, source_constant, source_slope,
+                    c_constant, c_slope, t_constant, t_slope, t_upper, node_lp)
+                row.update(evidence)
+                row["alpha_interval"] = {
+                    key: evidence[key] for key in (
+                        "alpha_interval_lower", "alpha_interval_upper",
+                        "alpha_interval_empty", "active_constraint_at_lower",
+                        "active_constraint_at_upper")}
+                row["verified"] = found is not None
+            except (RuntimeError, ExactSolveFailure, OverflowError) as error:
+                found = None
+                row["failure"] = f"{type(error).__name__}: {error}"
+            finally:
+                restore_alarm()
+            row["runtime_seconds"] = time.perf_counter() - family_started
+            families.append(row)
+            print(json.dumps({"stage": "box_aware_reconstruction_family",
+                              "family": len(families) - 1, **row}),
+                  flush=True)
+            if found is not None:
+                return found, {
+                    "attempted": True, "verified": True,
+                    "method": "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
+                    "families": families,
+                    "selected_correction_variables": d - 1,
+                    "runtime_seconds": time.perf_counter() - started}
+        if len(families) >= 8 or time.perf_counter() >= deadline:
+            break
     return None, {
         "attempted": True, "verified": False,
         "method": "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
-        "selected_correction_variables": len(selected),
-        "selected_columns_sha256": _sha_json([int(value) for value in columns]),
-        "polynomial": [_fs(value) for value in polynomial],
-        "root_replay_failures": failures,
+        "families": families, "permits_infeasibility_claim": False,
+        "portfolio_limit": 8, "per_family_time_cap_seconds": 30.0,
         "runtime_seconds": time.perf_counter() - started}
 
 
@@ -2737,9 +3043,11 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
                         reconstruct_exact_fixed_pattern_witness(
                             exact_problem, solution, pattern,
                             EXPECTED_SOURCES,
-                            min(600.0, max(
+                            min(240.0, max(
                                 0.1, started + wall_seconds
-                                - time.perf_counter())))
+                                - time.perf_counter())),
+                            node_lp=lp_with_relu_phases(
+                                lp, dict(enumerate(pattern)), EXPECTED_SOURCES))
                 except (RuntimeError, ExactSolveFailure) as error:
                     reconstruction = {
                         "attempted": True, "verified": False,
@@ -2755,7 +3063,9 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             record = _atomic_json(
                 artifact_dir / "exact_layernorm_cancellation_witness.json",
                 found)
-            replay = replay_exact_perspective_witness(exact_problem, record)
+            replay = (replay_algebraic_perspective_witness(exact_problem, record)
+                      if "algebraic_root" in record else
+                      replay_exact_perspective_witness(exact_problem, record))
             return record, {
                 **evidence, "witness_path": str(
                     artifact_dir / "exact_layernorm_cancellation_witness.json"),
@@ -2831,7 +3141,8 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             **model,
         },
         "t_bounds": {
-            "lower": "0/1", "upper": _fs(bounds["t_upper"]),
+            "lower": _fs(bounds["t_lower"]), "upper": _fs(bounds["t_upper"]),
+            **bounds["t_lower_proof"],
             "max_centered_norm_squared": _fs(bounds["max_norm_squared"]),
             "derivation": (
                 "exact dyadic shared-source affine coordinate supports; "

@@ -781,3 +781,244 @@ def test_feasible_root_zero_continuation_state_is_forbidden_by_flow():
     assert found is None
     assert not (branch["nodes_created"] == 0
                 and branch["phase_patterns_attempted"] == 0)
+
+
+def test_exact_positive_dyadic_scale_bound_without_float_sqrt(monkeypatch):
+    monkeypatch.setattr(ORACLE.math, "sqrt", lambda *_: pytest.fail("float sqrt"))
+    epsilon = F.from_float(1e-12)
+    lower, proof = ORACLE.exact_dyadic_sqrt_lower(epsilon)
+    assert lower > 0
+    assert lower * lower <= epsilon < (lower + F(1, 2 ** 64)) ** 2
+    assert lower == F(18446744073709, 2 ** 64)
+    assert proof["epsilon_exact"] == ORACLE._fs(epsilon)
+    assert proof["t_lower_bound_denominator_bits"] == 64
+    assert proof["proof_check_L_squared_le_epsilon"]
+
+
+@pytest.mark.parametrize("epsilon", [F(0), F(-1), F(1, 2 ** 200)])
+def test_uncertifiable_positive_scale_bound_fails_closed(epsilon):
+    with pytest.raises(RuntimeError):
+        ORACLE.exact_dyadic_sqrt_lower(epsilon)
+
+
+def test_every_exact_layernorm_witness_has_implied_lower_bound():
+    fixture = replace(problem(), epsilon=F(3))
+    assert ORACLE.replay_exact_perspective_witness(
+        fixture, witness(t="2/1"))["verified"]
+    lower, _proof = ORACLE.exact_dyadic_sqrt_lower(fixture.epsilon)
+    assert F(2) >= lower
+
+
+def test_canonical_and_scaled_lp_exclude_zero_scale():
+    d = ORACLE.DIMENSION
+    zero = np.zeros(d)
+    matrix = np.zeros((d, d))
+    bounds = ORACLE._derive_exact_bounds(
+        zero, np.zeros((1, d)), [F(-1)], [F(1)], np.ones(d), zero,
+        matrix, zero, F(1, 4))
+    lp = ORACLE.build_exact_perspective_lp(
+        [F(-1)], [F(1)], np.ones(d), zero, matrix, zero, matrix, zero, bounds)
+    t = lp.variable_names.index("t")
+    assert lp.column_lower[t] == F(1, 2) > 0
+    scaled = scale(lp)
+    assert scaled.lp.column_lower[t] == lp.column_lower[t]
+    assert scaled.lp.column_upper[t] == lp.column_upper[t]
+
+
+@pytest.mark.parametrize("conditions,lower,upper", [
+    ([("source", F(1, 2), F(-2), F(-1), F(1))], F(-1, 4), F(3, 4)),
+    ([("t", F(0), F(1), F(1, 2), F(2))], F(1, 2), F(2)),
+    ([("active", F(-1), F(2), F(0), None)], F(1, 2), None),
+    ([("inactive", F(1), F(-2), None, F(0))], F(1, 2), None),
+    ([("source", F(0), F(1), F(-1), F(1)),
+      ("t", F(0), F(1), F(1, 2), F(2)),
+      ("inactive", F(-3, 4), F(1), None, F(0))], F(1, 2), F(3, 4)),
+])
+def test_exact_source_scale_relu_interval_intersections(conditions, lower, upper):
+    interval = ORACLE.exact_affine_parameter_interval(conditions)
+    assert not interval["alpha_interval_empty"]
+    assert interval["alpha_interval_lower"] == (ORACLE._fs(lower)
+                                                if lower is not None else None)
+    assert interval["alpha_interval_upper"] == (ORACLE._fs(upper)
+                                                if upper is not None else None)
+
+
+def test_exact_interval_empty_and_endpoint_constraint_reporting():
+    interval = ORACLE.exact_affine_parameter_interval([
+        ("box", F(0), F(1), F(-1), F(1)),
+        ("phase", F(-2), F(1), F(0), None)])
+    assert interval["alpha_interval_empty"]
+    assert interval["active_constraint_at_lower"] == ["phase:lower"]
+    assert interval["active_constraint_at_upper"] == ["box:upper"]
+
+
+def test_empty_family_stops_before_polynomial_construction(monkeypatch):
+    fixture = replace(problem(), epsilon=F(1))
+    monkeypatch.setattr(ORACLE, "_fraction_square_root",
+                        lambda *_: pytest.fail("polynomial root work"))
+    found, evidence = ORACLE._replay_affine_family(
+        fixture, [True, False], [F(2)], [F(0)], [F(1), F(-1)],
+        [F(0), F(0)], F(0), F(1), F(2))
+    assert found is None and evidence["alpha_interval_empty"]
+    assert not evidence["polynomial_constructed"]
+
+
+def test_outside_roots_are_not_exact_replayed(monkeypatch):
+    fixture = replace(problem(), epsilon=F(1))
+    monkeypatch.setattr(ORACLE, "replay_exact_perspective_witness",
+                        lambda *_: pytest.fail("outside root replayed"))
+    monkeypatch.setattr(ORACLE, "replay_algebraic_perspective_witness",
+                        lambda *_: pytest.fail("outside root replayed"))
+    monkeypatch.setattr(ORACLE, "_isolate_quadratic_root",
+                        lambda *_: pytest.fail("outside root isolated"))
+    found, evidence = ORACLE._replay_affine_family(
+        fixture, [True, False], [F(0)], [F(0)], [F(1), F(-1)],
+        [F(0), F(0)], F(0), F(1), F(1))
+    assert found is None
+    assert evidence["roots_total"] == 2
+    assert evidence["roots_inside_interval"] == 0
+
+
+def test_inside_algebraic_root_exact_replays():
+    fixture = replace(problem(), epsilon=F(1))
+    found, evidence = ORACLE._replay_affine_family(
+        fixture, [True, False], [F(0)], [F(0)], [F(1), F(-1)],
+        [F(0), F(0)], F(0), F(1), F(2))
+    assert found is not None
+    assert evidence["roots_inside_interval"] == 1
+    assert evidence["exact_replay_result"]["verified"]
+    assert ORACLE.replay_algebraic_perspective_witness(fixture, found)["verified"]
+
+
+def test_slack_aware_basis_order_is_deterministic():
+    sensitivity = np.asarray([[1.0, 1.0, 1.0]])
+    arguments = (sensitivity, [0.99, 0.0, 0.8], [F(-1)] * 3, [F(1)] * 3)
+    first, _slack = ORACLE.box_aware_correction_bases(*arguments)
+    second, _slack = ORACLE.box_aware_correction_bases(*arguments)
+    assert first == second
+    assert first[0]["columns"] == (1,)
+    assert first[0]["minimum_selected_source_slack"] == 1.0
+
+
+def test_rank_deficient_basis_rejected_before_bareiss(monkeypatch):
+    monkeypatch.setattr(ORACLE, "_bareiss_solve", lambda *_: pytest.fail("Bareiss"))
+    with pytest.raises(ORACLE.ExactSolveFailure, match="rank deficient"):
+        ORACLE.box_aware_correction_bases(
+            np.zeros((2, 3)), [0.0] * 3, [F(-1)] * 3, [F(1)] * 3)
+
+
+def test_alternate_basis_succeeds_after_out_of_box_family(monkeypatch):
+    fixture = ORACLE.ExactPerspectiveProblem(
+        x0=(F(2), F(-2)), X=((F(1), F(-1)), (F(4), F(-4))),
+        low=(F(-1), F(-1)), high=(F(1), F(1)),
+        gamma=(F(1), F(1)), beta=(F(0), F(0)), epsilon=F(1),
+        W1=((F(1), F(0)), (F(0), F(1))), b1=(F(0), F(0)),
+        W2=((F(0), F(0)), (F(0), F(0))), b2=(F(0), F(0)))
+    bases = [{"columns": (i,), "basis_sha256": ORACLE._sha_json((i,)),
+              "minimum_selected_source_slack": 1.0, "numerical_rank": 1}
+             for i in (0, 1)]
+    monkeypatch.setattr(ORACLE, "box_aware_correction_bases",
+                        lambda *_: (bases, np.ones(2)))
+    found, evidence = ORACLE.reconstruct_exact_fixed_pattern_witness(
+        fixture, np.zeros(5), [True, False], 2, 2.0)
+    assert found is not None
+    assert evidence["families"][0]["alpha_interval_empty"]
+    assert evidence["families"][-1]["basis_sha256"] == bases[1]["basis_sha256"]
+    assert ORACLE.replay_exact_perspective_witness(fixture, found)["verified"]
+
+
+def test_failed_portfolio_does_not_prove_infeasibility(monkeypatch):
+    fixture = replace(problem(), X=((F(1), F(-1)),), epsilon=F(1),
+                      W2=((F(0), F(0)), (F(0), F(0))))
+    monkeypatch.setattr(ORACLE, "_replay_affine_family",
+                        lambda *_: (None, {
+                            "alpha_interval_lower": "0/1",
+                            "alpha_interval_upper": "1/1",
+                            "alpha_interval_empty": False,
+                            "active_constraint_at_lower": [],
+                            "active_constraint_at_upper": []}))
+    found, evidence = ORACLE.reconstruct_exact_fixed_pattern_witness(
+        fixture, np.zeros(4), [True, False], 1, 2.0)
+    assert found is None and not evidence["permits_infeasibility_claim"]
+    assert ORACLE.scientific_status_from_proof(
+        exact_witness_verified=False, root_certificate_verified=False,
+        complete_tree_verified=False, open_nodes=1) == ORACLE.INCONCLUSIVE
+
+
+@pytest.mark.parametrize("sign,lower,upper,inside", [
+    (-1, F(-2), F(-1), True), (-1, F(0), F(2), False),
+    (1, F(1), F(2), True), (1, F(-2), F(-1), False),
+    (1, F(0), F(1), False), (-1, F(-1), F(0), False),
+])
+def test_irrational_root_filter_uses_exact_endpoint_comparisons(sign, lower, upper, inside):
+    interval = ORACLE.exact_affine_parameter_interval([
+        ("alpha", F(0), F(1), lower, upper)])
+    assert ORACLE._irrational_quadratic_branch_inside(
+        F(1), F(0), F(8), sign, interval) is inside
+
+
+def test_family_alarm_interrupts_and_restores_handler():
+    import signal
+    previous = signal.getsignal(signal.SIGALRM)
+    restore = ORACLE._start_reconstruction_alarm(0.01)
+    try:
+        with pytest.raises(ORACLE.ExactSolveFailure, match="family deadline"):
+            time.sleep(0.1)
+    finally:
+        restore()
+    assert signal.getsignal(signal.SIGALRM) == previous
+    assert signal.getitimer(signal.ITIMER_REAL)[0] == 0
+
+
+def test_nonbasic_source_direction_is_attempted(monkeypatch):
+    fixture = replace(problem(), X=((F(1), F(-1)), (F(2), F(-2))),
+                      low=(F(-1), F(-1)), high=(F(1), F(1)), epsilon=F(1),
+                      W2=((F(0), F(0)), (F(0), F(0))))
+    monkeypatch.setattr(ORACLE, "_replay_affine_family", lambda *_: (None, {
+        "alpha_interval_lower": "0/1", "alpha_interval_upper": "1/1",
+        "alpha_interval_empty": False, "active_constraint_at_lower": [],
+        "active_constraint_at_upper": []}))
+    found, evidence = ORACLE.reconstruct_exact_fixed_pattern_witness(
+        fixture, np.asarray([0.0, 0.0, 0.0, 0.0, 1.0]), [True, False], 2, 2.0)
+    assert found is None
+    assert any(row["free_parameter"].startswith("source_delta[")
+               for row in evidence["families"])
+    assert len(evidence["families"]) <= 8
+
+
+def test_existing_linear_node_rows_intersect_family_before_root_work(monkeypatch):
+    fixture = replace(problem(), epsilon=F(1))
+    node = ORACLE.ExactCanonicalLP(
+        tuple(str(i) for i in range(8)), (None,) * 8, (None,) * 8,
+        (ORACLE.ExactLPRow("extra_t_cut", (3,), (F(1),), None, F(1)),))
+    monkeypatch.setattr(ORACLE, "_isolate_quadratic_root",
+                        lambda *_: pytest.fail("root outside node interval"))
+    found, evidence = ORACLE._replay_affine_family(
+        fixture, [True, False], [F(0)], [F(0)], [F(1), F(-1)],
+        [F(0), F(0)], F(0), F(1), F(2), node)
+    assert found is None and evidence["roots_inside_interval"] == 0
+    assert "node:extra_t_cut:upper" in evidence["active_constraint_at_upper"]
+
+
+def test_portfolio_attempts_at_most_eight_families(monkeypatch):
+    n = 9
+    fixture = replace(problem(), x0=(F(0), F(0)),
+                      X=tuple((F(i + 1), F(-i - 1)) for i in range(n)),
+                      low=(F(-1),) * n, high=(F(1),) * n, epsilon=F(1),
+                      W2=((F(0), F(0)), (F(0), F(0))))
+    bases = [{"columns": (i,), "basis_sha256": str(i),
+              "minimum_selected_source_slack": 1.0, "numerical_rank": 1}
+             for i in range(8)]
+    monkeypatch.setattr(ORACLE, "box_aware_correction_bases",
+                        lambda *_: (bases, np.ones(n)))
+    monkeypatch.setattr(ORACLE, "_replay_affine_family", lambda *_: (None, {
+        "alpha_interval_lower": "0/1", "alpha_interval_upper": "1/1",
+        "alpha_interval_empty": False, "active_constraint_at_lower": [],
+        "active_constraint_at_upper": []}))
+    candidate = np.zeros(n + 3)
+    candidate[n + 2] = 1.0
+    found, evidence = ORACLE.reconstruct_exact_fixed_pattern_witness(
+        fixture, candidate, [True, False], n, 2.0)
+    assert found is None
+    assert len(evidence["families"]) == 8
+    assert not evidence["permits_infeasibility_claim"]
