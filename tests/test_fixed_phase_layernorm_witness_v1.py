@@ -557,7 +557,9 @@ def test_limited_proposal_cannot_bypass_failed_exact_replay(monkeypatch, tmp_pat
     monkeypatch.setattr(O, "replay_exact_linear_point", reject_replay)
     witness, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
                                                       lambda *_: result, 2.)
-    assert calls and witness is None and not report["verified"]
+    assert not calls and witness is None and not report["verified"]
+    assert report["anchor_reconstruction_skipped_reason"] == "UNUSABLE_PROPOSAL"
+    assert not report["anchor_reconstruction_attempted"]
 
 
 def test_real_highs_time_limit_warning_has_proposal_only_handling(tmp_path):
@@ -630,6 +632,189 @@ def test_fixed_phase_infeasibility_needs_exact_farkas_replay():
                     ("cancellation[1]", -1, 1), ("authenticated_source_equality", -1, 2))]}
     assert O.verify_exact_lp_farkas(lp, cert)["verified"]
     assert O.scientific_status_from_proof(root_certificate_verified=True) == O.EXCLUDED
+
+
+def infeasible_fixed_phase_fixture():
+    p, lp, pattern, _ = fixture()
+    lp = replace(lp, rows=lp.rows + (
+        O.ExactLPRow("authenticated_source_equality", (0,), (F(1),), F(1), F(1)),))
+    names = {row.name: i for i, row in enumerate(lp.rows)}
+    certificate = {"schema": "CORET_EXACT_LP_FARKAS_CERTIFICATE_V1",
+        "canonical_lp_sha256": lp.identity(), "multipliers": [
+            {"kind": "row", "index": names[name], "orientation": orientation,
+             "multiplier": str(multiplier)} for name, orientation, multiplier in (
+                ("centered[0]", -1, 1), ("centered[1]", 1, 1),
+                ("cancellation[1]", -1, 1), ("authenticated_source_equality", -1, 2))]}
+    assert O.verify_exact_lp_farkas(lp, certificate)["verified"]
+    return p, lp, pattern, certificate
+
+
+def test_infeasible_primal_never_reconstructed_and_exact_farkas_is_phase_local(monkeypatch):
+    p, lp, pattern, certificate = infeasible_fixed_phase_fixture()
+    calls = []
+    def repair(model, ray, seconds):
+        calls.append(model.identity())
+        return certificate, [], "EXACT_FARKAS_VERIFIED"
+    monkeypatch.setattr(O, "repair_direct_dual_ray", repair)
+    monkeypatch.setattr(O, "FixedPhaseAnchorWorkspace",
+                        lambda *_: pytest.fail("infeasible LP must not manufacture an anchor"))
+    proposal = {"model_status": "Infeasible", "column_values": point(p, pattern, [0], 2),
+                "proposal_available": True, "original_row_dual_ray": np.ones(len(lp.rows))}
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: proposal, 2.)
+    assert found is None and calls == [lp.identity()]
+    assert not report["anchor_reconstruction_attempted"]
+    assert report["fixed_phase_farkas_attempted"] and report["fixed_phase_farkas_verified"]
+    assert report["search_status"] == "FIXED_PHASE_LINEARLY_INFEASIBLE"
+    assert report["certificate_scope"] == "THIS_FIXED_PHASE_LINEAR_LP_ONLY"
+    assert not report["permits_infeasibility_claim"] and not report["permits_node_exclusion"]
+    assert O.scientific_status_from_proof(open_nodes=1) == O.INCONCLUSIVE
+
+
+def test_infeasible_without_exact_certificate_is_inconclusive(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    calls = []
+    def fallback(model, _seconds):
+        calls.append(model.identity())
+        return None, {"certificate_verified": False}
+    monkeypatch.setattr(O, "phase1_exact_farkas_fallback", fallback)
+    monkeypatch.setattr(O, "FixedPhaseAnchorWorkspace", lambda *_: pytest.fail("no anchor"))
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: {
+        "model_status": "Infeasible", "column_values": point(p, pattern, [0], 1)}, 2.)
+    assert calls == [lp.identity()] and found is None
+    assert report["fixed_phase_farkas_attempted"] and not report["fixed_phase_farkas_verified"]
+    assert report["search_status"] == "INCONCLUSIVE" and not report["permits_infeasibility_claim"]
+
+
+def test_unreplayed_farkas_claim_never_authorizes_fixed_phase_exclusion(monkeypatch):
+    p, lp, pattern, certificate = infeasible_fixed_phase_fixture()
+    certificate["canonical_lp_sha256"] = "different_lp"
+    monkeypatch.setattr(O, "repair_direct_dual_ray", lambda *_: (
+        certificate, [], "EXACT_FARKAS_VERIFIED"))
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: {
+        "model_status": "Infeasible", "column_values": None,
+        "original_row_dual_ray": np.ones(len(lp.rows))}, 2.)
+    assert found is None and not report["fixed_phase_farkas_verified"]
+    assert report["search_status"] == "INCONCLUSIVE"
+    assert "exact_certificate_rejection" in report
+    assert not report["permits_infeasibility_claim"]
+
+
+def test_unknown_out_of_box_discarded_before_correction(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    monkeypatch.setattr(O, "FixedPhaseAnchorWorkspace", lambda *_: pytest.fail("no blind correction"))
+    proposal = {"model_status": "Unknown", "column_values": np.asarray(
+        point(p, pattern, [5], 2), dtype=float), "proposal_available": True}
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: proposal, 2.)
+    assert found is None and report["search_status"] == "INCONCLUSIVE"
+    assert report["proposal_primal_present"]
+    assert not report["proposal_primal_numerically_within_bounds"]
+    assert not report["anchor_reconstruction_attempted"]
+    assert report["anchor_reconstruction_skipped_reason"] == "UNUSABLE_PROPOSAL"
+    assert not report["fixed_phase_farkas_attempted"]
+
+
+def test_unknown_in_box_but_row_violation_is_discarded(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    candidate = np.asarray(point(p, pattern, [0], 2), dtype=float)
+    candidate[1] = .01
+    monkeypatch.setattr(O, "FixedPhaseAnchorWorkspace", lambda *_: pytest.fail("no blind correction"))
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: {
+        "model_status": "Unknown", "column_values": candidate}, 2.)
+    assert found is None and report["proposal_primal_numerically_within_bounds"]
+    assert not report["proposal_primal_numerically_within_rows"]
+    assert report["first_numerical_row_failure"]["name"] == "centered[0]"
+    assert report["anchor_reconstruction_skipped_reason"] == "UNUSABLE_PROPOSAL"
+
+
+@pytest.mark.parametrize("status", ["Unknown", "Time limit reached", "Iteration limit reached",
+                                   "Optimal", "Feasible"])
+def test_numerically_admissible_status_enters_exact_reconstruction(monkeypatch, status):
+    p, lp, pattern, _ = fixture()
+    calls = []
+    solve = O._solve_exact_correction_rhs
+    def counted_solve(*args):
+        calls.append(args)
+        return solve(*args)
+    monkeypatch.setattr(O, "_solve_exact_correction_rhs", counted_solve)
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: {
+        "model_status": status, "column_values": np.asarray(point(p, pattern, [0], 1), dtype=float)}, 2.)
+    assert calls and found is not None
+    assert report["proposal_primal_numerically_within_bounds"]
+    assert report["proposal_primal_numerically_within_rows"]
+    assert report["anchor_reconstruction_attempted"] and report["exact_anchor_replay_verified"]
+    assert report["anchors"][0]["correction_intervals_derived_before_solve"]
+    assert report["anchors"][0]["exact_correction_constraints_verified"]
+    assert not report["fixed_phase_farkas_attempted"]
+    assert O.replay_fixed_phase_semantic_witness(p, lp, found)["verified"]
+
+
+def test_correction_basis_cannot_leave_source_box_before_solving(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    lower, upper = list(lp.column_lower), list(lp.column_upper)
+    lower[0], upper[0] = F(1), F(2)
+    lp = replace(lp, column_lower=tuple(lower), column_upper=tuple(upper))
+    workspace = O.FixedPhaseAnchorWorkspace(p, pattern, lp)
+    monkeypatch.setattr(O, "_solve_exact_correction_rhs", lambda *_: pytest.fail("inadmissible basis must be skipped"))
+    with pytest.raises(O.ExactSolveFailure, match="correction basis") as failure:
+        workspace.reconstruct_anchor(np.asarray(point(p, pattern, [1], 2), dtype=float), 2.)
+    assert not failure.value.anchor_diagnostic["exact_correction_applied"]
+
+
+def test_retained_inequality_participates_in_pre_solve_correction_intervals(monkeypatch):
+    p, lp, pattern, _ = fixture(sources=2)
+    lp = replace(lp, rows=lp.rows + (O.ExactLPRow(
+        "retained_source_cut", (1,), (F(1),), F(0), None),))
+    workspace = O.FixedPhaseAnchorWorkspace(p, pattern, lp)
+    monkeypatch.setattr(O, "_solve_exact_correction_rhs", lambda *_: pytest.fail("retained cut must constrain basis"))
+    with pytest.raises(O.ExactSolveFailure, match="retained_source_cut"):
+        workspace.reconstruct_anchor(np.asarray(point(p, pattern, [1, 1], 2), dtype=float), 2.)
+
+
+def test_bad_exact_correction_rejected_before_application(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    workspace = O.FixedPhaseAnchorWorkspace(p, pattern, lp)
+    monkeypatch.setattr(O, "_solve_exact_correction_rhs", lambda *_: [[F(100)]])
+    calls, make_point = [], O._fixed_phase_point_from_sources
+    def checked_point(*args):
+        calls.append(args[2])
+        assert all(F(-4) <= value <= F(4) for value in args[2])
+        return make_point(*args)
+    monkeypatch.setattr(O, "_fixed_phase_point_from_sources", checked_point)
+    with pytest.raises(O.ExactSolveFailure, match="outside admissible interval") as failure:
+        workspace.reconstruct_anchor(np.asarray(point(p, pattern, [0], 2), dtype=float), 2.)
+    assert len(calls) == 2  # Construct proposal and base, never an escaped anchor.
+    diagnostic = failure.value.anchor_diagnostic
+    assert not diagnostic["exact_correction_applied"]
+    assert diagnostic["first_exact_replay_failure"] == "correction[0]: source/inequality interval"
+
+
+def test_first_exact_replay_failure_is_reported_for_admitted_proposal(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    def reject(*_):
+        raise RuntimeError("deliberate complete replay rejection")
+    monkeypatch.setattr(O, "replay_exact_linear_point", reject)
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: {
+        "model_status": "Unknown", "column_values": np.asarray(point(p, pattern, [0], 1), dtype=float)}, 2.)
+    assert found is None and report["anchor_reconstruction_attempted"]
+    assert report["first_exact_replay_failure"] == "deliberate complete replay rejection"
+    assert report["search_status"] == "INCONCLUSIVE" and not report["permits_infeasibility_claim"]
+
+
+def test_correction_interval_projection_matches_actual_source_and_scale_changes():
+    p, lp, pattern, _ = fixture(cancellation_anywhere=True, sources=2)
+    workspace = O.FixedPhaseAnchorWorkspace(p, pattern, lp)
+    q = point(p, pattern, [F(1, 2), F(1, 3)], F(2))
+    selected = (0, 1, 2)  # Includes scale/t.
+    conditions, intervals = workspace.correction_admissibility(q, selected)
+    delta = [F(1, 7), F(-1, 11), F(1, 13)]
+    shifted = point(p, pattern, [q[0] + delta[0], q[1] + delta[1]], q[4] + delta[2])
+    by_name = {row.name: row for row in lp.rows}
+    for label, base, coefficients, _lo, _hi in conditions:
+        reconstructed = base + sum((value * delta[j] for j, value in coefficients), F(0))
+        actual = (shifted[int(label[7:-1])] if label.startswith("column[") else
+                  O._dot(by_name[label].coefficients, [shifted[i] for i in by_name[label].indices]))
+        assert reconstructed == actual
+    assert len(intervals) == 3
 
 
 @pytest.mark.parametrize("bad_coefficient", [1.0, "c*t"])

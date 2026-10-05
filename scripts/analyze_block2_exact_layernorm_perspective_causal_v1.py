@@ -2481,8 +2481,11 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
     status_name = highs.modelStatusToString(status)
     diagnostic["model_status_at_run"] = status_name
     check_status("run", run_status)
-    ray_status, ray_exists = ((highspy.HighsStatus.kOk, False) if proposal_only
-                              else highs.getDualRayExist())
+    # An infeasible fixed-phase proposal may supply an UNTRUSTED row ray.
+    # Only exact Farkas replay, scoped to that LP, can authorize its use.
+    ray_status, ray_exists = ((highspy.HighsStatus.kOk, False)
+        if proposal_only and status != highspy.HighsModelStatus.kInfeasible
+        else highs.getDualRayExist())
     raw_ray = None
     ray_call_status = ray_status
     if ray_status == highspy.HighsStatus.kOk and ray_exists:
@@ -3521,6 +3524,82 @@ class FixedPhaseAnchorWorkspace:
             else:
                 self.nullity_reason = "EXTRA_EQUALITIES_OR_UNPROVED_RANK_UPPER_BOUND"
 
+    def correction_admissibility(self, q, selected):
+        """Project ALL LP constraints onto only the selected correction axes.
+
+        No dense source-by-correction rational matrix is constructed. Source
+        columns are one-hot; only the c/t/g/u definitions have dense columns.
+        These are necessary interval guards, not an infeasibility proof.
+        """
+        n, d, k = self.n, self.d, len(selected)
+        mapping = {i: {j: Fraction(1)} for j, i in enumerate(selected) if i < n}
+        centered = [[Fraction(0) if i == n else self.centered(i)[f]
+                     for i in selected] for f in range(d)]
+        w1_beta = _matvec(self.problem.W1, self.problem.beta)
+        g = [[sum((weight * self.problem.gamma[f] * centered[f][j]
+                   for f, weight in enumerate(row)), Fraction(0))
+              + (bias + offset if selected[j] == n else Fraction(0))
+              for j in range(k)] for row, bias, offset in
+             zip(self.problem.W1, w1_beta, self.problem.b1)]
+        derived = [*centered, [Fraction(i == n) for i in selected], *g,
+                   *[row if active else [Fraction(0)] * k
+                     for row, active in zip(g, self.pattern)]]
+        for column, values in enumerate(derived, n):
+            mapping[column] = {j: value for j, value in enumerate(values) if value}
+        conditions = []
+        for column, (lo, hi) in enumerate(zip(self.lp.column_lower, self.lp.column_upper)):
+            if lo is not None or hi is not None:
+                conditions.append((f"column[{column}]", q[column],
+                    tuple(mapping.get(column, {}).items()), lo, hi))
+        for row in self.lp.rows:
+            coefficients = {}
+            for column, weight in zip(row.indices, row.coefficients):
+                for j, value in mapping.get(column, {}).items():
+                    coefficients[j] = coefficients.get(j, Fraction(0)) + weight * value
+            conditions.append((row.name, _dot(row.coefficients, [q[i] for i in row.indices]),
+                tuple((j, v) for j, v in sorted(coefficients.items()) if v), row.lower, row.upper))
+        indices = [*range(n), n + d]
+        intervals = [[None if self.lp.column_lower[indices[i]] is None else
+                      self.lp.column_lower[indices[i]] - q[indices[i]],
+                      None if self.lp.column_upper[indices[i]] is None else
+                      self.lp.column_upper[indices[i]] - q[indices[i]]]
+                     for i in selected]
+        # Intersect necessary coordinate intervals using outer ranges of all
+        # other selected corrections. Every retained inequality participates.
+        for label, base, coefficients, lo, hi in conditions:
+            if not coefficients:
+                if lo is not None and base < lo or hi is not None and base > hi:
+                    raise ExactSolveFailure(f"correction basis cannot repair constraint: {label}")
+                continue
+            minimum, maximum = [], []
+            for j, value in coefficients:
+                lower, upper = intervals[j] if value > 0 else reversed(intervals[j])
+                minimum.append(None if lower is None else value * lower)
+                maximum.append(None if upper is None else value * upper)
+            min_sum = sum((v for v in minimum if v is not None), Fraction(0))
+            max_sum = sum((v for v in maximum if v is not None), Fraction(0))
+            min_missing, max_missing = minimum.count(None), maximum.count(None)
+            if (lo is not None and max_missing == 0 and base + max_sum < lo
+                    or hi is not None and min_missing == 0 and base + min_sum > hi):
+                raise ExactSolveFailure(f"correction basis cannot satisfy admissible intervals: {label}")
+            for ordinal, (j, value) in enumerate(coefficients):
+                other_min = (None if min_missing - (minimum[ordinal] is None) else
+                             min_sum - (minimum[ordinal] or Fraction(0)))
+                other_max = (None if max_missing - (maximum[ordinal] is None) else
+                             max_sum - (maximum[ordinal] or Fraction(0)))
+                for is_lower, endpoint in (
+                    (value > 0, None if lo is None or other_max is None else (lo - base - other_max) / value),
+                    (value < 0, None if hi is None or other_min is None else (hi - base - other_min) / value)):
+                    if endpoint is not None:
+                        side = 0 if is_lower else 1
+                        old = intervals[j][side]
+                        intervals[j][side] = (endpoint if old is None else
+                                              max(old, endpoint) if is_lower else min(old, endpoint))
+                lower, upper = intervals[j]
+                if lower is not None and upper is not None and lower > upper:
+                    raise ExactSolveFailure(f"correction basis has empty admissible interval: {label}")
+        return conditions, intervals
+
     def reconstruct_anchor(self, proposal, timeout_seconds):
         started = time.perf_counter()
         deadline = started + timeout_seconds
@@ -3546,16 +3625,42 @@ class FixedPhaseAnchorWorkspace:
                                            point_variables[:self.n], point_variables[-1])
         residual = [_dot(row, q[self.n:self.n + self.d]) + value * point_variables[-1]
                     for row, value in zip(self.difference, self.difference_t)]
-        profile = {"exact_anchor_replay_verified": False}
+        profile = {"exact_anchor_replay_verified": False,
+                   "first_exact_replay_failure": None,
+                   "exact_correction_applied": False}
+        def failure(message, *, replay_failure=None):
+            if replay_failure is not None:
+                profile["first_exact_replay_failure"] = replay_failure
+            error = ExactSolveFailure(message)
+            error.anchor_diagnostic = dict(profile)
+            return error
         if free:
             numeric = self.sensitivity[:, free]
-            _q, r, pivots = qr(numeric, mode="economic", pivoting=True)
+            # Prefer correction variables with room in their authenticated box.
+            slack = [min([abs(bound - point_variables[i]) for bound in
+                          (self.lp.column_lower[column_indices[i]],
+                           self.lp.column_upper[column_indices[i]]) if bound is not None],
+                         default=Fraction(1)) for i in free]
+            weights = np.asarray([float(v) for v in slack])
+            weights = np.maximum(weights / max(1., float(weights.max())), 1e-6)
+            _q, _r, pivots = qr(numeric * weights, mode="economic", pivoting=True)
             tolerance = max(numeric.shape) * np.finfo(float).eps * max(1., float(np.linalg.norm(numeric)))
+            # Weighting selects pivots only; rank is screened on original columns.
+            _q, r = qr(numeric[:, pivots], mode="economic")
             rank = int(np.sum(np.abs(np.diag(r)) > tolerance))
             selected = tuple(free[int(i)] for i in pivots[:rank])
         else:
             rank, selected = 0, ()
         if rank:
+            try:
+                conditions, intervals = self.correction_admissibility(q, selected)
+            except ExactSolveFailure as error:
+                raise failure(str(error)) from error
+            profile.update(correction_intervals_derived_before_solve=True,
+                correction_constraints_checked=len(conditions),
+                selected_correction_variables=list(selected),
+                allowable_correction_intervals=[
+                    [None if v is None else _fs(v) for v in pair] for pair in intervals])
             # Select rows only when cancellation equations are dependent.
             _q, _r, rows = qr(self.sensitivity[:, selected].T, mode="economic", pivoting=True)
             rows = tuple(int(i) for i in rows[:rank])
@@ -3567,8 +3672,21 @@ class FixedPhaseAnchorWorkspace:
                 raise ExactSolveFailure("fixed-phase rational anchor assembly timeout")
             solved = _solve_exact_correction_rhs(self.matrix_cache[key],
                 [[-residual[j] for j in rows]], remaining, self.factor_cache, profile)[0]
+            # Replay the entire projected constraint system BEFORE applying any
+            # correction. Never construct an out-of-box "anchor" and try it.
+            for j, (delta, (lo, hi)) in enumerate(zip(solved, intervals)):
+                if lo is not None and delta < lo or hi is not None and delta > hi:
+                    raise failure("exact correction outside admissible interval",
+                                  replay_failure=f"correction[{j}]: source/inequality interval")
+            for label, base, coefficients, lo, hi in conditions:
+                value = base + sum((a * solved[j] for j, a in coefficients), Fraction(0))
+                if lo is not None and value < lo or hi is not None and value > hi:
+                    raise failure("exact correction violates retained constraint",
+                                  replay_failure=label)
+            profile["exact_correction_constraints_verified"] = True
             for i, delta in zip(selected, solved):
                 point_variables[i] += delta
+            profile["exact_correction_applied"] = True
             self.last_basis = (selected, rows)
         elif any(residual):
             raise ExactSolveFailure("fixed-phase anchor has unrepaired exact equality residual")
@@ -3578,8 +3696,11 @@ class FixedPhaseAnchorWorkspace:
         replay_started = time.perf_counter()
         try:
             replay = replay_exact_linear_point(self.lp, q)
+        except FixedPhaseInvariantError:
+            raise
         except RuntimeError as error:
-            raise ExactSolveFailure(f"rational anchor not exactly feasible: {error}") from error
+            raise failure(f"rational anchor not exactly feasible: {error}",
+                          replay_failure=str(error)) from error
         if time.perf_counter() > deadline:
             raise ExactSolveFailure("fixed-phase anchor reconstruction/replay timeout")
         self.establish_nullity(rank, free)
@@ -3775,6 +3896,96 @@ def evaluate_fixed_phase_direction(problem, lp, pattern, anchor, direction,
     return None, evidence
 
 
+def screen_fixed_phase_anchor_proposal(lp, proposal, tolerance=1e-7):
+    """Numerical admission only. Never establishes feasibility or exclusion."""
+    if not math.isfinite(tolerance) or not 0 < tolerance <= 1e-6:
+        raise FixedPhaseInvariantError("fixed-phase proposal tolerance differs")
+    values = proposal.get("column_values")
+    audit = {"proposal_model_status": proposal["model_status"],
+        "proposal_primal_present": values is not None,
+        "proposal_primal_numerically_within_bounds": None,
+        "proposal_primal_numerically_within_rows": None,
+        "anchor_reconstruction_attempted": False,
+        "anchor_reconstruction_skipped_reason": None,
+        "fixed_phase_farkas_attempted": False,
+        "fixed_phase_farkas_verified": False,
+        "first_exact_replay_failure": None,
+        "proposal_tolerance": tolerance}
+    if proposal["model_status"] == "Infeasible":
+        audit["anchor_reconstruction_skipped_reason"] = "REPORTED_INFEASIBLE_FIXED_PHASE"
+        return audit
+    point = None if values is None else np.asarray(values, dtype=np.float64)
+    if (point is None or point.shape != (lp.column_count,)
+            or not np.isfinite(point).all()):
+        audit["anchor_reconstruction_skipped_reason"] = "NO_USABLE_PRIMAL_PROPOSAL"
+        return audit
+    audit["proposal_primal_numerically_within_bounds"] = True
+    for i, (value, lo, hi) in enumerate(zip(point, lp.column_lower, lp.column_upper)):
+        lo, hi = None if lo is None else float(lo), None if hi is None else float(hi)
+        slack = tolerance * max(1., abs(value),
+            abs(lo) if lo is not None else 0., abs(hi) if hi is not None else 0.)
+        if lo is not None and value < lo - slack or hi is not None and value > hi + slack:
+            audit["proposal_primal_numerically_within_bounds"] = False
+            audit["first_numerical_bound_failure"] = {"column": i, "value": float(value),
+                "lower": lo, "upper": hi, "tolerance": float(slack)}
+            break
+    audit["proposal_primal_numerically_within_rows"] = True
+    for i, row in enumerate(lp.rows):
+        scale = max([abs(v) for v in row.coefficients] + [
+            abs(v) for v in (row.lower, row.upper) if v is not None],
+            default=Fraction(0)) or Fraction(1)
+        coefficients = np.asarray([float(v / scale) for v in row.coefficients])
+        with np.errstate(over="ignore", invalid="ignore"):
+            value = float(np.dot(coefficients, point[list(row.indices)]))
+        lo = None if row.lower is None else float(row.lower / scale)
+        hi = None if row.upper is None else float(row.upper / scale)
+        slack = tolerance * max(1., abs(value),
+            abs(lo) if lo is not None else 0., abs(hi) if hi is not None else 0.)
+        if (not math.isfinite(value) or lo is not None and value < lo - slack
+                or hi is not None and value > hi + slack):
+            audit["proposal_primal_numerically_within_rows"] = False
+            audit["first_numerical_row_failure"] = {"row": i, "name": row.name,
+                "normalized_activity": value if math.isfinite(value) else None,
+                "lower": lo, "upper": hi, "tolerance": slack if math.isfinite(slack) else None}
+            break
+    if (not audit["proposal_primal_numerically_within_bounds"]
+            or not audit["proposal_primal_numerically_within_rows"]):
+        audit["anchor_reconstruction_skipped_reason"] = "UNUSABLE_PROPOSAL"
+    return audit
+
+
+def attempt_fixed_phase_farkas(lp, proposal, timeout_seconds):
+    """Reuse exact ray repair/Phase-I, never promote this proof to a node."""
+    deadline = time.perf_counter() + timeout_seconds
+    audit = {"fixed_phase_farkas_attempted": True, "fixed_phase_farkas_verified": False,
+             "certificate_scope": "THIS_FIXED_PHASE_LINEAR_LP_ONLY",
+             "canonical_lp_sha256": lp.identity(), "permits_node_exclusion": False}
+    ray = proposal.get("original_row_dual_ray")
+    certificate = None
+    if ray is not None:
+        ray = np.asarray(ray, dtype=np.float64)
+        if ray.shape == (len(lp.rows),) and np.isfinite(ray).all():
+            certificate, attempts, status = repair_direct_dual_ray(lp, ray, timeout_seconds)
+            audit.update(direct_ray_attempts=attempts, direct_ray_repair_status=status)
+        else:
+            audit["direct_ray_repair_status"] = "UNUSABLE_DIRECT_RAY"
+    if certificate is None and time.perf_counter() < deadline:
+        certificate, fallback = phase1_exact_farkas_fallback(
+            lp, deadline - time.perf_counter())
+        audit["phase_i_fallback"] = fallback
+    if certificate is not None:
+        try:
+            audit["exact_replay"] = verify_exact_lp_farkas(lp, certificate)
+        except FixedPhaseInvariantError:
+            raise
+        except RuntimeError as error:
+            audit["exact_certificate_rejection"] = str(error)
+        else:
+            audit["fixed_phase_farkas_verified"] = True
+            audit["fixed_phase_farkas_certificate"] = certificate
+    return audit
+
+
 def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seconds):
     """Witness-only search: no finite failed portfolio can close a phase."""
     started = time.perf_counter()
@@ -3799,14 +4010,26 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
         first = propose(lp, [Fraction(0)] * lp.column_count, remaining(), "anchor")
         report["proposal_seconds"] += time.perf_counter() - proposal_started
         report["fixed_phase_linear_lp_status"] = first["model_status"]
-        if not first.get("proposal_available", first.get("feasible")) or first.get("column_values") is None:
-            report["failure"] = "NO_USABLE_ANCHOR_PROPOSAL_IS_NOT_A_PROOF"
+        admission = screen_fixed_phase_anchor_proposal(lp, first)
+        report.update(admission)
+        if first["model_status"] == "Infeasible":
+            report["fixed_phase_farkas_attempted"] = True
+            report.update(attempt_fixed_phase_farkas(lp, first, min(60., remaining())))
+            if report["fixed_phase_farkas_verified"]:
+                report["search_status"] = "FIXED_PHASE_LINEARLY_INFEASIBLE"
+            report["anchors"].append({"role": "q0", **admission,
+                "fixed_phase_farkas_attempted": True,
+                "fixed_phase_farkas_verified": report["fixed_phase_farkas_verified"]})
+            return None, report
+        if admission["anchor_reconstruction_skipped_reason"] is not None:
+            report["failure"] = admission["anchor_reconstruction_skipped_reason"]
             report["anchors"].append({"role": "q0", "replay_verified": False,
                 "heuristic_failure": True, "proposal_status": first["model_status"],
                 "proposal_warning": first.get("proposal_warning"),
                 "proposal_failure_reason": first.get("proposal_failure_reason"),
-                "proposal_audit_path": first.get("proposal_audit_path")})
+                "proposal_audit_path": first.get("proposal_audit_path"), **admission})
             return None, report
+        report["anchor_reconstruction_attempted"] = True
         workspace_started = time.perf_counter()
         workspace = FixedPhaseAnchorWorkspace(problem, pattern, lp)
         report["workspace_setup_seconds"] = time.perf_counter() - workspace_started
@@ -3815,7 +4038,8 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
                       exact_anchor_minimum_slack=anchor_profile["exact_anchor_minimum_slack"],
                       equality_nullity=workspace.equality_nullity,
                       equality_nullity_justification=workspace.nullity_reason)
-        report["anchors"].append({"role": "q0", **anchor_profile})
+        report["anchors"].append({"role": "q0", **admission,
+            "anchor_reconstruction_attempted": True, **anchor_profile})
         print(json.dumps({"stage": "exact_fixed_phase_anchor_authenticated",
                           **anchor_profile}), flush=True)
         # First try alpha=0 itself. A verified anchor on Phi=0 needs no search.
@@ -3836,15 +4060,25 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
                 proposal_started = time.perf_counter()
                 second = propose(lp, [multiplier * v for v in gradient], remaining(), sense)
                 report["proposal_seconds"] += time.perf_counter() - proposal_started
-                if not second.get("proposal_available", second.get("feasible")) or second.get("column_values") is None:
-                    report["anchors"].append({"role": sense, "replay_verified": False,
+                admission = screen_fixed_phase_anchor_proposal(lp, second)
+                second_audit = {"role": sense, **admission}
+                report["anchors"].append(second_audit)
+                if second["model_status"] == "Infeasible":
+                    report["fixed_phase_farkas_attempted"] = True
+                    second_audit.update(attempt_fixed_phase_farkas(lp, second, min(60., remaining())))
+                    if second_audit["fixed_phase_farkas_verified"]:
+                        raise FixedPhaseInvariantError("fixed-phase Farkas contradicts authenticated anchor")
+                    continue
+                if admission["anchor_reconstruction_skipped_reason"] is not None:
+                    second_audit.update({"replay_verified": False,
                         "heuristic_failure": True, "proposal_status": second["model_status"],
                         "proposal_warning": second.get("proposal_warning"),
                         "proposal_failure_reason": second.get("proposal_failure_reason"),
                         "proposal_audit_path": second.get("proposal_audit_path")})
                     continue
+                second_audit["anchor_reconstruction_attempted"] = True
                 q1, profile = workspace.reconstruct_anchor(second["column_values"], min(60., remaining()))
-                report["anchors"].append({"role": sense, **profile})
+                second_audit.update(profile)
                 print(json.dumps({"stage": "exact_fixed_phase_second_anchor_authenticated",
                                   "role": sense, **profile}), flush=True)
                 report["second_anchor_replay_verified"] = True
@@ -3855,8 +4089,11 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
                     report.update(verified=True, search_status="EXACT_WITNESS_VERIFIED")
                     return found, report
             except ExactSolveFailure as error:
+                diagnostic = getattr(error, "anchor_diagnostic", {})
+                if report["first_exact_replay_failure"] is None:
+                    report["first_exact_replay_failure"] = diagnostic.get("first_exact_replay_failure")
                 report["anchors"].append({"role": sense, "replay_verified": False,
-                                           "failure": str(error)})
+                    "failure": str(error), **diagnostic})
             finally:
                 report["direction_seconds"] += time.perf_counter() - direction_started
         for i, direction in enumerate(workspace.nullspace_directions(anchor, min(30., remaining()))):
@@ -3885,6 +4122,7 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
         raise
     except ExactSolveFailure as error:
         report["failure"] = f"{type(error).__name__}: {error}"
+        report.update(getattr(error, "anchor_diagnostic", {}))
         return None, report
     finally:
         report["runtime_seconds"] = time.perf_counter() - started
