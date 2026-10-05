@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 from dataclasses import dataclass
 from fractions import Fraction
 from functools import cached_property
@@ -1505,6 +1506,8 @@ def repair_direct_dual_ray(lp: ExactCanonicalLP, raw_ray,
 
 
 _FIXED_PHASE_CERTIFICATE_FACTOR_CACHE = {}
+FIXED_PHASE_CERTIFICATE_FAMILY_SECONDS = 90.
+FIXED_PHASE_FINAL_REPLAY_EXTENSION_SECONDS = 15.
 
 
 def _reduced_support_vertex(lp, support, deadline, factor_cache, audit):
@@ -1726,10 +1729,15 @@ def _reduced_support_vertex(lp, support, deadline, factor_cache, audit):
             raise ExactSolveFailure("reduced ray full stationarity replay failed")
     if any(value < 0 for value in multipliers):
         raise ExactSolveFailure("reduced ray multiplier is negative")
+    # Budget eligibility only, not Farkas authorization. The original-LP
+    # inequalities and strict contradiction have not yet been checked here.
+    audit["selected_system_replay_verified"] = True
+    audit["candidate_constructed_before_deadline"] = time.perf_counter() < deadline
     return multipliers
 
 
-def repair_fixed_phase_dual_ray(lp, raw_ray, timeout_seconds=60., *, factor_cache=None):
+def repair_fixed_phase_dual_ray(lp, raw_ray, timeout_seconds=FIXED_PHASE_CERTIFICATE_FAMILY_SECONDS, *,
+                                factor_cache=None, final_replay=None):
     """Fixed-phase-only reduced repair; strict root/node repair is unchanged."""
     raw = np.asarray(raw_ray, dtype=np.float64)
     if raw.shape != (len(lp.rows),) or not np.isfinite(raw).all():
@@ -1760,7 +1768,8 @@ def repair_fixed_phase_dual_ray(lp, raw_ray, timeout_seconds=60., *, factor_cach
             try:
                 multipliers = _reduced_support_vertex(lp, support, deadline, cache, audit)
                 audit["current_repair_stage"] = "full_original_lp_farkas_replay"
-                certificate, replay = _complete_farkas_with_bounds(lp, support, multipliers)
+                certificate, replay = (_complete_farkas_with_bounds(lp, support, multipliers)
+                    if final_replay is None else final_replay(lp, support, multipliers, audit))
                 audit.update(result="EXACT_FARKAS_VERIFIED", exact_farkas_replay_verified=True,
                              exact_farkas_rhs=replay["exact_lambda_b"],
                              exact_repair_seconds=time.perf_counter() - attempt_started)
@@ -1815,12 +1824,15 @@ def _start_reconstruction_alarm(seconds):
     signal.signal(signal.SIGALRM, expired)
     previous_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
     started = time.perf_counter()
-    def restore():
+    def restore(completion_extension_seconds=0.):
+        if (not math.isfinite(completion_extension_seconds) or
+                not 0. <= completion_extension_seconds <= FIXED_PHASE_FINAL_REPLAY_EXTENSION_SECONDS):
+            raise FixedPhaseInvariantError("reconstruction completion extension differs")
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
         if previous_timer[0]:
             signal.setitimer(signal.ITIMER_REAL, max(
-                1e-6, previous_timer[0] - (time.perf_counter() - started)),
+                1e-6, previous_timer[0] + completion_extension_seconds - (time.perf_counter() - started)),
                 previous_timer[1])
     return restore
 
@@ -4319,8 +4331,9 @@ def attempt_fixed_phase_farkas(lp, proposal, timeout_seconds):
     return audit
 
 
-def attempt_fixed_phase_certificate(lp, trigger_method, timeout_seconds, *,
-                                    certificate_solver=None, factor_cache=None):
+def attempt_fixed_phase_certificate(lp, trigger_method,
+                                    timeout_seconds=FIXED_PHASE_CERTIFICATE_FAMILY_SECONDS, *,
+                                    certificate_solver=None, factor_cache=None, attempt_cache=None):
     """Dedicated original-LP simplex/ray solve. Status has no proof authority."""
     started = time.perf_counter()
     deadline = started + timeout_seconds
@@ -4338,7 +4351,14 @@ def attempt_fixed_phase_certificate(lp, trigger_method, timeout_seconds, *,
              "singleton_pivots_eliminated": 0, "sparse_links_eliminated": 0,
              "peak_bit_size_measurement": None,
              "peak_intermediate_bit_size": None, "exact_repair_seconds": 0.,
-             "exact_repair_timeout_stage": None, "normalized_matrix_cache_hit": False}
+             "exact_repair_timeout_stage": None, "normalized_matrix_cache_hit": False,
+             "certificate_family_budget_seconds": timeout_seconds,
+             "final_replay_extension_used": False, "final_replay_seconds": 0.,
+             "certificate_attempt_cache_hit": False,
+             "candidate_constructed_before_deadline": False,
+             "selected_system_replay_verified": False,
+             "full_original_lp_replay_started": False,
+             "full_original_lp_replay_completed": False}
     def remaining():
         seconds = deadline - time.perf_counter()
         if seconds <= 0:
@@ -4350,7 +4370,95 @@ def attempt_fixed_phase_certificate(lp, trigger_method, timeout_seconds, *,
                 proposal_method="FIXED_PHASE_CERTIFICATE", time_limit_seconds=min(30., seconds))
     restore = _start_reconstruction_alarm(max(1e-6, timeout_seconds))
     stage = "dedicated_original_lp_simplex"
+    extension_credit = 0.
+    completed_attempt = False
+    checked_candidate = None
+    cache_key = lp.identity()
+
+    def full_replay(thunk, eligible):
+        nonlocal extension_credit, stage
+        stage = "full_original_lp_farkas_replay"
+        replay_started = time.perf_counter()
+        if eligible:
+            # Repair/search still use the ORIGINAL family deadline. Only an
+            # already constructed, selected-system-replayed exact candidate
+            # gets this completion allowance (including certificate assembly).
+            extension_credit = FIXED_PHASE_FINAL_REPLAY_EXTENSION_SECONDS
+            replay_deadline = deadline + extension_credit
+        else:
+            replay_deadline = deadline
+        if replay_started >= replay_deadline:
+            raise ExactSolveFailure("fixed-phase final replay deadline")
+        signal.setitimer(signal.ITIMER_REAL, replay_deadline - replay_started)
+        audit["full_original_lp_replay_started"] = True
+        audit["full_original_lp_replay_completed"] = False
+        try:
+            result = thunk()
+        except ExactSolveFailure:
+            raise
+        except RuntimeError:
+            audit["full_original_lp_replay_completed"] = True
+            raise
+        else:
+            audit["full_original_lp_replay_completed"] = True
+            return result
+        finally:
+            finished = time.perf_counter()
+            audit["final_replay_seconds"] += finished - replay_started
+            audit["final_replay_extension_used"] |= bool(eligible and finished > deadline)
+            # A rejected candidate cannot borrow completion time for more repair.
+            # The repair loop additionally checks its original absolute deadline.
+
+    def complete_candidate(model, support, multipliers, candidate_audit):
+        nonlocal checked_candidate
+        if model.identity() != cache_key:
+            raise FixedPhaseInvariantError("final replay canonical LP identity differs")
+        eligible = (candidate_audit.get("candidate_constructed_before_deadline") is True
+                    and candidate_audit.get("selected_system_replay_verified") is True)
+        audit.update(candidate_constructed_before_deadline=candidate_audit.get("candidate_constructed_before_deadline") is True,
+                     selected_system_replay_verified=candidate_audit.get("selected_system_replay_verified") is True)
+        certificate, replay = full_replay(
+            lambda: _complete_farkas_with_bounds(model, support, multipliers), eligible)
+        # Reuse this proof ONLY for these exact certificate bytes and this LP.
+        # This removes the duplicate expensive replay, not a mathematical check.
+        checked_candidate = (_sha_json(certificate), replay)
+        return certificate, replay
+
     try:
+        if attempt_cache is not None and cache_key in attempt_cache:
+            entry = attempt_cache[cache_key]
+            if (entry.get("canonical_lp_sha256") != cache_key or
+                    entry.get("audit_sha256") != _sha_json(entry.get("audit"))):
+                raise FixedPhaseInvariantError("certificate attempt cache identity/integrity differs")
+            audit.update(copy.deepcopy(entry["audit"]))
+            audit.update(certificate_attempt_cache_hit=True,
+                         certificate_original_trigger_solver_method=audit["certificate_trigger_solver_method"],
+                         certificate_trigger_solver_method=trigger_method,
+                         certificate_cached_attempt_seconds=audit["certificate_attempt_seconds"])
+            certificate = audit.get("fixed_phase_farkas_certificate")
+            if audit["fixed_phase_farkas_verified"]:
+                if certificate is None:
+                    raise FixedPhaseInvariantError("verified cached certificate is absent")
+                audit.update(fixed_phase_farkas_verified=False, exact_farkas_replay_verified=False,
+                             exact_farkas_rhs=None, exact_replay=None, final_replay_seconds=0.,
+                             final_replay_extension_used=False, full_original_lp_replay_started=False,
+                             full_original_lp_replay_completed=False)
+                try:
+                    # A cached status/hash alone has no authorization authority.
+                    replay = full_replay(lambda: verify_exact_lp_farkas(lp, certificate),
+                        audit["candidate_constructed_before_deadline"] is True
+                        and audit["selected_system_replay_verified"] is True)
+                except FixedPhaseInvariantError:
+                    raise
+                except ExactSolveFailure:
+                    raise
+                except RuntimeError as error:
+                    audit["exact_certificate_rejection"] = str(error)
+                    audit["direct_ray_repair_status"] = "CACHED_CERTIFICATE_REPLAY_FAILED"
+                else:
+                    audit.update(fixed_phase_farkas_verified=True, exact_farkas_replay_verified=True,
+                                 exact_farkas_rhs=replay["exact_lambda_b"], exact_replay=replay)
+            return audit
         solver = certificate_solver(lp, min(30., remaining()))
         diagnostic = solver.get("construction_diagnostic", {})
         if diagnostic.get("canonical_lp_sha256") != lp.identity():
@@ -4373,10 +4481,12 @@ def attempt_fixed_phase_certificate(lp, trigger_method, timeout_seconds, *,
         ray = solver.get("original_row_dual_ray")
         if solver["model_status"] != "Infeasible" or ray is None:
             audit["direct_ray_repair_status"] = "NO_USABLE_DEDICATED_DUAL_RAY"
+            completed_attempt = True
             return audit
         stage = "reduced_support_exact_repair"
         repair_started = time.perf_counter()
-        certificate, attempts, status = repair_fixed_phase_dual_ray(lp, ray, remaining(), factor_cache=factor_cache)
+        certificate, attempts, status = repair_fixed_phase_dual_ray(lp, ray, remaining(),
+            factor_cache=factor_cache, final_replay=complete_candidate)
         audit.update(direct_ray_attempts=attempts, direct_ray_repair_status=status,
                      exact_repair_seconds=time.perf_counter() - repair_started)
         if attempts:
@@ -4385,8 +4495,14 @@ def attempt_fixed_phase_certificate(lp, trigger_method, timeout_seconds, *,
         if certificate is not None:
             stage = "full_original_lp_farkas_replay"
             try:
-                remaining()
-                replay = verify_exact_lp_farkas(lp, certificate)
+                if checked_candidate is not None and checked_candidate[0] == _sha_json(certificate):
+                    replay = checked_candidate[1]
+                else:
+                    # Mocked/alternate repair outputs must still undergo full
+                    # original-LP replay; producer flags never discharge it.
+                    replay = full_replay(lambda: verify_exact_lp_farkas(lp, certificate),
+                        audit["candidate_constructed_before_deadline"] is True
+                        and audit["selected_system_replay_verified"] is True)
             except FixedPhaseInvariantError:
                 raise
             except ExactSolveFailure:
@@ -4397,24 +4513,34 @@ def attempt_fixed_phase_certificate(lp, trigger_method, timeout_seconds, *,
                 audit.update(fixed_phase_farkas_verified=True, exact_farkas_replay_verified=True,
                              exact_farkas_rhs=replay["exact_lambda_b"], exact_replay=replay,
                              fixed_phase_farkas_certificate=certificate)
+        completed_attempt = True
         return audit
     except ExactSolveFailure as error:
         timed_out = time.perf_counter() >= deadline or "timeout" in str(error).lower()
         audit.update(direct_ray_repair_status="DIRECT_RAY_REPAIR_TIMEOUT" if timed_out else "DIRECT_RAY_SUPPORT_REPAIR_FAILED",
                      failure=f"{type(error).__name__}: {error}",
                      exact_repair_timeout_stage=stage if timed_out else None)
+        completed_attempt = True
         return audit
     finally:
         audit["certificate_attempt_seconds"] = time.perf_counter() - started
-        restore()
+        # Keep an expired enclosing search alarm from interrupting the bounded
+        # replay's handoff. Its logical deadline remains unchanged everywhere.
+        restore(completion_extension_seconds=extension_credit)
+        if completed_attempt and attempt_cache is not None and not audit["certificate_attempt_cache_hit"]:
+            snapshot = copy.deepcopy(audit)
+            attempt_cache[cache_key] = {"canonical_lp_sha256": cache_key, "audit": snapshot,
+                                       "audit_sha256": _sha_json(snapshot)}
         print(json.dumps({"stage": "fixed_phase_certificate_attempt", **audit}), flush=True)
 
 
 def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seconds,
-                                     *, feasibility_propose=None, certificate_solver=None):
+                                     *, feasibility_propose=None, certificate_solver=None,
+                                     certificate_attempt_cache=None):
     """Witness-only search: no finite failed portfolio can close a phase."""
     started = time.perf_counter()
     deadline = started + timeout_seconds
+    certificate_attempt_cache = {} if certificate_attempt_cache is None else certificate_attempt_cache
     report = {"method": "EXACT_FEASIBLE_ANCHOR_GRADIENT_SEGMENTS",
               "fixed_phase_linear_lp_sha256": lp.identity(),
               "phase_pattern_sha256": _sha_json(list(pattern)),
@@ -4489,8 +4615,9 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
                     report["numerical_infeasible_methods"].append(method)
                     report["fixed_phase_farkas_attempted"] = True
                     try:
-                        certificate_audit = attempt_fixed_phase_certificate(lp, method, min(60., remaining()),
-                            certificate_solver=certificate_solver)
+                        certificate_audit = attempt_fixed_phase_certificate(lp, method,
+                            min(FIXED_PHASE_CERTIFICATE_FAMILY_SECONDS, remaining()),
+                            certificate_solver=certificate_solver, attempt_cache=certificate_attempt_cache)
                     except ExactSolveFailure as error:
                         anchor_audit.update(fixed_phase_farkas_attempted=True,
                                             fixed_phase_farkas_verified=False,
@@ -5108,6 +5235,7 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             epsilon)
         node_lps_by_identity = {}
         node_lps_by_id = {"root": lp}
+        certificate_attempt_cache = {}
 
         def solve_phase_node(phases, node_id):
             node_lp = lp_with_relu_phases(lp, phases, EXPECTED_SOURCES)
@@ -5183,7 +5311,8 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             found, reconstruction = search_fixed_phase_exact_witness(
                 exact_problem, fixed_lp, pattern, propose_fixed,
                 min(240., max(.1, started + wall_seconds - time.perf_counter())),
-                feasibility_propose=propose_feasibility, certificate_solver=certificate_solve)
+                feasibility_propose=propose_feasibility, certificate_solver=certificate_solve,
+                certificate_attempt_cache=certificate_attempt_cache)
             reconstruction.update(fixed_phase_lp_audit=audit,
                                   fixed_phase_lp_artifact=fixed_artifact)
             for counter in ("fallback_attempts", "fallback_usable_primals",

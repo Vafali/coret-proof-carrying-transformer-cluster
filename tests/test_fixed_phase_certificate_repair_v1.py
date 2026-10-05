@@ -172,3 +172,212 @@ def test_noncontradictory_stationary_ray_and_negative_multiplier_do_not_certify(
            "multipliers": [{"kind": "row", "index": 0, "orientation": 1, "multiplier": "-1/1"}]}
     with pytest.raises(RuntimeError, match="negative"):
         O.verify_exact_lp_farkas(lp, bad)
+
+
+def fake_dedicated_solver(lp, *, infeasible=True):
+    """Only solver plumbing is mocked; exact Farkas replay stays authoritative."""
+    return {"construction_diagnostic": {"canonical_lp_sha256": lp.identity(),
+                "solver_scaled_lp_sha256": "test_solver_copy"},
+            "solver_method": "FIXED_PHASE_CERTIFICATE",
+            "rational_objective_sha256": O._sha_json([O._fs(F(0))] * lp.column_count),
+            "options": {"solver": "simplex", "presolve": "off"},
+            "solver_scaling": {"original_canonical_lp_sha256": lp.identity(),
+                "solver_scaled_lp_sha256": "test_solver_copy"},
+            "run_status": "OK", "model_status": "Infeasible" if infeasible else "Optimal",
+            "original_row_dual_ray": np.ones(len(lp.rows)) if infeasible else None}
+
+
+def fake_certificate_clock(monkeypatch):
+    """Deterministically exercise 90/105-second boundaries without sleeping."""
+    clock = {"now": 0., "timer_deadline": None, "restore_credits": [], "timers": []}
+    monkeypatch.setattr(O.time, "perf_counter", lambda: clock["now"])
+    def set_timer(_which, seconds, *_):
+        clock["timers"].append(seconds)
+        clock["timer_deadline"] = clock["now"] + seconds if seconds else None
+        return (0., 0.)
+    monkeypatch.setattr(O.signal, "setitimer", set_timer)
+    def alarm(seconds):
+        set_timer(None, seconds)
+        def restore(completion_extension_seconds=0.):
+            clock["restore_credits"].append(completion_extension_seconds)
+        return restore
+    monkeypatch.setattr(O, "_start_reconstruction_alarm", alarm)
+    return clock
+
+
+@pytest.mark.parametrize("outcome", ["valid", "negative_multiplier", "timeout"])
+def test_near_deadline_candidate_gets_only_bounded_full_replay_and_proof_gates_acceptance(monkeypatch, outcome):
+    lp = triangle_lp()
+    clock = fake_certificate_clock(monkeypatch)
+    original_verify = O.verify_exact_lp_farkas
+    replay_calls = []
+    def verify(model, certificate):
+        replay_calls.append(certificate)
+        clock["now"] += 2. if outcome != "timeout" else 16.
+        if clock["now"] >= clock["timer_deadline"]:
+            raise O.ExactSolveFailure("reconstruction family deadline")
+        return original_verify(model, certificate)
+    monkeypatch.setattr(O, "verify_exact_lp_farkas", verify)
+    def selected_solution(model, support, deadline, cache, audit):
+        assert deadline == 90.
+        clock["now"] = 89.9
+        audit.update(selected_system_replay_verified=True, candidate_constructed_before_deadline=True)
+        return [F(-1, 3) if outcome == "negative_multiplier" else F(1, 3)] * len(support)
+    monkeypatch.setattr(O, "_reduced_support_vertex", selected_solution)
+    report = O.attempt_fixed_phase_certificate(lp, "PRIMARY",
+        certificate_solver=lambda model, _: fake_dedicated_solver(model), factor_cache={})
+    assert report["certificate_family_budget_seconds"] == 90.
+    assert report["candidate_constructed_before_deadline"] and report["selected_system_replay_verified"]
+    assert report["full_original_lp_replay_started"] and report["final_replay_extension_used"]
+    assert clock["timers"] == pytest.approx([90., 15.1])
+    assert clock["restore_credits"] == [15.]
+    assert len(replay_calls) == 1  # No repeated expensive boundary replay.
+    assert report["full_original_lp_replay_completed"] is (outcome != "timeout")
+    assert report["fixed_phase_farkas_verified"] is (outcome == "valid")
+    assert report["exact_farkas_replay_verified"] is (outcome == "valid")
+    assert not report["permits_node_exclusion"]
+    if outcome == "valid":
+        assert original_verify(lp, report["fixed_phase_farkas_certificate"])["verified"]
+        assert F(report["exact_farkas_rhs"]) < 0
+        assert report["final_replay_seconds"] == pytest.approx(2.)
+    else:
+        assert report["exact_farkas_rhs"] is None
+        assert report["direct_ray_repair_status"] == "DIRECT_RAY_REPAIR_TIMEOUT"
+
+
+@pytest.mark.parametrize("selected,before", [(False, True), (True, False), (False, False)])
+def test_completion_extension_requires_both_eligibility_invariants(monkeypatch, selected, before):
+    lp = triangle_lp()
+    clock = fake_certificate_clock(monkeypatch)
+    def selected_solution(model, support, deadline, cache, audit):
+        clock["now"] = 89.9
+        audit.update(selected_system_replay_verified=selected, candidate_constructed_before_deadline=before)
+        return [F(1, 3)] * len(support)
+    monkeypatch.setattr(O, "_reduced_support_vertex", selected_solution)
+    def verify(*_):
+        clock["now"] = 90.01
+        assert clock["timer_deadline"] == 90.
+        raise O.ExactSolveFailure("reconstruction family deadline")
+    monkeypatch.setattr(O, "verify_exact_lp_farkas", verify)
+    result = O.attempt_fixed_phase_certificate(lp, "PRIMARY",
+        certificate_solver=lambda model, _: fake_dedicated_solver(model), factor_cache={})
+    assert not result["fixed_phase_farkas_verified"]
+    assert not result["final_replay_extension_used"]
+    assert clock["restore_credits"] == [0.]
+
+
+def test_family_timeout_before_exact_candidate_never_authorizes_infeasibility(monkeypatch):
+    lp = triangle_lp()
+    clock = fake_certificate_clock(monkeypatch)
+    def timeout(*_):
+        clock["now"] = 90.
+        raise O.ExactSolveFailure("exact repair Bareiss timeout")
+    monkeypatch.setattr(O, "_reduced_support_vertex", timeout)
+    result = O.attempt_fixed_phase_certificate(lp, "PRIMARY",
+        certificate_solver=lambda model, _: fake_dedicated_solver(model), factor_cache={})
+    assert not result["fixed_phase_farkas_verified"] and not result["exact_farkas_replay_verified"]
+    assert not result["candidate_constructed_before_deadline"]
+    assert not result["full_original_lp_replay_started"]
+    assert clock["restore_credits"] == [0.]
+
+
+def test_duplicate_fallback_triggers_reuse_one_dedicated_attempt_and_90_second_budget(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    calls, cache = [], {}
+    monkeypatch.setattr(O, "FixedPhaseAnchorWorkspace", lambda *_: pytest.fail("no admissible anchor"))
+    def dedicated(model, seconds):
+        calls.append((model.identity(), seconds))
+        return fake_dedicated_solver(model, infeasible=False)
+    def fallback(model, seconds, method, role):
+        return {"solver_method": method, "model_status": "Infeasible", "column_values": None}
+    _, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+        lambda *_: {"model_status": "Unknown", "column_values": None}, 120.,
+        feasibility_propose=fallback, certificate_solver=dedicated, certificate_attempt_cache=cache)
+    assert len(calls) == 1 and len(report["certificate_attempts"]) == 2
+    assert [a["certificate_attempt_cache_hit"] for a in report["certificate_attempts"]] == [False, True]
+    assert [a["certificate_family_budget_seconds"] for a in report["certificate_attempts"]] == [90., 90.]
+    assert report["numerical_infeasible_methods"] == ["IPM_FEASIBILITY", "SIMPLEX_FEASIBILITY"]
+    assert report["search_status"] == "INCONCLUSIVE" and not report["fixed_phase_farkas_verified"]
+    # The oracle shares this cache across searches of the same canonical phase.
+    _, again = O.search_fixed_phase_exact_witness(p, lp, pattern,
+        lambda *_: {"model_status": "Infeasible", "column_values": None}, 120.,
+        certificate_solver=dedicated, certificate_attempt_cache=cache)
+    assert len(calls) == 1 and again["certificate_attempts"][0]["certificate_attempt_cache_hit"]
+
+
+def test_verified_attempt_cache_replays_original_certificate_without_new_solver(monkeypatch):
+    lp, cache = triangle_lp(), {}
+    calls = []
+    def dedicated(model, seconds):
+        calls.append(model.identity())
+        return fake_dedicated_solver(model)
+    first = O.attempt_fixed_phase_certificate(lp, "IPM_FEASIBILITY", 2.,
+        certificate_solver=dedicated, attempt_cache=cache, factor_cache={})
+    assert first["fixed_phase_farkas_verified"]
+    replays = []
+    original = O.verify_exact_lp_farkas
+    def replay(model, certificate):
+        replays.append(certificate)
+        return original(model, certificate)
+    monkeypatch.setattr(O, "verify_exact_lp_farkas", replay)
+    again = O.attempt_fixed_phase_certificate(lp, "SIMPLEX_FEASIBILITY", 2.,
+        certificate_solver=dedicated, attempt_cache=cache)
+    assert len(calls) == 1 and len(replays) == 1
+    assert again["certificate_attempt_cache_hit"] and again["fixed_phase_farkas_verified"]
+    assert again["full_original_lp_replay_completed"]
+    assert again["certificate_trigger_solver_method"] == "SIMPLEX_FEASIBILITY"
+    assert first["certificate_trigger_solver_method"] == "IPM_FEASIBILITY"
+
+
+@pytest.mark.parametrize("corruption", ["audit_checksum", "certificate"])
+def test_attempt_cache_cannot_authorize_corrupt_or_unreplayed_certificate(monkeypatch, corruption):
+    lp, cache = triangle_lp(), {}
+    first = O.attempt_fixed_phase_certificate(lp, "PRIMARY", 2.,
+        certificate_solver=lambda model, _: fake_dedicated_solver(model), attempt_cache=cache, factor_cache={})
+    assert first["fixed_phase_farkas_verified"]
+    entry = cache[lp.identity()]
+    entry["audit"]["fixed_phase_farkas_certificate"]["multipliers"][0]["multiplier"] = "-1/1"
+    if corruption == "certificate":
+        entry["audit_sha256"] = O._sha_json(entry["audit"])
+    def no_solve(*_):
+        pytest.fail("dedup must not repeat dedicated solve")
+    if corruption == "audit_checksum":
+        with pytest.raises(O.FixedPhaseInvariantError, match="cache identity/integrity"):
+            O.attempt_fixed_phase_certificate(lp, "IPM_FEASIBILITY", 2.,
+                certificate_solver=no_solve, attempt_cache=cache)
+    else:
+        result = O.attempt_fixed_phase_certificate(lp, "IPM_FEASIBILITY", 2.,
+            certificate_solver=no_solve, attempt_cache=cache)
+        assert result["certificate_attempt_cache_hit"] and not result["fixed_phase_farkas_verified"]
+        assert not result["exact_farkas_replay_verified"]
+        assert "negative" in result["exact_certificate_rejection"]
+
+
+def test_attempt_cache_key_is_full_original_canonical_lp_identity():
+    lp, cache, calls = triangle_lp(), {}, []
+    changed = replace(lp, rows=tuple(replace(row, upper=F(2)) for row in lp.rows))
+    def dedicated(model, seconds):
+        calls.append(model.identity())
+        return fake_dedicated_solver(model, infeasible=False)
+    for model in (lp, changed):
+        result = O.attempt_fixed_phase_certificate(model, "PRIMARY", 2.,
+            certificate_solver=dedicated, attempt_cache=cache)
+        assert not result["certificate_attempt_cache_hit"] and not result["fixed_phase_farkas_verified"]
+    assert len(calls) == len(cache) == 2
+
+
+def test_nested_alarm_restoration_preserves_only_bounded_completion_credit(monkeypatch):
+    clock, calls = {"now": 0.}, []
+    monkeypatch.setattr(O.time, "perf_counter", lambda: clock["now"])
+    monkeypatch.setattr(O.signal, "getsignal", lambda *_: "previous_handler")
+    monkeypatch.setattr(O.signal, "signal", lambda *_: None)
+    def timer(_which, seconds, interval=0.):
+        calls.append((seconds, interval))
+        return (90., 0.)
+    monkeypatch.setattr(O.signal, "setitimer", timer)
+    restore = O._start_reconstruction_alarm(90.)
+    clock["now"] = 92.
+    restore(completion_extension_seconds=15.)
+    assert calls[-1] == (13., 0.)
+    with pytest.raises(O.FixedPhaseInvariantError, match="completion extension"):
+        restore(completion_extension_seconds=15.01)
