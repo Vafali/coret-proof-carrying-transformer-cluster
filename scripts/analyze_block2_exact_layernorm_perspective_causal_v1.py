@@ -2792,7 +2792,8 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
     trigger_mode = proposal_only and not certificate_mode
     # All trigger rays are UNTRUSTED. getDualRay uses incumbent model rows,
     # not getPresolvedLp rows (HiGHS 1.15.1 binding/HighsInterface.cpp).
-    # IPM: harvest an existing ray only, never request an implicit new solve.
+    # Requesting VALUES may make HiGHS calculate a ray on this same instance.
+    # An existence-only query cannot establish that calculation is impossible.
     ray_status, ray_exists = ((highspy.HighsStatus.kOk, False)
         if proposal_only and status != highspy.HighsModelStatus.kInfeasible
         else highs.getDualRayExist())
@@ -2801,32 +2802,55 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
     ray_audit = {"trigger_ray_exist": bool(ray_exists), "trigger_ray_raw_dimension": None,
                  "trigger_ray_expected_original_row_dimension": len(lp.rows),
                  "trigger_ray_original_space_mapping_verified": False,
-                 "trigger_ray_support_size": 0, "trigger_ray_rejected_reason": None}
+                 "trigger_ray_support_size": 0, "trigger_ray_rejected_reason": None,
+                 "trigger_ray_cached_before_request": bool(ray_status == highspy.HighsStatus.kOk and ray_exists),
+                 "trigger_ray_forced_request_attempted": False,
+                 "trigger_ray_forced_request_status": None,
+                 "trigger_ray_forced_request_has_ray": None,
+                 "trigger_ray_forced_request_seconds": 0.,
+                 "trigger_ray_pre_request_reason": (None if ray_status == highspy.HighsStatus.kOk and ray_exists
+                                                    else "NO_CACHED_TRIGGER_RAY")}
     acquisition_started = time.perf_counter()
-    request_trigger_ray = (trigger_mode and status == highspy.HighsModelStatus.kInfeasible
-                           and proposal_method != "IPM_FEASIBILITY")
-    if ray_status == highspy.HighsStatus.kOk and (ray_exists or request_trigger_ray):
+    request_trigger_ray = trigger_mode and status == highspy.HighsModelStatus.kInfeasible
+    if request_trigger_ray or (ray_status == highspy.HighsStatus.kOk and ray_exists):
+        forced = request_trigger_ray and not ray_audit["trigger_ray_cached_before_request"]
+        ray_audit["trigger_ray_forced_request_attempted"] = forced
+        request_started = time.perf_counter()
         ray_call_status, returned, values = highs.getDualRay()
+        if forced:
+            ray_audit.update(trigger_ray_forced_request_status=str(ray_call_status),
+                trigger_ray_forced_request_has_ray=bool(returned),
+                trigger_ray_forced_request_seconds=time.perf_counter() - request_started)
         ray_audit["trigger_ray_exist"] = bool(returned)
         if ray_call_status == highspy.HighsStatus.kOk and returned:
             raw_ray = np.asarray(values, dtype=np.float64)
     original_row_ray = None
     if trigger_mode:
+        forced = ray_audit["trigger_ray_forced_request_attempted"]
         if raw_ray is None:
-            ray_audit["trigger_ray_rejected_reason"] = "NO_EXPOSED_TRIGGER_RAY"
+            ray_audit["trigger_ray_rejected_reason"] = ("FORCED_TRIGGER_RAY_UNAVAILABLE" if forced
+                else "NO_EXPOSED_TRIGGER_RAY" if ray_audit["trigger_ray_cached_before_request"]
+                else "NO_CACHED_TRIGGER_RAY")
         else:
             ray_audit["trigger_ray_raw_dimension"] = int(raw_ray.size)
             if raw_ray.shape != (len(lp.rows),):
-                ray_audit["trigger_ray_rejected_reason"] = "TRIGGER_RAY_DIMENSION_AMBIGUOUS"
-            elif not np.isfinite(raw_ray).all() or not np.any(raw_ray):
-                ray_audit["trigger_ray_rejected_reason"] = "TRIGGER_RAY_NONFINITE_OR_ZERO"
+                ray_audit["trigger_ray_rejected_reason"] = ("FORCED_TRIGGER_RAY_BAD_DIMENSION" if forced
+                                                          else "TRIGGER_RAY_DIMENSION_AMBIGUOUS")
+            elif not np.isfinite(raw_ray).all():
+                ray_audit["trigger_ray_rejected_reason"] = ("FORCED_TRIGGER_RAY_NONFINITE" if forced
+                                                          else "TRIGGER_RAY_NONFINITE_OR_ZERO")
+            elif not np.any(raw_ray):
+                ray_audit["trigger_ray_rejected_reason"] = ("FORCED_TRIGGER_RAY_UNAVAILABLE" if forced
+                                                          else "TRIGGER_RAY_NONFINITE_OR_ZERO")
             elif not _proposal_model_unchanged(highs, solver_arrays, diagnostic):
-                ray_audit["trigger_ray_rejected_reason"] = "TRIGGER_RAY_INCUMBENT_MODEL_DIFFERS"
+                ray_audit["trigger_ray_rejected_reason"] = ("FORCED_TRIGGER_RAY_PROVENANCE_AMBIGUOUS" if forced
+                                                          else "TRIGGER_RAY_INCUMBENT_MODEL_DIFFERS")
             else:
                 try:
                     original_row_ray = map_solver_row_ray_to_original(raw_ray, scaling.scales)
                 except RuntimeError as error:
-                    ray_audit["trigger_ray_rejected_reason"] = str(error)
+                    ray_audit["trigger_ray_rejected_reason"] = ("FORCED_TRIGGER_RAY_NONFINITE" if forced
+                                                              else str(error))
                 else:
                     ray_audit.update(trigger_ray_original_space_mapping_verified=True,
                         trigger_ray_support_size=int(np.count_nonzero(original_row_ray)))
@@ -4390,7 +4414,14 @@ def _validated_trigger_row_ray(lp, proposal, method):
         "trigger_ray_raw_dimension": proposal.get("trigger_ray_raw_dimension"),
         "trigger_ray_expected_original_row_dimension": len(lp.rows),
         "trigger_ray_original_space_mapping_verified": False,
-        "trigger_ray_support_size": 0, "trigger_ray_rejected_reason": None}
+        "trigger_ray_support_size": 0, "trigger_ray_rejected_reason": None,
+        "trigger_ray_cached_before_request": proposal.get("trigger_ray_cached_before_request", False),
+        "trigger_ray_forced_request_attempted": proposal.get("trigger_ray_forced_request_attempted", False),
+        "trigger_ray_forced_request_status": proposal.get("trigger_ray_forced_request_status"),
+        "trigger_ray_forced_request_has_ray": proposal.get("trigger_ray_forced_request_has_ray"),
+        "trigger_ray_forced_request_seconds": proposal.get("trigger_ray_forced_request_seconds", 0.),
+        "trigger_ray_pre_request_reason": proposal.get("trigger_ray_pre_request_reason")}
+    forced = audit["trigger_ray_forced_request_attempted"] is True
     def reject(reason):
         audit["trigger_ray_rejected_reason"] = reason
         return None, audit
@@ -4398,16 +4429,20 @@ def _validated_trigger_row_ray(lp, proposal, method):
         return reject("TRIGGER_NOT_NUMERICALLY_INFEASIBLE")
     value = proposal.get("original_row_dual_ray")
     if value is None:
-        return reject(proposal.get("trigger_ray_rejected_reason") or "NO_EXPOSED_TRIGGER_RAY")
+        return reject(proposal.get("trigger_ray_rejected_reason") or
+                      ("FORCED_TRIGGER_RAY_UNAVAILABLE" if forced else "NO_EXPOSED_TRIGGER_RAY"))
     raw, mapped = proposal.get("raw_dual_ray"), np.asarray(value, dtype=np.float64)
     if raw is None:
-        return reject("TRIGGER_RAY_MAPPING_PROVENANCE_ABSENT")
+        return reject("FORCED_TRIGGER_RAY_PROVENANCE_AMBIGUOUS" if forced
+                      else "TRIGGER_RAY_MAPPING_PROVENANCE_ABSENT")
     raw = np.asarray(raw, dtype=np.float64)
     audit["trigger_ray_raw_dimension"] = int(raw.size)
     if mapped.shape != (len(lp.rows),) or raw.shape != mapped.shape:
-        return reject("TRIGGER_RAY_DIMENSION_AMBIGUOUS")
-    if not np.isfinite(raw).all() or not np.isfinite(mapped).all() or not np.any(mapped):
-        return reject("TRIGGER_RAY_NONFINITE_OR_ZERO")
+        return reject("FORCED_TRIGGER_RAY_BAD_DIMENSION" if forced else "TRIGGER_RAY_DIMENSION_AMBIGUOUS")
+    if not np.isfinite(raw).all() or not np.isfinite(mapped).all():
+        return reject("FORCED_TRIGGER_RAY_NONFINITE" if forced else "TRIGGER_RAY_NONFINITE_OR_ZERO")
+    if not np.any(mapped):
+        return reject("FORCED_TRIGGER_RAY_UNAVAILABLE" if forced else "TRIGGER_RAY_NONFINITE_OR_ZERO")
     mapping = proposal.get("row_ray_mapping") or {}
     scaling = proposal.get("solver_scaling") or {}
     diagnostic = proposal.get("construction_diagnostic") or {}
@@ -4426,7 +4461,8 @@ def _validated_trigger_row_ray(lp, proposal, method):
             mapping.get("row_scaling_sha256") != scaling.get("row_scaling_sha256") or
             mapping.get("raw_ray_sha256") != hashlib.sha256(raw.astype("<f8").tobytes()).hexdigest() or
             mapping.get("original_ray_sha256") != hashlib.sha256(mapped.astype("<f8").tobytes()).hexdigest()):
-        return reject("TRIGGER_RAY_MAPPING_PROVENANCE_AMBIGUOUS")
+        return reject("FORCED_TRIGGER_RAY_PROVENANCE_AMBIGUOUS" if forced
+                      else "TRIGGER_RAY_MAPPING_PROVENANCE_AMBIGUOUS")
     audit.update(trigger_ray_exist=True, trigger_ray_original_space_mapping_verified=True,
                  trigger_ray_support_size=int(np.count_nonzero(mapped)))
     return mapped, audit
