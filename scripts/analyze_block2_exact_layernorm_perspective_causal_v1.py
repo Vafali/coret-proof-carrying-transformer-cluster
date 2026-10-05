@@ -2628,6 +2628,8 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
                "presolve": "on" if fallback else "off", "threads": 1,
                "parallel": "off", "random_seed": 0,
                "solver": "ipm" if proposal_method == "IPM_FEASIBILITY" else "simplex"}
+    if proposal_method == "SIMPLEX_FEASIBILITY":
+        options["simplex_strategy"] = 1  # deterministic serial dual simplex
     if time_limit_seconds is not None:
         if not math.isfinite(time_limit_seconds) or time_limit_seconds <= 0:
             raise RuntimeError("HiGHS proposal time limit differs")
@@ -2787,21 +2789,51 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
     status_name = highs.modelStatusToString(status)
     diagnostic["model_status_at_run"] = status_name
     check_status("run", run_status)
-    # Only the PRIMARY infeasible fixed-phase proposal may supply an UNTRUSTED row ray.
-    # Feasibility fallback statuses/rays are deliberately given zero proof authority.
-    # Only exact Farkas replay, scoped to that LP, can authorize its use.
+    trigger_mode = proposal_only and not certificate_mode
+    # All trigger rays are UNTRUSTED. getDualRay uses incumbent model rows,
+    # not getPresolvedLp rows (HiGHS 1.15.1 binding/HighsInterface.cpp).
+    # IPM: harvest an existing ray only, never request an implicit new solve.
     ray_status, ray_exists = ((highspy.HighsStatus.kOk, False)
-        if proposal_only and (fallback or status != highspy.HighsModelStatus.kInfeasible)
+        if proposal_only and status != highspy.HighsModelStatus.kInfeasible
         else highs.getDualRayExist())
     raw_ray = None
     ray_call_status = ray_status
-    if ray_status == highspy.HighsStatus.kOk and ray_exists:
+    ray_audit = {"trigger_ray_exist": bool(ray_exists), "trigger_ray_raw_dimension": None,
+                 "trigger_ray_expected_original_row_dimension": len(lp.rows),
+                 "trigger_ray_original_space_mapping_verified": False,
+                 "trigger_ray_support_size": 0, "trigger_ray_rejected_reason": None}
+    acquisition_started = time.perf_counter()
+    request_trigger_ray = (trigger_mode and status == highspy.HighsModelStatus.kInfeasible
+                           and proposal_method != "IPM_FEASIBILITY")
+    if ray_status == highspy.HighsStatus.kOk and (ray_exists or request_trigger_ray):
         ray_call_status, returned, values = highs.getDualRay()
+        ray_audit["trigger_ray_exist"] = bool(returned)
         if ray_call_status == highspy.HighsStatus.kOk and returned:
             raw_ray = np.asarray(values, dtype=np.float64)
-    original_row_ray = (None if raw_ray is None else
-                        map_solver_row_ray_to_original(raw_ray,
-                                                       scaling.scales))
+    original_row_ray = None
+    if trigger_mode:
+        if raw_ray is None:
+            ray_audit["trigger_ray_rejected_reason"] = "NO_EXPOSED_TRIGGER_RAY"
+        else:
+            ray_audit["trigger_ray_raw_dimension"] = int(raw_ray.size)
+            if raw_ray.shape != (len(lp.rows),):
+                ray_audit["trigger_ray_rejected_reason"] = "TRIGGER_RAY_DIMENSION_AMBIGUOUS"
+            elif not np.isfinite(raw_ray).all() or not np.any(raw_ray):
+                ray_audit["trigger_ray_rejected_reason"] = "TRIGGER_RAY_NONFINITE_OR_ZERO"
+            elif not _proposal_model_unchanged(highs, solver_arrays, diagnostic):
+                ray_audit["trigger_ray_rejected_reason"] = "TRIGGER_RAY_INCUMBENT_MODEL_DIFFERS"
+            else:
+                try:
+                    original_row_ray = map_solver_row_ray_to_original(raw_ray, scaling.scales)
+                except RuntimeError as error:
+                    ray_audit["trigger_ray_rejected_reason"] = str(error)
+                else:
+                    ray_audit.update(trigger_ray_original_space_mapping_verified=True,
+                        trigger_ray_support_size=int(np.count_nonzero(original_row_ray)))
+    else:
+        # Preserve strict/root and dedicated-certificate extraction behavior.
+        original_row_ray = (None if raw_ray is None else
+                            map_solver_row_ray_to_original(raw_ray, scaling.scales))
     solution = highs.getSolution()
     proposal_failure_reason = None
     primal_present = primal_finite = primal_dimensions_correct = False
@@ -2854,6 +2886,15 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
         "highs_version": highs.version(), "options": options,
         "ray_exist_status": str(ray_status),
         "ray_call_status": str(ray_call_status),
+        "ray_acquisition_seconds": time.perf_counter() - acquisition_started,
+        **ray_audit,
+        "row_ray_mapping": (None if not ray_audit["trigger_ray_original_space_mapping_verified"] else {
+            "schema": "CORET_HIGHSPY_INCUMBENT_ROW_RAY_V1", "api": "getDualRay",
+            "canonical_lp_sha256": lp.identity(), "solver_scaled_lp_sha256": solver_lp.identity(),
+            "row_scaling_sha256": scaling.report["row_scaling_sha256"],
+            "raw_ray_sha256": hashlib.sha256(raw_ray.astype("<f8").tobytes()).hexdigest(),
+            "original_ray_sha256": hashlib.sha256(original_row_ray.astype("<f8").tobytes()).hexdigest(),
+            "mapping_count": 1, "incumbent_model_verified": True}),
         "solver_scaling": scaling.report,
         "rational_objective_sha256": _sha_json([_fs(value) for value in exact_objective]),
         "objective_is_proposal_only": True,
@@ -2880,6 +2921,8 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
             "runtime_seconds": runtime,
             "exact_replay_required": True,
             "authorizes_witness_or_exclusion": False,
+            **ray_audit,
+            "row_ray_mapping": result["row_ray_mapping"],
         })
         result["proposal_audit_path"] = str(audit_path)
         result["proposal_audit_sha256"] = cluster_common.sha256(audit_path)
@@ -4331,10 +4374,69 @@ def attempt_fixed_phase_farkas(lp, proposal, timeout_seconds):
     return audit
 
 
+def _normalized_row_ray_sha256(ray):
+    """Exact binary64 direction fingerprint; magnitude/sign carry no authority."""
+    entries = [(i, Fraction.from_float(float(v))) for i, v in enumerate(ray) if v]
+    if not entries:
+        raise FixedPhaseInvariantError("zero numerical ray cannot be fingerprinted")
+    pivot = entries[0][1]
+    return _sha_json([[i, _fs(v / pivot)] for i, v in entries])
+
+
+def _validated_trigger_row_ray(lp, proposal, method):
+    """Reject ambiguous numerical ray provenance; never establish a proof here."""
+    proposal = {} if proposal is None else proposal
+    audit = {"trigger_ray_exist": bool(proposal.get("trigger_ray_exist", False)),
+        "trigger_ray_raw_dimension": proposal.get("trigger_ray_raw_dimension"),
+        "trigger_ray_expected_original_row_dimension": len(lp.rows),
+        "trigger_ray_original_space_mapping_verified": False,
+        "trigger_ray_support_size": 0, "trigger_ray_rejected_reason": None}
+    def reject(reason):
+        audit["trigger_ray_rejected_reason"] = reason
+        return None, audit
+    if proposal.get("model_status") != "Infeasible":
+        return reject("TRIGGER_NOT_NUMERICALLY_INFEASIBLE")
+    value = proposal.get("original_row_dual_ray")
+    if value is None:
+        return reject(proposal.get("trigger_ray_rejected_reason") or "NO_EXPOSED_TRIGGER_RAY")
+    raw, mapped = proposal.get("raw_dual_ray"), np.asarray(value, dtype=np.float64)
+    if raw is None:
+        return reject("TRIGGER_RAY_MAPPING_PROVENANCE_ABSENT")
+    raw = np.asarray(raw, dtype=np.float64)
+    audit["trigger_ray_raw_dimension"] = int(raw.size)
+    if mapped.shape != (len(lp.rows),) or raw.shape != mapped.shape:
+        return reject("TRIGGER_RAY_DIMENSION_AMBIGUOUS")
+    if not np.isfinite(raw).all() or not np.isfinite(mapped).all() or not np.any(mapped):
+        return reject("TRIGGER_RAY_NONFINITE_OR_ZERO")
+    mapping = proposal.get("row_ray_mapping") or {}
+    scaling = proposal.get("solver_scaling") or {}
+    diagnostic = proposal.get("construction_diagnostic") or {}
+    if (proposal.get("solver_method") != method or
+            proposal.get("trigger_ray_original_space_mapping_verified") is not True or
+            mapping.get("schema") != "CORET_HIGHSPY_INCUMBENT_ROW_RAY_V1" or
+            mapping.get("api") != "getDualRay" or mapping.get("mapping_count") != 1 or
+            mapping.get("incumbent_model_verified") is not True or
+            mapping.get("canonical_lp_sha256") != lp.identity() or
+            diagnostic.get("canonical_lp_sha256") != lp.identity() or
+            scaling.get("original_canonical_lp_sha256") != lp.identity() or
+            not scaling.get("solver_scaled_lp_sha256") or
+            mapping.get("solver_scaled_lp_sha256") != scaling.get("solver_scaled_lp_sha256") or
+            diagnostic.get("solver_scaled_lp_sha256") != scaling.get("solver_scaled_lp_sha256") or
+            not scaling.get("row_scaling_sha256") or
+            mapping.get("row_scaling_sha256") != scaling.get("row_scaling_sha256") or
+            mapping.get("raw_ray_sha256") != hashlib.sha256(raw.astype("<f8").tobytes()).hexdigest() or
+            mapping.get("original_ray_sha256") != hashlib.sha256(mapped.astype("<f8").tobytes()).hexdigest()):
+        return reject("TRIGGER_RAY_MAPPING_PROVENANCE_AMBIGUOUS")
+    audit.update(trigger_ray_exist=True, trigger_ray_original_space_mapping_verified=True,
+                 trigger_ray_support_size=int(np.count_nonzero(mapped)))
+    return mapped, audit
+
+
 def attempt_fixed_phase_certificate(lp, trigger_method,
                                     timeout_seconds=FIXED_PHASE_CERTIFICATE_FAMILY_SECONDS, *,
-                                    certificate_solver=None, factor_cache=None, attempt_cache=None):
-    """Dedicated original-LP simplex/ray solve. Status has no proof authority."""
+                                    certificate_solver=None, factor_cache=None, attempt_cache=None,
+                                    trigger_proposal=None):
+    """Trigger-first ray acquisition, then dedicated solve; no status is proof."""
     started = time.perf_counter()
     deadline = started + timeout_seconds
     audit = {"certificate_trigger_solver_method": trigger_method,
@@ -4358,7 +4460,13 @@ def attempt_fixed_phase_certificate(lp, trigger_method,
              "candidate_constructed_before_deadline": False,
              "selected_system_replay_verified": False,
              "full_original_lp_replay_started": False,
-             "full_original_lp_replay_completed": False}
+             "full_original_lp_replay_completed": False,
+             "certificate_ray_source": None, "dedicated_certificate_fallback_used": False,
+             "normalized_ray_candidate_sha256": None, "duplicate_ray_candidate_skipped": False,
+             "ray_candidate_sha256s": [], "ray_candidate_attempts": []}
+    trigger_ray, trigger_audit = _validated_trigger_row_ray(lp, trigger_proposal, trigger_method)
+    audit.update(trigger_audit)
+    trigger_fingerprint = None if trigger_ray is None else _normalized_row_ray_sha256(trigger_ray)
     def remaining():
         seconds = deadline - time.perf_counter()
         if seconds <= 0:
@@ -4374,6 +4482,8 @@ def attempt_fixed_phase_certificate(lp, trigger_method,
     completed_attempt = False
     checked_candidate = None
     cache_key = lp.identity()
+    cache_dirty = False
+    dedicated_already_attempted = False
 
     def full_replay(thunk, eligible):
         nonlocal extension_credit, stage
@@ -4424,71 +4534,28 @@ def attempt_fixed_phase_certificate(lp, trigger_method,
         checked_candidate = (_sha_json(certificate), replay)
         return certificate, replay
 
-    try:
-        if attempt_cache is not None and cache_key in attempt_cache:
-            entry = attempt_cache[cache_key]
-            if (entry.get("canonical_lp_sha256") != cache_key or
-                    entry.get("audit_sha256") != _sha_json(entry.get("audit"))):
-                raise FixedPhaseInvariantError("certificate attempt cache identity/integrity differs")
-            audit.update(copy.deepcopy(entry["audit"]))
-            audit.update(certificate_attempt_cache_hit=True,
-                         certificate_original_trigger_solver_method=audit["certificate_trigger_solver_method"],
-                         certificate_trigger_solver_method=trigger_method,
-                         certificate_cached_attempt_seconds=audit["certificate_attempt_seconds"])
-            certificate = audit.get("fixed_phase_farkas_certificate")
-            if audit["fixed_phase_farkas_verified"]:
-                if certificate is None:
-                    raise FixedPhaseInvariantError("verified cached certificate is absent")
-                audit.update(fixed_phase_farkas_verified=False, exact_farkas_replay_verified=False,
-                             exact_farkas_rhs=None, exact_replay=None, final_replay_seconds=0.,
-                             final_replay_extension_used=False, full_original_lp_replay_started=False,
-                             full_original_lp_replay_completed=False)
-                try:
-                    # A cached status/hash alone has no authorization authority.
-                    replay = full_replay(lambda: verify_exact_lp_farkas(lp, certificate),
-                        audit["candidate_constructed_before_deadline"] is True
-                        and audit["selected_system_replay_verified"] is True)
-                except FixedPhaseInvariantError:
-                    raise
-                except ExactSolveFailure:
-                    raise
-                except RuntimeError as error:
-                    audit["exact_certificate_rejection"] = str(error)
-                    audit["direct_ray_repair_status"] = "CACHED_CERTIFICATE_REPLAY_FAILED"
-                else:
-                    audit.update(fixed_phase_farkas_verified=True, exact_farkas_replay_verified=True,
-                                 exact_farkas_rhs=replay["exact_lambda_b"], exact_replay=replay)
-            return audit
-        solver = certificate_solver(lp, min(30., remaining()))
-        diagnostic = solver.get("construction_diagnostic", {})
-        if diagnostic.get("canonical_lp_sha256") != lp.identity():
-            raise FixedPhaseInvariantError("fixed-phase certificate original LP identity differs")
-        if (solver.get("solver_method") != "FIXED_PHASE_CERTIFICATE" or
-                solver.get("rational_objective_sha256") != _sha_json([_fs(Fraction(0))] * lp.column_count)):
-            raise FixedPhaseInvariantError("fixed-phase certificate zero-objective/method identity differs")
-        if solver.get("options", {}).get("presolve") != "off" or solver.get("options", {}).get("solver") != "simplex":
-            raise FixedPhaseInvariantError("fixed-phase certificate solve is not original-LP simplex")
-        if solver.get("solver_scaling", {}).get("original_canonical_lp_sha256") != lp.identity():
-            raise FixedPhaseInvariantError("fixed-phase certificate row-scaling identity differs")
-        if solver["solver_scaling"].get("solver_scaled_lp_sha256") != diagnostic.get("solver_scaled_lp_sha256"):
-            raise FixedPhaseInvariantError("fixed-phase certificate solver-copy identity differs")
-        audit.update(certificate_solver_method="FIXED_PHASE_CERTIFICATE",
-                     certificate_numerical_run_status=solver["run_status"],
-                     certificate_numerical_model_status=solver["model_status"],
-                     certificate_solver_seconds=solver.get("runtime_seconds"),
-                     certificate_solver_audit_path=solver.get("proposal_audit_path"),
-                     ray_mapping="solve_highspy maps solver-scaled ray to original rows exactly once")
-        ray = solver.get("original_row_dual_ray")
-        if solver["model_status"] != "Infeasible" or ray is None:
-            audit["direct_ray_repair_status"] = "NO_USABLE_DEDICATED_DUAL_RAY"
-            completed_attempt = True
-            return audit
+    def repair_candidate(ray, source):
+        nonlocal stage, checked_candidate, cache_dirty
+        ray = np.asarray(ray, dtype=np.float64)
+        if ray.shape != (len(lp.rows),) or not np.isfinite(ray).all() or not np.any(ray):
+            audit["direct_ray_repair_status"] = "NO_USABLE_NUMERICAL_RAY"
+            return
+        fingerprint = _normalized_row_ray_sha256(ray)
+        audit.update(certificate_ray_source=source, normalized_ray_candidate_sha256=fingerprint)
+        if fingerprint in audit["ray_candidate_sha256s"]:
+            audit["duplicate_ray_candidate_skipped"] = True
+            return
+        cache_dirty = True
+        audit["ray_candidate_sha256s"].append(fingerprint)
+        checked_candidate = None
+        audit.update(candidate_constructed_before_deadline=False, selected_system_replay_verified=False)
         stage = "reduced_support_exact_repair"
         repair_started = time.perf_counter()
         certificate, attempts, status = repair_fixed_phase_dual_ray(lp, ray, remaining(),
             factor_cache=factor_cache, final_replay=complete_candidate)
+        seconds = time.perf_counter() - repair_started
         audit.update(direct_ray_attempts=attempts, direct_ray_repair_status=status,
-                     exact_repair_seconds=time.perf_counter() - repair_started)
+                     exact_repair_seconds=audit["exact_repair_seconds"] + seconds)
         if attempts:
             audit.update({key: value for key, value in attempts[-1].items() if key in audit
                           and key not in ("exact_repair_seconds", "exact_farkas_replay_verified", "exact_farkas_rhs")})
@@ -4513,6 +4580,94 @@ def attempt_fixed_phase_certificate(lp, trigger_method,
                 audit.update(fixed_phase_farkas_verified=True, exact_farkas_replay_verified=True,
                              exact_farkas_rhs=replay["exact_lambda_b"], exact_replay=replay,
                              fixed_phase_farkas_certificate=certificate)
+        audit["ray_candidate_attempts"].append({"certificate_ray_source": source,
+            "normalized_ray_candidate_sha256": fingerprint, "direct_ray_repair_status": status,
+            "exact_repair_seconds": seconds,
+            "exact_farkas_replay_verified": audit["exact_farkas_replay_verified"]})
+
+    try:
+        if attempt_cache is not None and cache_key in attempt_cache:
+            entry = attempt_cache[cache_key]
+            if (entry.get("canonical_lp_sha256") != cache_key or
+                    entry.get("audit_sha256") != _sha_json(entry.get("audit"))):
+                raise FixedPhaseInvariantError("certificate attempt cache identity/integrity differs")
+            audit.update(copy.deepcopy(entry["audit"]))
+            audit.update(certificate_attempt_cache_hit=True,
+                         certificate_original_trigger_solver_method=audit["certificate_trigger_solver_method"],
+                         certificate_trigger_solver_method=trigger_method,
+                         certificate_cached_attempt_seconds=audit["certificate_attempt_seconds"])
+            audit.update(trigger_audit)
+            audit["duplicate_ray_candidate_skipped"] = bool(
+                trigger_fingerprint is not None and trigger_fingerprint in audit["ray_candidate_sha256s"])
+            dedicated_already_attempted = audit["dedicated_certificate_fallback_used"]
+            certificate = audit.get("fixed_phase_farkas_certificate")
+            if audit["fixed_phase_farkas_verified"]:
+                if certificate is None:
+                    raise FixedPhaseInvariantError("verified cached certificate is absent")
+                audit.update(fixed_phase_farkas_verified=False, exact_farkas_replay_verified=False,
+                             exact_farkas_rhs=None, exact_replay=None, final_replay_seconds=0.,
+                             final_replay_extension_used=False, full_original_lp_replay_started=False,
+                             full_original_lp_replay_completed=False)
+                try:
+                    # A cached status/hash alone has no authorization authority.
+                    replay = full_replay(lambda: verify_exact_lp_farkas(lp, certificate),
+                        audit["candidate_constructed_before_deadline"] is True
+                        and audit["selected_system_replay_verified"] is True)
+                except FixedPhaseInvariantError:
+                    raise
+                except ExactSolveFailure:
+                    raise
+                except RuntimeError as error:
+                    audit["exact_certificate_rejection"] = str(error)
+                    audit["direct_ray_repair_status"] = "CACHED_CERTIFICATE_REPLAY_FAILED"
+                else:
+                    audit.update(fixed_phase_farkas_verified=True, exact_farkas_replay_verified=True,
+                                 exact_farkas_rhs=replay["exact_lambda_b"], exact_replay=replay)
+                return audit
+            if trigger_fingerprint is None or trigger_fingerprint in audit["ray_candidate_sha256s"]:
+                audit["duplicate_ray_candidate_skipped"] = trigger_fingerprint is not None
+                return audit
+            # A materially different usable trigger ray may get exact repair,
+            # but never repeats the cached dedicated solve for this canonical LP.
+            audit.update(certificate_family_budget_seconds=timeout_seconds,
+                         duplicate_ray_candidate_skipped=False,
+                         final_replay_seconds=0., final_replay_extension_used=False,
+                         full_original_lp_replay_started=False, full_original_lp_replay_completed=False)
+        if trigger_ray is not None:
+            repair_candidate(trigger_ray, "TRIGGER_" + trigger_method)
+            if audit["fixed_phase_farkas_verified"] or dedicated_already_attempted:
+                completed_attempt = True
+                return audit
+        stage = "dedicated_original_lp_simplex"
+        dedicated_seconds = min(30., remaining())
+        audit["dedicated_certificate_fallback_used"] = True
+        audit["certificate_ray_source"] = "DEDICATED_CERTIFICATE"
+        cache_dirty = True
+        solver = certificate_solver(lp, dedicated_seconds)
+        diagnostic = solver.get("construction_diagnostic", {})
+        if diagnostic.get("canonical_lp_sha256") != lp.identity():
+            raise FixedPhaseInvariantError("fixed-phase certificate original LP identity differs")
+        if (solver.get("solver_method") != "FIXED_PHASE_CERTIFICATE" or
+                solver.get("rational_objective_sha256") != _sha_json([_fs(Fraction(0))] * lp.column_count)):
+            raise FixedPhaseInvariantError("fixed-phase certificate zero-objective/method identity differs")
+        if solver.get("options", {}).get("presolve") != "off" or solver.get("options", {}).get("solver") != "simplex":
+            raise FixedPhaseInvariantError("fixed-phase certificate solve is not original-LP simplex")
+        if solver.get("solver_scaling", {}).get("original_canonical_lp_sha256") != lp.identity():
+            raise FixedPhaseInvariantError("fixed-phase certificate row-scaling identity differs")
+        if solver["solver_scaling"].get("solver_scaled_lp_sha256") != diagnostic.get("solver_scaled_lp_sha256"):
+            raise FixedPhaseInvariantError("fixed-phase certificate solver-copy identity differs")
+        audit.update(certificate_solver_method="FIXED_PHASE_CERTIFICATE",
+                     certificate_numerical_run_status=solver["run_status"],
+                     certificate_numerical_model_status=solver["model_status"],
+                     certificate_solver_seconds=solver.get("runtime_seconds"),
+                     certificate_solver_audit_path=solver.get("proposal_audit_path"),
+                     ray_mapping="solve_highspy maps solver-scaled ray to original rows exactly once")
+        ray = solver.get("original_row_dual_ray")
+        if solver["model_status"] != "Infeasible" or ray is None:
+            audit["direct_ray_repair_status"] = "NO_USABLE_DEDICATED_DUAL_RAY"
+            completed_attempt = True
+            return audit
+        repair_candidate(ray, "DEDICATED_CERTIFICATE")
         completed_attempt = True
         return audit
     except ExactSolveFailure as error:
@@ -4527,7 +4682,7 @@ def attempt_fixed_phase_certificate(lp, trigger_method,
         # Keep an expired enclosing search alarm from interrupting the bounded
         # replay's handoff. Its logical deadline remains unchanged everywhere.
         restore(completion_extension_seconds=extension_credit)
-        if completed_attempt and attempt_cache is not None and not audit["certificate_attempt_cache_hit"]:
+        if completed_attempt and attempt_cache is not None and (cache_dirty or not audit["certificate_attempt_cache_hit"]):
             snapshot = copy.deepcopy(audit)
             attempt_cache[cache_key] = {"canonical_lp_sha256": cache_key, "audit": snapshot,
                                        "audit_sha256": _sha_json(snapshot)}
@@ -4617,7 +4772,8 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
                     try:
                         certificate_audit = attempt_fixed_phase_certificate(lp, method,
                             min(FIXED_PHASE_CERTIFICATE_FAMILY_SECONDS, remaining()),
-                            certificate_solver=certificate_solver, attempt_cache=certificate_attempt_cache)
+                            certificate_solver=certificate_solver, attempt_cache=certificate_attempt_cache,
+                            trigger_proposal=candidate)
                     except ExactSolveFailure as error:
                         anchor_audit.update(fixed_phase_farkas_attempted=True,
                                             fixed_phase_farkas_verified=False,
