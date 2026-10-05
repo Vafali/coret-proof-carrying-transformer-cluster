@@ -435,6 +435,10 @@ class ExactSolveFailure(RuntimeError):
     pass
 
 
+class FixedPhaseInvariantError(RuntimeError):
+    """A violated authenticated-anchor invariant, never a search outcome."""
+
+
 class HighsCanonicalLPDiagnosticError(RuntimeError):
     def __init__(self, message: str, diagnostic: dict):
         super().__init__(message)
@@ -2235,7 +2239,8 @@ def persist_exact_lp(lp: ExactCanonicalLP, path: Path):
 
 
 def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
-                  scaling_path: Path | None = None):
+                  scaling_path: Path | None = None, *, objective=None,
+                  time_limit_seconds=None):
     import highspy
     highs = highspy.Highs()
     if log_path is not None:
@@ -2245,6 +2250,10 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
                "presolve": "off", "threads": 1,
                "parallel": "off", "random_seed": 0,
                "solver": "simplex"}
+    if time_limit_seconds is not None:
+        if not math.isfinite(time_limit_seconds) or time_limit_seconds <= 0:
+            raise RuntimeError("HiGHS proposal time limit differs")
+        options["time_limit"] = float(time_limit_seconds)
     if log_path is not None:
         options["log_file"] = str(log_path)
     option_statuses = []
@@ -2284,6 +2293,16 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
         thresholds[name] = float(value)
     infinity = highspy.kHighsInf
     original_arrays = _highs_numeric_arrays(lp, infinity)
+    exact_objective = ([Fraction(0)] * lp.column_count if objective is None
+                       else list(map(_fr, objective)))
+    if len(exact_objective) != lp.column_count:
+        raise RuntimeError("HiGHS proposal objective topology differs")
+    # The rational objective is a heuristic. Normalize before binary64
+    # conversion; neither its value nor optimality is numerical proof.
+    objective_scale = max(map(abs, exact_objective), default=Fraction(0)) or Fraction(1)
+    proposal_objective = np.asarray([float(value / objective_scale)
+                                     for value in exact_objective])
+    original_arrays["objective"] = proposal_objective
     original_diagnostic = _diagnose_highs_lp(
         lp, original_arrays, thresholds)
     original_structural_failure = original_diagnostic[
@@ -2309,6 +2328,7 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
         persist_solver_row_scaling(scaling, scaling_path)
     solver_lp = scaling.lp
     solver_arrays = _highs_numeric_arrays(solver_lp, infinity)
+    solver_arrays["objective"] = proposal_objective
     scaled_diagnostic = _diagnose_highs_lp(
         solver_lp, solver_arrays, thresholds)
     _require_solver_scaling_applied(
@@ -2393,6 +2413,8 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
         "ray_exist_status": str(ray_status),
         "ray_call_status": str(ray_call_status),
         "solver_scaling": scaling.report,
+        "rational_objective_sha256": _sha_json([_fs(value) for value in exact_objective]),
+        "objective_is_proposal_only": True,
         "construction_diagnostic": diagnostic,
     }
 
@@ -2582,6 +2604,180 @@ def lp_with_relu_phases(lp: ExactCanonicalLP, phases: dict[int, bool],
         lp.variable_names, lp.column_lower, lp.column_upper, tuple(rows))
 
 
+def build_fixed_phase_linear_lp(problem, pattern, parent_lp=None):
+    """Exact pre-quadratic perspective polyhedron, not a ReLU triangle LP.
+
+    The production parent already uses c=P(x), g=t*preactivation and
+    u=t*ReLU(preactivation). Its zero-bound sign/value branches are homogeneous
+    and correct for t>0. A branch with a nonzero raw threshold is unsupported:
+    it needs a separately authenticated perspective transformation.
+    """
+    n, d = len(problem.X), problem.d
+    if len(pattern) != d or any(type(value) is not bool for value in pattern):
+        raise FixedPhaseInvariantError("fully fixed phase topology differs")
+    names = tuple([f"xi[{i}]" for i in range(n)] + [f"c[{i}]" for i in range(d)]
+                  + ["t"] + [f"g[{i}]" for i in range(d)] + [f"u[{i}]" for i in range(d)])
+    t_index, g0, u0 = n + d, n + d + 1, n + 2 * d + 1
+    tau, tau_proof = exact_dyadic_sqrt_lower(problem.epsilon)
+    if tau <= 0:
+        raise FixedPhaseInvariantError("fixed phase requires a certified positive scale lower")
+    if parent_lp is None:
+        # Small deterministic fixtures only. Production reuses its existing
+        # authenticated sparse definitions instead of building another giant LP.
+        if n > 256:
+            raise FixedPhaseInvariantError("production fixed phase needs authenticated parent LP")
+        low = tuple(problem.low) + (None,) * d + (tau,) + (None,) * (2 * d)
+        high = tuple(problem.high) + (None,) * (3 * d + 1)
+        rows = []
+        means = [sum(row, Fraction(0)) / d for row in problem.X]
+        mean0 = sum(problem.x0, Fraction(0)) / d
+        for j in range(d):
+            indices, coefficients = _coalesced(
+                [(i, -(row[j] - means[i])) for i, row in enumerate(problem.X)] + [(n + j, 1)])
+            rhs = problem.x0[j] - mean0
+            rows.append(ExactLPRow(f"centered[{j}]", indices, coefficients, rhs, rhs))
+        w1_beta = _matvec(problem.W1, problem.beta)
+        for i in range(d):
+            indices, coefficients = _coalesced(
+                [(n + j, -problem.W1[i][j] * problem.gamma[j]) for j in range(d)]
+                + [(t_index, -(w1_beta[i] + problem.b1[i])), (g0 + i, 1)])
+            rows.append(ExactLPRow(f"preactivation[{i}]", indices, coefficients, Fraction(0), Fraction(0)))
+        for j in range(1, d):
+            indices, coefficients = _coalesced(
+                [(n, -problem.gamma[0]), (n + j, problem.gamma[j]),
+                 (t_index, problem.beta[j] + problem.b2[j] - problem.beta[0] - problem.b2[0])]
+                + [(u0 + i, problem.W2[j][i] - problem.W2[0][i]) for i in range(d)])
+            rows.append(ExactLPRow(f"cancellation[{j}]", indices, coefficients, Fraction(0), Fraction(0)))
+        parent_lp = ExactCanonicalLP(names, low, high, tuple(rows))
+    if parent_lp.variable_names != names:
+        raise FixedPhaseInvariantError("fixed phase variable units/topology differ")
+    if any(value is not None and type(value) not in (int, Fraction)
+           for value in (*parent_lp.column_lower, *parent_lp.column_upper)):
+        raise FixedPhaseInvariantError("non-rational claimed LP bound")
+    for i, (lo, hi) in enumerate(zip(problem.low, problem.high)):
+        if (parent_lp.column_lower[i] is None or parent_lp.column_upper[i] is None
+                or parent_lp.column_lower[i] < lo or parent_lp.column_upper[i] > hi):
+            raise FixedPhaseInvariantError("fixed phase dropped authenticated source bounds")
+    required = ({f"centered[{j}]" for j in range(d)}
+                | {f"preactivation[{j}]" for j in range(d)}
+                | {f"cancellation[{j}]" for j in range(1, d)})
+    if not required.issubset({row.name for row in parent_lp.rows}):
+        raise FixedPhaseInvariantError("fixed phase dropped retained definitions")
+    rows, removed = [], 0
+    for row in parent_lp.rows:
+        if any(type(value) not in (int, Fraction) for value in row.coefficients):
+            raise FixedPhaseInvariantError("non-rational/nonlinear claimed LP coefficient")
+        if any(value is not None and type(value) not in (int, Fraction)
+               for value in (row.lower, row.upper)):
+            raise FixedPhaseInvariantError("non-rational claimed LP row bound")
+        if row.name.startswith("relu_triangle_"):
+            removed += 1
+            continue
+        if row.name.startswith("branch_"):
+            try:
+                family, neuron = row.name.split("[", 1)
+                neuron = int(neuron.rstrip("]"))
+            except ValueError as error:
+                raise FixedPhaseInvariantError("unrecognized perspective branch") from error
+            if not 0 <= neuron < d:
+                raise FixedPhaseInvariantError("perspective branch neuron differs")
+            expected = {
+                "branch_active_value": ((g0 + neuron, u0 + neuron), (Fraction(-1), Fraction(1)), Fraction(0), Fraction(0)),
+                "branch_active_sign": ((g0 + neuron,), (Fraction(-1),), None, Fraction(0)),
+                "branch_inactive_value": ((u0 + neuron,), (Fraction(1),), Fraction(0), Fraction(0)),
+                "branch_inactive_sign": ((g0 + neuron,), (Fraction(1),), None, Fraction(0)),
+            }.get(family)
+            if expected is None or (row.indices, row.coefficients, row.lower, row.upper) != expected:
+                raise FixedPhaseInvariantError("inherited branch is not an authenticated homogeneous perspective constraint")
+        rows.append(row)
+    for i, active in enumerate(pattern):
+        if active:
+            rows.append(ExactLPRow(f"fixed_active_value[{i}]", (g0 + i, u0 + i),
+                                   (Fraction(-1), Fraction(1)), Fraction(0), Fraction(0)))
+            rows.append(ExactLPRow(f"fixed_active_sign[{i}]", (g0 + i,),
+                                   (Fraction(-1),), None, Fraction(0)))
+        else:
+            rows.append(ExactLPRow(f"fixed_inactive_value[{i}]", (u0 + i,),
+                                   (Fraction(1),), Fraction(0), Fraction(0)))
+            rows.append(ExactLPRow(f"fixed_inactive_sign[{i}]", (g0 + i,),
+                                   (Fraction(1),), None, Fraction(0)))
+    low = list(parent_lp.column_lower)
+    low[t_index] = max(tau, low[t_index] if low[t_index] is not None else tau)
+    result = ExactCanonicalLP(names, tuple(low), parent_lp.column_upper, tuple(rows))
+    return result, {"canonical_lp_sha256": result.identity(), "triangle_rows_removed": removed,
+                    "triangle_relaxation_present": False, "all_phases_fixed": True,
+                    "scale_lower": _fs(low[t_index]), "scale_lower_proof": tau_proof,
+                    "inherited_branch_audit": "HOMOGENEOUS_SCALED_G_U_BRANCHES_VERIFIED"}
+
+
+def _exact_value_sign(value):
+    return value.sign() if isinstance(value, QuadraticElement) else (value > 0) - (value < 0)
+
+
+def replay_exact_linear_point(lp, point):
+    """Replay EVERY retained column bound and LP row, including definitions."""
+    if len(point) != lp.column_count:
+        raise RuntimeError("exact linear point topology differs")
+    if any(type(value) not in (int, Fraction, QuadraticElement) for value in point):
+        raise RuntimeError("exact linear point contains untrusted floating values")
+    slacks, equalities = [], 0
+    def check(value, lo, hi, label):
+        nonlocal equalities
+        equality = lo is not None and hi is not None and lo == hi
+        if equality:
+            equalities += 1
+        for residual in ([value - lo] if lo is not None else []) + ([hi - value] if hi is not None else []):
+            if _exact_value_sign(residual) < 0:
+                raise RuntimeError(f"exact linear constraint replay failed: {label}")
+            if not equality:
+                slacks.append(residual)
+    for i, (value, lo, hi) in enumerate(zip(point, lp.column_lower, lp.column_upper)):
+        check(value, lo, hi, f"column[{i}]")
+    for row in lp.rows:
+        value = sum((coefficient * point[i] for i, coefficient in zip(row.indices, row.coefficients)), Fraction(0))
+        check(value, row.lower, row.upper, row.name)
+    rational = all(isinstance(value, (int, Fraction)) for value in point)
+    return {"verified": True, "canonical_lp_sha256": lp.identity(),
+            "every_linear_row_replayed": True, "rows_replayed": len(lp.rows),
+            "column_bounds_replayed": lp.column_count, "equality_count": equalities,
+            "minimum_slack": _fs(min(slacks)) if rational and slacks else None,
+            "all_slacks_exact_nonnegative": True}
+
+
+def _fixed_phase_point_from_sources(problem, pattern, sources, t):
+    """Reconstruct the retained c/g/u definitions from original operands."""
+    d = problem.d
+    x = [problem.x0[j] + sum((row[j] * value for row, value in zip(problem.X, sources)), Fraction(0))
+         for j in range(d)]
+    mean = sum(x, Fraction(0)) * Fraction(1, d)
+    c = [value - mean for value in x]
+    w1_beta = _matvec(problem.W1, problem.beta)
+    scaled = [value * gamma for value, gamma in zip(c, problem.gamma)]
+    g = [sum((weight * value for weight, value in zip(row, scaled)), Fraction(0))
+         + t * (bias + offset) for row, bias, offset in zip(problem.W1, w1_beta, problem.b1)]
+    u = [value if active else value * 0 for value, active in zip(g, pattern)]
+    return [*sources, *c, t, *g, *u]
+
+
+def replay_fixed_phase_semantic_witness(problem, lp, witness):
+    if witness.get("fixed_phase_linear_lp_sha256") != lp.identity():
+        raise RuntimeError("fixed-phase witness linear LP identity differs")
+    if "algebraic_root" in witness:
+        semantic = replay_algebraic_perspective_witness(problem, witness)
+        context = QuadraticRootContext.from_record(witness["algebraic_root"])
+        def element(record):
+            return QuadraticElement(context, _fr(record["constant"]), _fr(record["slope"]))
+        sources = [element(row) for row in witness["source_affine"]]
+        t = element(witness["t_affine"])
+    else:
+        semantic = replay_exact_perspective_witness(problem, witness)
+        sources = [_fr(value) for value in witness["source_values"]]
+        t = _fr(witness["t"])
+    point = _fixed_phase_point_from_sources(problem, witness["relu_active"], sources, t)
+    linear = replay_exact_linear_point(lp, point)
+    return {**semantic, "fixed_phase_linear_replay": linear}
+
+
 def _branch_neuron(solution, bounds: dict, phases: dict, source_count: int):
     pattern, proposal = candidate_relu_phase_pattern(
         solution, bounds, source_count)
@@ -2593,6 +2789,16 @@ def _branch_neuron(solution, bounds: dict, phases: dict, source_count: int):
     # Largest violation first; lower neuron index wins an exact tie.
     selected = min(remaining, key=lambda index: (-scores[str(index)], index))
     return selected, pattern, proposal
+
+
+def _complete_phase_map(bounds, phases, dimension):
+    fixed = {int(i): True for i in bounds["stable_active"]}
+    fixed.update({int(i): False for i in bounds["stable_inactive"]})
+    for i, active in phases.items():
+        if i in fixed and fixed[i] != active:
+            raise FixedPhaseInvariantError("branch contradicts an authenticated stable phase")
+        fixed[i] = active
+    return [fixed[i] for i in range(dimension)] if set(fixed) == set(range(dimension)) else None
 
 
 def run_phase_continuation(
@@ -3057,6 +3263,480 @@ def _replay_affine_family(problem, pattern, source_constant, source_slope,
             evidence["replay_seconds"] += time.perf_counter() - replay_started
     evidence["exact_replay_result"] = {"verified": False, "failures": failures}
     return None, evidence
+
+
+class FixedPhaseAnchorWorkspace:
+    """Bounded proposal repair in source/t coordinates, with full LP replay.
+
+    Numerical rank/QR choose corrections only. Success of an exact selected
+    solve is insufficient: every original constraint must subsequently pass.
+    Inherited equalities not spanned by this heuristic can cause repair to fail;
+    that is inconclusive, never evidence of infeasibility.
+    """
+
+    def __init__(self, problem, pattern, lp):
+        self.problem, self.pattern, self.lp = problem, tuple(pattern), lp
+        self.n, self.d = len(problem.X), problem.d
+        self.centered_cache, self.column_cache, self.factor_cache = {}, {}, {}
+        active = [i for i, value in enumerate(pattern) if value]
+        w1_beta = _matvec(problem.W1, problem.beta)
+        h, h_t = [], []
+        for j in range(self.d):
+            nonzero = [i for i in active if problem.W2[j][i]]
+            h.append([(problem.gamma[f] if j == f else Fraction(0)) + sum(
+                (problem.W2[j][i] * problem.W1[i][f] * problem.gamma[f]
+                 for i in nonzero if problem.W1[i][f]), Fraction(0))
+                for f in range(self.d)])
+            h_t.append(problem.beta[j] + problem.b2[j] + sum(
+                (problem.W2[j][i] * (w1_beta[i] + problem.b1[i]) for i in nonzero), Fraction(0)))
+        self.difference = [[h[j][f] - h[0][f] for f in range(self.d)] for j in range(1, self.d)]
+        self.difference_t = [h_t[j] - h_t[0] for j in range(1, self.d)]
+        self.integer_rows = [_exact_integer_vector(row) for row in self.difference]
+        x = np.asarray([[float(value) for value in row] for row in problem.X])
+        x -= x.mean(axis=1, keepdims=True)
+        m = np.asarray([[float(value) for value in row] for row in self.difference])
+        self.sensitivity = np.column_stack((m @ x.T, np.asarray(list(map(float, self.difference_t)))))
+        self.matrix_cache, self.last_basis = {}, None
+        self.equality_nullity = None
+        self.nullity_reason = "EXACT_RANK_NOT_YET_ESTABLISHED"
+
+    def centered(self, i):
+        if i not in self.centered_cache:
+            row = self.problem.X[i]
+            mean = sum(row, Fraction(0)) / self.d
+            self.centered_cache[i] = [value - mean for value in row]
+        return self.centered_cache[i]
+
+    def column(self, i):
+        if i == self.n:
+            return self.difference_t
+        if i not in self.column_cache:
+            _build_selected_exact_matrix(self.difference, (i,), self.centered,
+                                         self.column_cache, self.integer_rows)
+        return self.column_cache[i]
+
+    def free_variables(self):
+        indices = [*range(self.n), self.n + self.d]
+        return [i for i, column in enumerate(indices)
+                if self.lp.column_lower[column] != self.lp.column_upper[column]
+                or self.lp.column_lower[column] is None]
+
+    def establish_nullity(self, rank, free):
+        # Derived c/g/u definitions have unique values for sources/t. Production
+        # branch-value rows repeat the exact phase definitions. Unknown extra
+        # equalities are replayed but forbid this structural rank claim.
+        allowed = {"centered", "preactivation", "cancellation",
+                   "fixed_active_value", "fixed_inactive_value", "relu_active_value",
+                   "relu_inactive_value", "branch_active_value", "branch_inactive_value"}
+        extra = [row.name for row in self.lp.rows
+                 if row.lower is not None and row.lower == row.upper
+                 and _semantic_family(row.name) not in allowed]
+        fixed_derived = any(self.lp.column_lower[i] is not None
+                            and self.lp.column_lower[i] == self.lp.column_upper[i]
+                            for i in range(self.n, self.lp.column_count)
+                            if i != self.n + self.d)
+        if not extra and not fixed_derived and rank == self.d - 1:
+            self.equality_nullity = len(free) - rank
+            self.nullity_reason = "EXACT_NONSINGULAR_CANCELLATION_MINOR_AND_UNIQUE_DERIVED_DEFINITIONS"
+        elif not extra and not fixed_derived and rank == 0 and (
+                (not any(value for row in self.difference for value in row)
+                 and not any(self.difference_t))
+                or (len(free) <= 256 and all(not value for i in free for value in self.column(i)))):
+            self.equality_nullity = len(free)
+            self.nullity_reason = "EXACT_ZERO_CANCELLATION_MATRIX_AND_UNIQUE_DERIVED_DEFINITIONS"
+        else:
+            if self.lp.column_count <= 256:
+                # Tiny fixtures may have arbitrary additional equalities.
+                # Never materialize this dense system for the 14k-source LP.
+                equalities = []
+                for row in self.lp.rows:
+                    if row.lower is not None and row.lower == row.upper:
+                        values = [Fraction(0)] * self.lp.column_count
+                        for i, value in zip(row.indices, row.coefficients):
+                            values[i] = value
+                        equalities.append(values)
+                for i, (lo, hi) in enumerate(zip(self.lp.column_lower, self.lp.column_upper)):
+                    if lo is not None and lo == hi:
+                        values = [Fraction(0)] * self.lp.column_count
+                        values[i] = Fraction(1)
+                        equalities.append(values)
+                pivots = {}
+                for values in equalities:
+                    for i in sorted(pivots):
+                        pivot = pivots[i]
+                        if values[i]:
+                            factor = values[i]
+                            values = [a - factor * b for a, b in zip(values, pivot)]
+                    if any(values):
+                        i = next(i for i, value in enumerate(values) if value)
+                        divisor = values[i]
+                        pivots[i] = [value / divisor for value in values]
+                self.equality_nullity = self.lp.column_count - len(pivots)
+                self.nullity_reason = "EXACT_SMALL_FIXTURE_FULL_EQUALITY_RANK"
+            else:
+                self.nullity_reason = "EXTRA_EQUALITIES_OR_UNPROVED_RANK_UPPER_BOUND"
+
+    def reconstruct_anchor(self, proposal, timeout_seconds):
+        started = time.perf_counter()
+        deadline = started + timeout_seconds
+        proposal = np.asarray(proposal, dtype=np.float64)
+        if proposal.shape != (self.lp.column_count,) or not np.isfinite(proposal).all():
+            raise ExactSolveFailure("fixed-phase LP proposal topology/finite values differ")
+        point_variables = [*map(_fr, proposal[:self.n]), _fr(proposal[self.n + self.d])]
+        free = self.free_variables()
+        column_indices = [*range(self.n), self.n + self.d]
+        # Exact endpoint snapping is an untrusted active-set proposal, not
+        # clamping a scientific state. Every resulting bound is replayed.
+        for i, column in enumerate(column_indices):
+            lo, hi = self.lp.column_lower[column], self.lp.column_upper[column]
+            if lo is not None and lo == hi:
+                point_variables[i] = lo
+            else:
+                endpoints = [v for v in (lo, hi) if v is not None]
+                if endpoints:
+                    nearest = min(endpoints, key=lambda v: abs(v - point_variables[i]))
+                    if abs(float(nearest - point_variables[i])) <= 1e-9 * max(1., abs(float(nearest))):
+                        point_variables[i] = nearest
+        q = _fixed_phase_point_from_sources(self.problem, self.pattern,
+                                           point_variables[:self.n], point_variables[-1])
+        residual = [_dot(row, q[self.n:self.n + self.d]) + value * point_variables[-1]
+                    for row, value in zip(self.difference, self.difference_t)]
+        profile = {"exact_anchor_replay_verified": False}
+        if free:
+            numeric = self.sensitivity[:, free]
+            _q, r, pivots = qr(numeric, mode="economic", pivoting=True)
+            tolerance = max(numeric.shape) * np.finfo(float).eps * max(1., float(np.linalg.norm(numeric)))
+            rank = int(np.sum(np.abs(np.diag(r)) > tolerance))
+            selected = tuple(free[int(i)] for i in pivots[:rank])
+        else:
+            rank, selected = 0, ()
+        if rank:
+            # Select rows only when cancellation equations are dependent.
+            _q, _r, rows = qr(self.sensitivity[:, selected].T, mode="economic", pivoting=True)
+            rows = tuple(int(i) for i in rows[:rank])
+            key = (selected, rows)
+            if key not in self.matrix_cache:
+                self.matrix_cache[key] = [[self.column(i)[j] for i in selected] for j in rows]
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                raise ExactSolveFailure("fixed-phase rational anchor assembly timeout")
+            solved = _solve_exact_correction_rhs(self.matrix_cache[key],
+                [[-residual[j] for j in rows]], remaining, self.factor_cache, profile)[0]
+            for i, delta in zip(selected, solved):
+                point_variables[i] += delta
+            self.last_basis = (selected, rows)
+        elif any(residual):
+            raise ExactSolveFailure("fixed-phase anchor has unrepaired exact equality residual")
+        q = _fixed_phase_point_from_sources(self.problem, self.pattern,
+                                           point_variables[:self.n], point_variables[-1])
+        reconstruction_seconds = time.perf_counter() - started
+        replay_started = time.perf_counter()
+        try:
+            replay = replay_exact_linear_point(self.lp, q)
+        except RuntimeError as error:
+            raise ExactSolveFailure(f"rational anchor not exactly feasible: {error}") from error
+        if time.perf_counter() > deadline:
+            raise ExactSolveFailure("fixed-phase anchor reconstruction/replay timeout")
+        self.establish_nullity(rank, free)
+        profile.update(exact_anchor_replay_verified=True,
+                       exact_anchor_minimum_slack=replay["minimum_slack"],
+                       exact_linear_replay=replay,
+                       equality_nullity=self.equality_nullity,
+                       equality_nullity_justification=self.nullity_reason,
+                       anchor_sha256=_sha_json({"lp": self.lp.identity(), "q": [_fs(v) for v in q]}),
+                       reconstruction_seconds=reconstruction_seconds,
+                       anchor_replay_seconds=time.perf_counter() - replay_started)
+        return q, profile
+
+    def nullspace_directions(self, anchor, timeout_seconds, maximum=2):
+        if self.last_basis is None:
+            return []
+        selected, rows = self.last_basis
+        free = [i for i in self.free_variables() if i not in selected][:maximum]
+        if not free:
+            return []
+        rhs = [[-self.column(i)[j] for j in rows] for i in free]
+        solved = _solve_exact_correction_rhs(self.matrix_cache[(selected, rows)], rhs,
+                                            timeout_seconds, self.factor_cache, {})
+        directions = []
+        for i, column in zip(free, solved):
+            delta = [Fraction(0)] * (self.n + 1)
+            delta[i] = Fraction(1)
+            for j, value in zip(selected, column):
+                delta[j] = value
+            other = _fixed_phase_point_from_sources(self.problem, self.pattern,
+                [value + change for value, change in zip(anchor[:self.n], delta[:self.n])],
+                anchor[self.n + self.d] + delta[-1])
+            directions.append([value - base for value, base in zip(other, anchor)])
+        return directions
+
+
+def _interval_contains_exact(interval, value):
+    return (not interval["alpha_interval_empty"]
+            and (interval["alpha_interval_lower"] is None
+                 or value >= _fr(interval["alpha_interval_lower"]))
+            and (interval["alpha_interval_upper"] is None
+                 or value <= _fr(interval["alpha_interval_upper"])))
+
+
+def _isolate_irrational_branch_exact(coefficients, sign):
+    a, b, c = coefficients
+    if a < 0:
+        a, b, c = -a, -b, -c
+    bound = Fraction(math.ceil(1 + max(abs(b / a), abs(c / a))))
+    vertex = -b / (2 * a)
+    lo, hi = (-bound, vertex) if sign < 0 else (vertex, bound)
+    def evaluate(value):
+        return a * value * value + b * value + c
+    # Remove the stationary endpoint without a floating approximation.
+    while lo == vertex or hi == vertex:
+        middle = (lo + hi) / 2
+        if evaluate(lo) * evaluate(middle) < 0:
+            hi = middle
+        else:
+            lo = middle
+    verify_quadratic_isolating_interval(coefficients, (lo, hi))
+    return lo, hi
+
+
+def exact_polynomial_roots_in_interval(coefficients, interval):
+    polynomial = tuple(map(_fr, coefficients))
+    while polynomial and polynomial[0] == 0:
+        polynomial = polynomial[1:]
+    roots = []
+    total = 0
+    kind = "IDENTICALLY_ZERO" if not polynomial else "NONZERO_CONSTANT" if len(polynomial) == 1 else "LINEAR" if len(polynomial) == 2 else "QUADRATIC"
+    if not polynomial:
+        alpha = Fraction(0) if _interval_contains_exact(interval, Fraction(0)) else (
+            _fr(interval["alpha_interval_lower"]) if interval["alpha_interval_lower"] is not None
+            else _fr(interval["alpha_interval_upper"]))
+        if _interval_contains_exact(interval, alpha):
+            roots.append(("rational", alpha, None))
+        total = None  # Infinitely many roots, not a fictitious single root.
+    elif len(polynomial) == 2:
+        root = -polynomial[1] / polynomial[0]
+        total = 1
+        if _interval_contains_exact(interval, root):
+            roots.append(("rational", root, None))
+    elif len(polynomial) == 3:
+        a, b, c = polynomial
+        discriminant = b * b - 4 * a * c
+        if discriminant >= 0:
+            square = _fraction_square_root(discriminant)
+            if square is not None:
+                values = sorted(set((-b + sign * square) / (2 * a) for sign in (-1, 1)))
+                total = len(values)
+                roots.extend(("rational", value, None) for value in values
+                             if _interval_contains_exact(interval, value))
+            else:
+                total = 2
+                normalized_a, normalized_b = (a, b) if a > 0 else (-a, -b)
+                for sign in (-1, 1):
+                    if _irrational_quadratic_branch_inside(normalized_a, normalized_b,
+                                                          discriminant, sign, interval):
+                        roots.append(("algebraic", None,
+                                      _isolate_irrational_branch_exact(polynomial, sign)))
+    elif len(polynomial) > 3:
+        raise FixedPhaseInvariantError("perspective polynomial degree exceeds two")
+    return polynomial, roots, {"polynomial_case": kind,
+        "polynomial_degree": len(polynomial) - 1 if polynomial else None,
+        "identically_zero": not polynomial, "constant": len(polynomial) == 1,
+        "polynomial": [_fs(value) for value in polynomial],
+        "roots_total": total, "roots_inside_interval": len(roots)}
+
+
+def _phi_at_point(problem, point):
+    n, d = len(problem.X), problem.d
+    return d * point[n + d] ** 2 - _dot(point[n:n + d], point[n:n + d]) - d * problem.epsilon
+
+
+def evaluate_fixed_phase_direction(problem, lp, pattern, anchor, direction,
+                                   second_anchor=None):
+    started = time.perf_counter()
+    anchor_replay = replay_exact_linear_point(lp, anchor)
+    if len(direction) != len(anchor):
+        raise FixedPhaseInvariantError("fixed phase direction topology differs")
+    if second_anchor is not None:
+        replay_exact_linear_point(lp, second_anchor)
+        if any(other - base != delta for base, other, delta in zip(anchor, second_anchor, direction)):
+            raise FixedPhaseInvariantError("second anchor/direction identity differs")
+    conditions = []
+    def append(label, a, b, lo, hi):
+        if lo is not None and lo == hi and (a != lo or b != 0):
+            raise FixedPhaseInvariantError("direction does not preserve every exact linear equality")
+        conditions.append((label, a, b, lo, hi))
+    for i, (a, b, lo, hi) in enumerate(zip(anchor, direction, lp.column_lower, lp.column_upper)):
+        append(f"column[{i}]", a, b, lo, hi)
+    for row in lp.rows:
+        append(row.name, _dot(row.coefficients, [anchor[i] for i in row.indices]),
+               _dot(row.coefficients, [direction[i] for i in row.indices]), row.lower, row.upper)
+    interval = exact_affine_parameter_interval(conditions)
+    if not _interval_contains_exact(interval, Fraction(0)):
+        raise FixedPhaseInvariantError("authenticated anchor alpha=0 is outside its exact interval")
+    if second_anchor is not None and not _interval_contains_exact(interval, Fraction(1)):
+        raise FixedPhaseInvariantError("two exact feasible anchors lost the [0,1] segment")
+    n, d = len(problem.X), problem.d
+    c, c_delta = anchor[n:n + d], direction[n:n + d]
+    t, t_delta = anchor[n + d], direction[n + d]
+    evidence = {"exact_anchor_replay_verified": anchor_replay["verified"],
+        "exact_anchor_minimum_slack": anchor_replay["minimum_slack"],
+        "second_anchor_replay_verified": second_anchor is not None,
+        "direction_identity": _sha_json({"lp": lp.identity(), "anchor": [_fs(v) for v in anchor],
+                                           "direction": [_fs(v) for v in direction]}),
+        "alpha_interval_contains_zero": True, "alpha_interval": interval,
+        "alpha_interval_lower": interval["alpha_interval_lower"],
+        "alpha_interval_upper": interval["alpha_interval_upper"],
+        "alpha_interval_width": (_fs(_fr(interval["alpha_interval_upper"]) - _fr(interval["alpha_interval_lower"]))
+                                  if interval["alpha_interval_lower"] is not None and interval["alpha_interval_upper"] is not None else None),
+        "segment_0_1_exactly_feasible": second_anchor is not None,
+        "Phi_q0": _fs(_phi_at_point(problem, anchor)),
+        "Phi_q1": _fs(_phi_at_point(problem, second_anchor)) if second_anchor is not None else None,
+        "endpoint_residual_sign_change": (_phi_at_point(problem, anchor) * _phi_at_point(problem, second_anchor) < 0
+                                           if second_anchor is not None else None),
+        "interval_seconds": time.perf_counter() - started,
+        "exact_replay_result": None, "final_replay_seconds": 0.0}
+    polynomial_started = time.perf_counter()
+    polynomial, roots, root_evidence = exact_polynomial_roots_in_interval(
+        (d * t_delta ** 2 - _dot(c_delta, c_delta),
+         2 * (d * t * t_delta - _dot(c, c_delta)),
+         _phi_at_point(problem, anchor)), interval)
+    evidence.update(root_evidence, polynomial_root_isolation_seconds=time.perf_counter() - polynomial_started)
+    failures = []
+    for kind, root, isolation in roots:
+        replay_started = time.perf_counter()
+        if kind == "rational":
+            point = [a + b * root for a, b in zip(anchor, direction)]
+            witness = {"schema": WITNESS_SCHEMA, "source_values": [_fs(v) for v in point[:n]],
+                       "t": _fs(point[n + d]), "relu_active": list(pattern)}
+        else:
+            witness = {"schema": WITNESS_SCHEMA,
+                       "algebraic_root": {"polynomial": [_fs(v) for v in polynomial],
+                                          "isolating_interval": [_fs(v) for v in isolation]},
+                       "source_affine": [{"constant": _fs(a), "slope": _fs(b)}
+                                         for a, b in zip(anchor[:n], direction[:n])],
+                       "t_affine": {"constant": _fs(t), "slope": _fs(t_delta)},
+                       "relu_active": list(pattern)}
+        witness["fixed_phase_linear_lp_sha256"] = lp.identity()
+        try:
+            evidence["exact_replay_result"] = replay_fixed_phase_semantic_witness(problem, lp, witness)
+            return witness, evidence
+        except FixedPhaseInvariantError:
+            raise
+        except RuntimeError as error:
+            failures.append(f"{type(error).__name__}: {error}")
+        finally:
+            evidence["final_replay_seconds"] += time.perf_counter() - replay_started
+    evidence["exact_replay_result"] = {"verified": False, "failures": failures}
+    return None, evidence
+
+
+def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seconds):
+    """Witness-only search: no finite failed portfolio can close a phase."""
+    started = time.perf_counter()
+    deadline = started + timeout_seconds
+    report = {"method": "EXACT_FEASIBLE_ANCHOR_GRADIENT_SEGMENTS",
+              "fixed_phase_linear_lp_sha256": lp.identity(),
+              "phase_pattern_sha256": _sha_json(list(pattern)),
+              "fixed_phase_linear_lp_status": None, "exact_anchor_replay_verified": False,
+              "exact_anchor_minimum_slack": None, "equality_nullity": None,
+              "second_anchor_replay_verified": False, "attempted": True, "verified": False,
+              "permits_infeasibility_claim": False, "directions": [], "anchors": [],
+              "proposal_seconds": 0.0, "direction_seconds": 0.0,
+              "search_status": "INCONCLUSIVE"}
+    def remaining():
+        value = deadline - time.perf_counter()
+        if value <= 0:
+            raise ExactSolveFailure("fixed-phase witness search timeout")
+        return value
+    restore_alarm = _start_reconstruction_alarm(max(1e-6, timeout_seconds))
+    try:
+        proposal_started = time.perf_counter()
+        first = propose(lp, [Fraction(0)] * lp.column_count, remaining(), "anchor")
+        report["proposal_seconds"] += time.perf_counter() - proposal_started
+        report["fixed_phase_linear_lp_status"] = first["model_status"]
+        if not first.get("feasible") or first.get("column_values") is None:
+            report["failure"] = "NO_LINEAR_FEASIBLE_PROPOSAL_IS_NOT_A_PROOF"
+            return None, report
+        workspace_started = time.perf_counter()
+        workspace = FixedPhaseAnchorWorkspace(problem, pattern, lp)
+        report["workspace_setup_seconds"] = time.perf_counter() - workspace_started
+        anchor, anchor_profile = workspace.reconstruct_anchor(first["column_values"], min(60., remaining()))
+        report.update(exact_anchor_replay_verified=True,
+                      exact_anchor_minimum_slack=anchor_profile["exact_anchor_minimum_slack"],
+                      equality_nullity=workspace.equality_nullity,
+                      equality_nullity_justification=workspace.nullity_reason)
+        report["anchors"].append({"role": "q0", **anchor_profile})
+        print(json.dumps({"stage": "exact_fixed_phase_anchor_authenticated",
+                          **anchor_profile}), flush=True)
+        # First try alpha=0 itself. A verified anchor on Phi=0 needs no search.
+        found, evidence = evaluate_fixed_phase_direction(problem, lp, pattern, anchor,
+                                                         [Fraction(0)] * len(anchor))
+        report["directions"].append({"family": "ANCHOR_ITSELF", **evidence})
+        if found is not None:
+            report.update(verified=True, search_status="EXACT_WITNESS_VERIFIED")
+            return found, report
+        n, d = len(problem.X), problem.d
+        gradient = [Fraction(0)] * len(anchor)
+        gradient[n:n + d] = [-2 * v for v in anchor[n:n + d]]
+        gradient[n + d] = 2 * d * anchor[n + d]
+        report["rational_gradient_sha256"] = _sha_json([_fs(v) for v in gradient])
+        for sense, multiplier in (("MAXIMIZE_PHI_GRADIENT", -1), ("MINIMIZE_PHI_GRADIENT", 1)):
+            direction_started = time.perf_counter()
+            try:
+                proposal_started = time.perf_counter()
+                second = propose(lp, [multiplier * v for v in gradient], remaining(), sense)
+                report["proposal_seconds"] += time.perf_counter() - proposal_started
+                if not second.get("feasible") or second.get("column_values") is None:
+                    report["anchors"].append({"role": sense, "replay_verified": False,
+                                               "proposal_status": second["model_status"]})
+                    continue
+                q1, profile = workspace.reconstruct_anchor(second["column_values"], min(60., remaining()))
+                report["anchors"].append({"role": sense, **profile})
+                print(json.dumps({"stage": "exact_fixed_phase_second_anchor_authenticated",
+                                  "role": sense, **profile}), flush=True)
+                report["second_anchor_replay_verified"] = True
+                found, evidence = evaluate_fixed_phase_direction(problem, lp, pattern, anchor,
+                    [value - base for value, base in zip(q1, anchor)], q1)
+                report["directions"].append({"family": sense, **evidence})
+                if found is not None:
+                    report.update(verified=True, search_status="EXACT_WITNESS_VERIFIED")
+                    return found, report
+            except ExactSolveFailure as error:
+                report["anchors"].append({"role": sense, "replay_verified": False,
+                                           "failure": str(error)})
+            finally:
+                report["direction_seconds"] += time.perf_counter() - direction_started
+        for i, direction in enumerate(workspace.nullspace_directions(anchor, min(30., remaining()))):
+            direction_started = time.perf_counter()
+            # Check all equalities before admitting a secondary direction.
+            # A heuristic nullspace proposal missing an inherited equality is
+            # rejected, not handed to the authenticated-line evaluator.
+            equality_rows = [row for row in lp.rows if row.lower is not None and row.lower == row.upper]
+            fixed_columns = [i for i, (lo, hi) in enumerate(zip(lp.column_lower, lp.column_upper))
+                             if lo is not None and lo == hi]
+            if any(_dot(row.coefficients, [direction[j] for j in row.indices]) for row in equality_rows) or any(direction[j] for j in fixed_columns):
+                report["directions"].append({"family": f"NULLSPACE[{i}]",
+                                             "admitted": False, "failure": "EXACT_EQUALITY_NULLSPACE_REPLAY_FAILED"})
+                report["direction_seconds"] += time.perf_counter() - direction_started
+                continue
+            found, evidence = evaluate_fixed_phase_direction(problem, lp, pattern, anchor, direction)
+            report["directions"].append({"family": f"NULLSPACE[{i}]", **evidence})
+            report["direction_seconds"] += time.perf_counter() - direction_started
+            if found is not None:
+                report.update(verified=True, search_status="EXACT_WITNESS_VERIFIED")
+                return found, report
+        return None, report
+    except FixedPhaseInvariantError as error:
+        report.update(search_status="IMPLEMENTATION_DEFECT", implementation_defect=True,
+                      failure=f"{type(error).__name__}: {error}")
+        raise
+    except ExactSolveFailure as error:
+        report["failure"] = f"{type(error).__name__}: {error}"
+        return None, report
+    finally:
+        report["runtime_seconds"] = time.perf_counter() - started
+        restore_alarm()
+        print(json.dumps({"stage": "fixed_phase_exact_witness_search", **report}), flush=True)
 
 
 def reconstruct_exact_fixed_pattern_witness(
@@ -3540,9 +4220,15 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             weights, token, low, high, gamma, beta, W1, b1, W2, b2,
             epsilon)
         node_lps_by_identity = {}
+        node_lps_by_id = {"root": lp}
 
         def solve_phase_node(phases, node_id):
             node_lp = lp_with_relu_phases(lp, phases, EXPECTED_SOURCES)
+            fixed_pattern = _complete_phase_map(bounds, phases, DIMENSION)
+            if fixed_pattern is not None:
+                node_lp, _audit = build_fixed_phase_linear_lp(
+                    exact_problem, fixed_pattern, node_lp)
+            node_lps_by_id[node_id] = node_lp
             node_lps_by_identity[node_lp.identity()] = node_lp
             safe = node_id.replace(".", "_")
             node_solver = solve_highspy(
@@ -3571,38 +4257,39 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             }
 
         def attempt_witness(pattern, solution, node_id):
-            found, direct = attempt_exact_lp_candidate_witness(
-                exact_problem, solution, pattern, EXPECTED_SOURCES)
-            reconstruction = None
-            if found is None:
-                try:
-                    found, reconstruction = \
-                        reconstruct_exact_fixed_pattern_witness(
-                            exact_problem, solution, pattern,
-                            EXPECTED_SOURCES,
-                            min(240.0, max(
-                                0.1, started + wall_seconds
-                                - time.perf_counter())),
-                            node_lp=lp_with_relu_phases(
-                                lp, dict(enumerate(pattern)), EXPECTED_SOURCES))
-                except (RuntimeError, ExactSolveFailure) as error:
-                    reconstruction = {
-                        "attempted": True, "verified": False,
-                        "method":
-                            "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
-                        "failure": f"{type(error).__name__}: {error}"}
+            # Speculative patterns are witness searches, not node exclusions.
+            # Fully fixed BaB leaves separately use exact Farkas above.
+            if node_id not in node_lps_by_id:
+                raise FixedPhaseInvariantError("fixed-phase witness missing authenticated node LP")
+            parent = node_lps_by_id[node_id]
+            fixed_lp, audit = build_fixed_phase_linear_lp(exact_problem, pattern, parent)
+            prefix = f"fixed_{fixed_lp.identity()}"
+            fixed_artifact = persist_exact_lp(fixed_lp, artifact_dir / f"{prefix}.jsonl.gz")
+            def propose_fixed(model, objective, seconds, label):
+                print(json.dumps({"stage": "fixed_phase_linear_proposal_start", "role": label,
+                                  "canonical_lp_sha256": model.identity()}), flush=True)
+                proposal = solve_highspy(
+                    model, artifact_dir / f"{prefix}_{label}.log",
+                    artifact_dir / f"{prefix}_{label}_scaling.json",
+                    objective=objective, time_limit_seconds=min(60., seconds))
+                print(json.dumps({"stage": "fixed_phase_linear_proposal_complete", "role": label,
+                                  "status": proposal["model_status"],
+                                  "proposal_seconds": proposal["runtime_seconds"]}), flush=True)
+                return proposal
+            found, reconstruction = search_fixed_phase_exact_witness(
+                exact_problem, fixed_lp, pattern, propose_fixed,
+                min(240., max(.1, started + wall_seconds - time.perf_counter())))
+            reconstruction.update(fixed_phase_lp_audit=audit,
+                                  fixed_phase_lp_artifact=fixed_artifact)
             evidence = {
                 "attempted": True, "verified": found is not None,
-                "direct_dyadic_replay": direct,
                 "correction_reconstruction": reconstruction}
             if found is None:
                 return None, evidence
             record = _atomic_json(
                 artifact_dir / "exact_layernorm_cancellation_witness.json",
                 found)
-            replay = (replay_algebraic_perspective_witness(exact_problem, record)
-                      if "algebraic_root" in record else
-                      replay_exact_perspective_witness(exact_problem, record))
+            replay = replay_fixed_phase_semantic_witness(exact_problem, fixed_lp, record)
             return record, {
                 **evidence, "witness_path": str(
                     artifact_dir / "exact_layernorm_cancellation_witness.json"),

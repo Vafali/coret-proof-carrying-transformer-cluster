@@ -1,0 +1,395 @@
+from dataclasses import replace
+from fractions import Fraction as F
+import importlib.util
+from pathlib import Path
+import sys
+
+import numpy as np
+import pytest
+
+
+PATH = Path(__file__).resolve().parents[1] / "scripts/analyze_block2_exact_layernorm_perspective_causal_v1.py"
+SPEC = importlib.util.spec_from_file_location("fixed_phase_ln_test_oracle", PATH)
+O = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = O
+SPEC.loader.exec_module(O)
+
+
+def fixture(epsilon=F(1), cancellation_anywhere=False, sources=1):
+    zero = (F(0), F(0))
+    identity = ((F(1), F(0)), (F(0), F(1)))
+    negative = ((F(-1), F(0)), (F(0), F(-1)))
+    p = O.ExactPerspectiveProblem(
+        x0=zero, X=tuple((F(i + 1), F(-i - 1)) for i in range(sources)),
+        low=(F(-4),) * sources, high=(F(4),) * sources,
+        gamma=(F(1), F(1)), beta=(F(2), F(2)) if cancellation_anywhere else zero,
+        epsilon=epsilon, W1=identity if cancellation_anywhere else (zero, zero),
+        b1=zero, W2=negative if cancellation_anywhere else (zero, zero), b2=zero)
+    pattern = [cancellation_anywhere] * 2
+    lp, audit = O.build_fixed_phase_linear_lp(p, pattern)
+    return p, lp, pattern, audit
+
+
+def point(p, pattern, sources, t):
+    return O._fixed_phase_point_from_sources(p, pattern, list(map(F, sources)), F(t))
+
+
+def line(p, lp, pattern, q0, q1):
+    return O.evaluate_fixed_phase_direction(p, lp, pattern, q0,
+                                           [b - a for a, b in zip(q0, q1)], q1)
+
+
+def test_exact_feasible_anchor_accepted_and_every_row_replayed():
+    p, lp, pattern, _ = fixture()
+    q0 = point(p, pattern, [0], 2)
+    workspace = O.FixedPhaseAnchorWorkspace(p, pattern, lp)
+    anchor, profile = workspace.reconstruct_anchor(np.asarray(q0, dtype=float), 2.)
+    assert anchor == q0
+    assert profile["exact_anchor_replay_verified"]
+    assert profile["exact_linear_replay"]["rows_replayed"] == len(lp.rows)
+    assert profile["exact_linear_replay"]["column_bounds_replayed"] == lp.column_count
+    assert profile["equality_nullity"] == 1
+
+
+def test_anchor_zero_slack_is_allowed():
+    p, lp, pattern, _ = fixture()
+    q0 = point(p, pattern, [0], 1)
+    workspace = O.FixedPhaseAnchorWorkspace(p, pattern, lp)
+    anchor, profile = workspace.reconstruct_anchor(np.asarray(q0, dtype=float), 2.)
+    assert anchor == q0 and profile["exact_anchor_minimum_slack"] == "0/1"
+
+
+def test_two_exact_anchors_preserve_full_segment_and_zero_interval():
+    p, lp, pattern, _ = fixture(cancellation_anywhere=True)
+    q0, q1 = point(p, pattern, [0], 2), point(p, pattern, [2], 2)
+    witness, report = line(p, lp, pattern, q0, q1)
+    assert report["alpha_interval_contains_zero"]
+    assert report["segment_0_1_exactly_feasible"]
+    assert report["second_anchor_replay_verified"]
+    assert O._interval_contains_exact(report["alpha_interval"], F(1))
+    for alpha in (F(0), F(1, 3), F(1, 2), F(1)):
+        q = [a + alpha * (b - a) for a, b in zip(q0, q1)]
+        assert O.replay_exact_linear_point(lp, q)["verified"]
+    assert report["endpoint_residual_sign_change"]
+    assert witness is not None
+    assert "algebraic_root" in witness
+    assert report["exact_replay_result"]["fixed_phase_linear_replay"]["verified"]
+
+
+def test_singleton_zero_interval_is_supported_not_exclusion():
+    p, lp, pattern, _ = fixture(cancellation_anywhere=True)
+    lower = list(lp.column_lower)
+    lower[3] = F(2)  # n=1, d=2 -> t index 3.
+    lp = replace(lp, column_lower=tuple(lower), rows=lp.rows + (
+        O.ExactLPRow("scale_upper_guard", (3,), (F(1),), None, F(2)),))
+    q0, q1 = point(p, pattern, [0], 2), point(p, pattern, [0], 3)
+    witness, report = O.evaluate_fixed_phase_direction(
+        p, lp, pattern, q0, [b - a for a, b in zip(q0, q1)])
+    assert witness is None
+    assert report["alpha_interval_contains_zero"]
+    assert report["alpha_interval_lower"] == report["alpha_interval_upper"] == "0/1"
+    assert report["alpha_interval_width"] == "0/1"
+
+
+def test_inconsistent_interval_builder_is_an_implementation_defect(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    q0 = point(p, pattern, [0], 2)
+    monkeypatch.setattr(O, "exact_affine_parameter_interval", lambda _: {
+        "alpha_interval_lower": "1/1", "alpha_interval_upper": "2/1",
+        "alpha_interval_empty": False})
+    with pytest.raises(O.FixedPhaseInvariantError, match="alpha=0"):
+        O.evaluate_fixed_phase_direction(p, lp, pattern, q0, [F(0)] * len(q0))
+
+
+def test_defect_is_not_swallowed_by_search(monkeypatch):
+    p, lp, pattern, _ = fixture()
+    q0 = point(p, pattern, [0], 2)
+    def defect(*_):
+        raise O.FixedPhaseInvariantError("authenticated interval broken")
+    monkeypatch.setattr(O, "evaluate_fixed_phase_direction", defect)
+    propose = lambda *_: {"model_status": "Optimal", "feasible": True, "column_values": q0}
+    with pytest.raises(O.FixedPhaseInvariantError):
+        O.search_fixed_phase_exact_witness(p, lp, pattern, propose, 2.)
+
+
+@pytest.mark.parametrize("coefficients,case,count", [
+    ((0, 0, 0), "IDENTICALLY_ZERO", None),
+    ((0, 0, 1), "NONZERO_CONSTANT", 0),
+    ((0, 1, -1), "LINEAR", 1),
+    ((1, 0, -1), "QUADRATIC", 2),
+    ((1, -2, 1), "QUADRATIC", 1),
+    ((1, 0, 1), "QUADRATIC", 0),
+])
+def test_all_exact_polynomial_cases(coefficients, case, count):
+    interval = O.exact_affine_parameter_interval([("box", F(0), F(1), F(-1), F(1))])
+    _polynomial, roots, report = O.exact_polynomial_roots_in_interval(coefficients, interval)
+    assert report["polynomial_case"] == case and report["roots_total"] == count
+    if case == "IDENTICALLY_ZERO":
+        assert roots == [("rational", F(0), None)]
+
+
+@pytest.mark.parametrize("coefficients", [(1, 0, -2), (-1, 0, 2)])
+def test_irrational_roots_are_isolated_exactly_without_float(coefficients, monkeypatch):
+    monkeypatch.setattr(O, "_isolate_quadratic_root", lambda *_: pytest.fail("float isolation used"))
+    interval = O.exact_affine_parameter_interval([("box", F(0), F(1), F(-2), F(2))])
+    polynomial, roots, report = O.exact_polynomial_roots_in_interval(coefficients, interval)
+    assert len(roots) == report["roots_total"] == 2
+    for kind, root, isolation in roots:
+        assert kind == "algebraic" and root is None
+        assert O.verify_quadratic_isolating_interval(polynomial, isolation)["verified"]
+
+
+def test_closed_endpoint_linear_root_semantic_replay():
+    p, lp, pattern, _ = fixture(cancellation_anywhere=True)
+    q0, q1 = point(p, pattern, [1], 2), point(p, pattern, [2], 3)
+    witness, report = O.evaluate_fixed_phase_direction(
+        p, lp, pattern, q0, [b - a for a, b in zip(q0, q1)])
+    assert report["polynomial_case"] == "LINEAR"
+    assert report["alpha_interval_lower"] == "-1/1"
+    assert witness["t"] == "1/1" and witness["source_values"] == ["0/1"]
+    assert report["exact_replay_result"]["verified"]
+
+
+def test_identically_zero_line_replays_zero_anchor():
+    p, lp, pattern, _ = fixture()
+    q0 = point(p, pattern, [0], 1)
+    witness, report = O.evaluate_fixed_phase_direction(p, lp, pattern, q0, [F(0)] * len(q0))
+    assert report["identically_zero"] and witness["t"] == "1/1"
+    assert report["exact_replay_result"]["verified"]
+
+
+def test_fully_fixed_phase_has_no_triangles_and_retains_source_equality():
+    p, lp, pattern, _ = fixture()
+    rows = lp.rows + (
+        O.ExactLPRow("relu_triangle_nonnegative[0]", (6,), (F(-1),), None, F(0)),
+        O.ExactLPRow("authenticated_source_equality", (0,), (F(1),), F(0), F(0)),)
+    fixed, audit = O.build_fixed_phase_linear_lp(p, pattern, replace(lp, rows=rows))
+    assert audit["triangle_rows_removed"] == 1
+    assert not any(row.name.startswith("relu_triangle") for row in fixed.rows)
+    assert any(row.name == "authenticated_source_equality" for row in fixed.rows)
+    q0 = point(p, pattern, [0], 2)
+    assert O.replay_exact_linear_point(fixed, q0)["verified"]
+    corrupted = list(q0)
+    corrupted[0] = F(1, 100)
+    with pytest.raises(RuntimeError, match="constraint replay"):
+        O.replay_exact_linear_point(fixed, corrupted)
+
+
+def test_128_phases_are_fully_fixed_without_triangle_relaxation():
+    d, n = 128, 1
+    zero = (F(0),) * d
+    p = O.ExactPerspectiveProblem(x0=zero, X=(zero,), low=(F(-1),), high=(F(1),),
+        gamma=(F(1),) * d, beta=zero, epsilon=F(1),
+        W1=(zero,) * d, b1=zero, W2=(zero,) * d, b2=zero)
+    lp, audit = O.build_fixed_phase_linear_lp(p, [False] * d)
+    assert audit["all_phases_fixed"] and not audit["triangle_relaxation_present"]
+    assert len([row for row in lp.rows if row.name.startswith("fixed_inactive_value")]) == 128
+    assert len([row for row in lp.rows if row.name.startswith("cancellation")]) == 127
+    q0 = point(p, [False] * d, [0], 1)
+    assert O.replay_exact_linear_point(lp, q0)["verified"]
+    propose = lambda *_: {"model_status": "Optimal", "feasible": True, "column_values": q0}
+    witness, report = O.search_fixed_phase_exact_witness(p, lp, [False] * d, propose, 5.)
+    assert witness is not None and report["verified"]
+    assert report["exact_anchor_replay_verified"]
+    assert O.replay_fixed_phase_semantic_witness(p, lp, witness)["verified"]
+
+
+def test_raw_nonzero_branch_threshold_rejected():
+    p, lp, pattern, _ = fixture()
+    bad = O.ExactLPRow("branch_inactive_sign[0]", (4,), (F(1),), None, F(1))
+    with pytest.raises(O.FixedPhaseInvariantError, match="homogeneous perspective"):
+        O.build_fixed_phase_linear_lp(p, pattern, replace(lp, rows=lp.rows + (bad,)))
+
+
+def test_homogeneous_scaled_g_branch_is_retained():
+    p, lp, pattern, _ = fixture()
+    branch = O.ExactLPRow("branch_inactive_sign[0]", (4,), (F(1),), None, F(0))
+    fixed, audit = O.build_fixed_phase_linear_lp(p, pattern, replace(lp, rows=lp.rows + (branch,)))
+    assert branch in fixed.rows
+    assert audit["inherited_branch_audit"] == "HOMOGENEOUS_SCALED_G_U_BRANCHES_VERIFIED"
+
+
+def test_nullity_greater_than_one_failed_portfolio_is_inconclusive():
+    p, lp, pattern, _ = fixture(cancellation_anywhere=True, sources=2)
+    q0 = point(p, pattern, [0, 0], 2)
+    propose = lambda *_: {"model_status": "Optimal", "feasible": True, "column_values": q0}
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, propose, 2.)
+    assert found is None and report["equality_nullity"] == 3
+    assert report["search_status"] == "INCONCLUSIVE"
+    assert not report["permits_infeasibility_claim"]
+    assert O.scientific_status_from_proof(open_nodes=1) == O.INCONCLUSIVE
+
+
+def test_numerical_infeasibility_without_exact_farkas_is_inconclusive():
+    p, lp, pattern, _ = fixture()
+    propose = lambda *_: {"model_status": "Infeasible", "feasible": False, "column_values": None}
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, propose, 2.)
+    assert found is None and report["search_status"] == "INCONCLUSIVE"
+    assert not report["permits_infeasibility_claim"]
+
+
+def test_anchor_reconstruction_failure_is_inconclusive():
+    p, lp, pattern, _ = fixture()
+    # An extra incompatible source equality cannot be repaired by the selected
+    # cancellation-only heuristic. Failure says nothing about other phases.
+    lp = replace(lp, rows=lp.rows + (
+        O.ExactLPRow("extra_source", (0,), (F(1),), F(1), F(1)),))
+    q0 = point(p, pattern, [0], 2)
+    propose = lambda *_: {"model_status": "Optimal", "feasible": True, "column_values": q0}
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, propose, 2.)
+    assert found is None and not report["exact_anchor_replay_verified"]
+    assert report["search_status"] == "INCONCLUSIVE"
+
+
+def test_gradient_second_anchor_sign_change_returns_exact_irrational_witness():
+    p, lp, pattern, _ = fixture(F(2))
+    tau = lp.column_lower[3]
+    q0, q1 = point(p, pattern, [0], tau), point(p, pattern, [0], 2)
+    objectives = []
+    def propose(model, objective, seconds, role):
+        assert model.identity() == lp.identity()
+        objectives.append((role, objective))
+        return {"model_status": "Optimal", "feasible": True,
+                "column_values": q0 if role == "anchor" else q1}
+    witness, report = O.search_fixed_phase_exact_witness(p, lp, pattern, propose, 3.)
+    assert witness is not None and "algebraic_root" in witness
+    assert report["exact_anchor_replay_verified"] and report["second_anchor_replay_verified"]
+    assert objectives[1][0] == "MAXIMIZE_PHI_GRADIENT"
+    assert objectives[1][1][3] < 0
+    direction = report["directions"][-1]
+    assert direction["endpoint_residual_sign_change"]
+    assert direction["alpha_interval_contains_zero"]
+    assert direction["exact_replay_result"]["fixed_phase_linear_replay"]["verified"]
+    assert O.replay_fixed_phase_semantic_witness(p, lp, witness)["verified"]
+
+
+def test_small_real_highspy_proposes_but_exact_replay_certifies():
+    p, lp, pattern, _ = fixture(F(2))
+    upper = list(lp.column_upper)
+    upper[3] = F(2)
+    lp = replace(lp, column_upper=tuple(upper))
+    def propose(model, objective, seconds, _role):
+        return O.solve_highspy(model, objective=objective, time_limit_seconds=min(2., seconds))
+    witness, report = O.search_fixed_phase_exact_witness(p, lp, pattern, propose, 5.)
+    assert witness is not None and report["verified"]
+    assert O.replay_fixed_phase_semantic_witness(p, lp, witness)["verified"]
+
+
+def test_float_point_cannot_discharge_exact_anchor_replay():
+    p, lp, pattern, _ = fixture()
+    with pytest.raises(RuntimeError, match="floating"):
+        O.replay_exact_linear_point(lp, [float(v) for v in point(p, pattern, [0], 2)])
+
+
+def test_direction_must_preserve_every_equality():
+    p, lp, pattern, _ = fixture()
+    q0 = point(p, pattern, [0], 2)
+    direction = [F(0)] * len(q0)
+    direction[1] = F(1)
+    with pytest.raises(O.FixedPhaseInvariantError, match="preserve every"):
+        O.evaluate_fixed_phase_direction(p, lp, pattern, q0, direction)
+
+
+def test_complete_fixed_phase_witness_rejects_node_identity_mutation():
+    p, lp, pattern, _ = fixture()
+    q0 = point(p, pattern, [0], 1)
+    witness, _ = O.evaluate_fixed_phase_direction(p, lp, pattern, q0, [F(0)] * len(q0))
+    witness["fixed_phase_linear_lp_sha256"] = "wrong"
+    with pytest.raises(RuntimeError, match="LP identity"):
+        O.replay_fixed_phase_semantic_witness(p, lp, witness)
+
+
+def test_opposite_inherited_branch_is_not_discarded_by_fixed_pattern():
+    p, parent, pattern, _ = fixture(cancellation_anywhere=True)
+    inherited = O.ExactLPRow("branch_active_sign[0]", (4,), (F(-1),), None, F(0))
+    parent = replace(parent, rows=parent.rows + (inherited,))
+    changed_pattern = [False, True]
+    fixed, _audit = O.build_fixed_phase_linear_lp(p, changed_pattern, parent)
+    assert inherited in fixed.rows
+    assert any(row.name == "fixed_inactive_sign[0]" for row in fixed.rows)
+    q = point(p, changed_pattern, [0], 2)
+    with pytest.raises(RuntimeError, match="constraint replay"):
+        O.replay_exact_linear_point(fixed, q)
+
+
+def test_fixed_phase_infeasibility_needs_exact_farkas_replay():
+    p, lp, pattern, _ = fixture()
+    lp = replace(lp, rows=lp.rows + (
+        O.ExactLPRow("authenticated_source_equality", (0,), (F(1),), F(1), F(1)),))
+    result = O.solve_highspy(lp, time_limit_seconds=2.)
+    assert result["infeasible"]
+    # A solver status alone never closes a phase or declares scientific exclusion.
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: result, 2.)
+    assert found is None and not report["permits_infeasibility_claim"]
+    # Supply an independently derived exact separator, rather than requiring
+    # the existing untrusted numerical ray-repair heuristic to succeed.
+    by_name = {row.name: i for i, row in enumerate(lp.rows)}
+    cert = {"schema": "CORET_EXACT_LP_FARKAS_CERTIFICATE_V1",
+            "canonical_lp_sha256": lp.identity(), "multipliers": [
+                {"kind": "row", "index": by_name[name], "orientation": orientation,
+                 "multiplier": str(multiplier)} for name, orientation, multiplier in (
+                    ("centered[0]", -1, 1), ("centered[1]", 1, 1),
+                    ("cancellation[1]", -1, 1), ("authenticated_source_equality", -1, 2))]}
+    assert O.verify_exact_lp_farkas(lp, cert)["verified"]
+    assert O.scientific_status_from_proof(root_certificate_verified=True) == O.EXCLUDED
+
+
+@pytest.mark.parametrize("bad_coefficient", [1.0, "c*t"])
+def test_claimed_linear_system_rejects_nonexact_or_nonlinear_coefficient(bad_coefficient):
+    p, lp, pattern, _ = fixture()
+    bad = O.ExactLPRow("extra_untrusted", (0,), (bad_coefficient,), None, F(0))
+    with pytest.raises(O.FixedPhaseInvariantError, match="nonlinear"):
+        O.build_fixed_phase_linear_lp(p, pattern, replace(lp, rows=lp.rows + (bad,)))
+
+
+def test_one_sided_interval_and_zero_inequality_slope_are_supported():
+    interval = O.exact_affine_parameter_interval([
+        ("active_face", F(0), F(1), F(0), None),
+        ("constant_valid", F(1), F(0), F(0), F(2))])
+    assert interval["alpha_interval_lower"] == "0/1"
+    assert interval["alpha_interval_upper"] is None
+    assert O._interval_contains_exact(interval, F(0))
+    _, roots, report = O.exact_polynomial_roots_in_interval((0, 1, 0), interval)
+    assert roots == [("rational", F(0), None)] and report["roots_inside_interval"] == 1
+
+
+def test_gradient_minimization_is_tried_after_maximum_fails_to_find_root():
+    p, lp, pattern, _ = fixture()
+    q0, q1 = point(p, pattern, [0], 2), point(p, pattern, [0], 1)
+    calls = []
+    def propose(_model, objective, _seconds, role):
+        calls.append(role)
+        if role == "MINIMIZE_PHI_GRADIENT":
+            assert objective[3] > 0
+            values = q1
+        else:
+            values = q0
+        return {"model_status": "Optimal", "feasible": True, "column_values": values}
+    witness, report = O.search_fixed_phase_exact_witness(p, lp, pattern, propose, 2.)
+    assert calls == ["anchor", "MAXIMIZE_PHI_GRADIENT", "MINIMIZE_PHI_GRADIENT"]
+    assert witness is not None and report["verified"]
+    assert report["directions"][-1]["family"] == "MINIMIZE_PHI_GRADIENT"
+
+
+def test_inherited_node_cut_filters_roots_and_is_replayed_at_certification():
+    p, lp, pattern, _ = fixture(cancellation_anywhere=True)
+    lp = replace(lp, rows=lp.rows + (
+        O.ExactLPRow("authenticated_perspective_source_cut", (0,), (F(1),), None, F(1)),))
+    q0, q1 = point(p, pattern, [0], 2), point(p, pattern, [1], 2)
+    witness, report = line(p, lp, pattern, q0, q1)
+    assert witness is not None and report["roots_inside_interval"] == 1
+    assert report["alpha_interval_upper"] == "1/1"
+    # sqrt(3) is not silently accepted outside the inherited cut. The negative
+    # root remains available, so explicitly cut that side as well.
+    lp = replace(lp, rows=lp.rows + (
+        O.ExactLPRow("authenticated_perspective_source_lower", (0,), (F(1),), F(0), None),))
+    witness, report = line(p, lp, pattern, q0, q1)
+    assert witness is None and report["roots_inside_interval"] == 0
+
+
+def test_stable_plus_branched_neurons_form_a_complete_phase_without_128_branches():
+    bounds = {"stable_active": [0], "stable_inactive": [1]}
+    assert O._complete_phase_map(bounds, {2: True}, 3) == [True, False, True]
+    assert O._complete_phase_map(bounds, {}, 3) is None
+    with pytest.raises(O.FixedPhaseInvariantError, match="stable phase"):
+        O._complete_phase_map(bounds, {0: False, 2: True}, 3)
