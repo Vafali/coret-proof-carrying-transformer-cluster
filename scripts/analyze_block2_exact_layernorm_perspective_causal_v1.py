@@ -995,6 +995,286 @@ def _bareiss_solve(matrix, rhs, timeout_seconds=30.0):
     return solution
 
 
+def _integer_rows_sha256(rows):
+    """Unambiguous integer hash without Python's decimal digit limit."""
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update(len(row).to_bytes(8, "big"))
+        for value in row:
+            value = int(value)
+            payload = abs(value).to_bytes(max(1, (abs(value).bit_length() + 7) // 8), "big")
+            digest.update(bytes([value < 0]))
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+    return digest.hexdigest()
+
+
+def _integerize_correction_system(matrix, rhs_columns):
+    """Normalize A independently; clear each transformed RHS by column.
+
+    Clearing a row using RHS denominators needlessly enlarges A and all its
+    minors. A-only primitive rows permit the same elimination for every RHS.
+    """
+    started = time.perf_counter()
+    n = len(matrix)
+    if not n or any(len(row) != n for row in matrix) or any(
+            len(rhs) != n for rhs in rhs_columns):
+        raise ExactSolveFailure("correction system topology differs")
+    integer_matrix, transformed = [], [[] for _ in rhs_columns]
+    denominator_bits, gcd_bits, row_scales, signs = [], [], [], []
+    for i, row in enumerate(matrix):
+        common = math.lcm(*(value.denominator for value in row))
+        integers = [value.numerator * (common // value.denominator) for value in row]
+        divisor = math.gcd(*integers)
+        if not divisor:
+            raise ExactSolveFailure("correction matrix has a zero row")
+        sign = 1 if next(value for value in integers if value) > 0 else -1
+        scale = Fraction(sign * common, divisor)
+        integer_matrix.append([sign * value // divisor for value in integers])
+        for column, rhs in zip(transformed, rhs_columns):
+            column.append(rhs[i] * scale)
+        denominator_bits.append(common.bit_length())
+        gcd_bits.append(divisor.bit_length() - 1)
+        row_scales.append(scale)
+        signs.append(sign)
+    rhs_denominators = [math.lcm(*(value.denominator for value in column))
+                        for column in transformed]
+    integer_rhs = [[value.numerator * (denominator // value.denominator)
+                    for value in column]
+                   for column, denominator in zip(transformed, rhs_denominators)]
+    diagnostics = {
+        "dimension": n, "rhs_count": len(rhs_columns),
+        "nonzero_count": sum(bool(value) for row in matrix for value in row),
+        "maximum_coefficient_numerator_bit_length": max(
+            abs(value.numerator).bit_length() for row in matrix for value in row),
+        "maximum_coefficient_denominator_bit_length": max(
+            value.denominator.bit_length() for row in matrix for value in row),
+        "integerized_matrix_maximum_bit_length": max(
+            abs(value).bit_length() for row in integer_matrix for value in row),
+        "rhs_maximum_bit_length": max(
+            (abs(value).bit_length() for column in integer_rhs for value in column), default=0),
+        "row_common_denominator_bits": denominator_bits,
+        "row_gcd_bits_removed": gcd_bits,
+        "row_signs": signs,
+        "row_scales_sha256": _sha_json([_fs(value) for value in row_scales]),
+        "rhs_column_denominator_bits": [value.bit_length() for value in rhs_denominators],
+        "normalized_integer_matrix_sha256": _integer_rows_sha256(integer_matrix),
+        "integer_rhs_sha256": _integer_rows_sha256(integer_rhs),
+        "integerization_seconds": time.perf_counter() - started,
+    }
+    return integer_matrix, integer_rhs, rhs_denominators, diagnostics
+
+
+def _exact_multi_rhs_solve(matrix, rhs_columns, timeout_seconds=30.0,
+                         factor_cache=None, diagnostics=None):
+    """One deterministic Bareiss elimination, reusable for arbitrary RHS.
+
+    Cache entries are untrusted: every answer is replayed against the original
+    integer matrix and RHS before it can be used in an affine family.
+    """
+    started = time.perf_counter()
+    deadline = started + timeout_seconds
+    n, count = len(matrix), len(rhs_columns)
+    if (not n or not count or any(len(row) != n for row in matrix)
+            or any(len(rhs) != n for rhs in rhs_columns)
+            or any(type(value) is not int for row in matrix for value in row)
+            or any(type(value) is not int for rhs in rhs_columns for value in rhs)):
+        raise ExactSolveFailure("integer multi-RHS system topology/type differs")
+    report = diagnostics if diagnostics is not None else {}
+    matrix_sha = _integer_rows_sha256(matrix)
+    factor = (factor_cache or {}).get(matrix_sha)
+    if factor is not None and factor["matrix"] != matrix:
+        raise ExactSolveFailure("cached correction matrix identity differs")
+    if factor is not None:
+        identity = _sha_json({
+            "matrix_sha256": matrix_sha, "rows": factor["rows"],
+            "columns": factor["columns"],
+            "upper_sha256": _integer_rows_sha256(factor["upper"]),
+            "steps_sha256": _integer_rows_sha256([
+                [k, chosen, pivot, previous, *values]
+                for k, chosen, pivot, previous, values in factor["steps"]])})
+        if identity != factor["factorization_sha256"]:
+            raise ExactSolveFailure("cached exact factorization identity differs")
+    report.update(matrix_sha256=matrix_sha, rhs_count=count,
+                  elimination_reused=factor is not None,
+                  elimination_count=0 if factor is not None else 1,
+                  pre_product_common_factor_cancellations=0,
+                  maximum_pre_product_cancelled_factor_bit_length=0,
+                  peak_intermediate_integer_bit_length=max(
+                      abs(value).bit_length() for row in [*matrix, *rhs_columns] for value in row))
+
+    def check_time():
+        if time.perf_counter() >= deadline:
+            raise ExactSolveFailure("exact repair multi-RHS Bareiss timeout")
+
+    def note(value):
+        report["peak_intermediate_integer_bit_length"] = max(
+            report["peak_intermediate_integer_bit_length"], abs(value).bit_length())
+
+    def row_factors(pivot, factor_value, previous, entry_count):
+        # Cancel a common factor BEFORE products, without changing Bareiss's
+        # recurrence. Arbitrary row-content cancellation would break it.
+        common = math.gcd(math.gcd(pivot, factor_value), previous)
+        if common > 1:
+            report["pre_product_common_factor_cancellations"] += entry_count
+            report["maximum_pre_product_cancelled_factor_bit_length"] = max(
+                report["maximum_pre_product_cancelled_factor_bit_length"], common.bit_length())
+        return pivot // common, factor_value // common, previous // common
+
+    def reduce_entry(value, pivot_entry, pivot, factor_value, denominator):
+        first = value * pivot
+        second = factor_value * pivot_entry
+        numerator = first - second
+        quotient, remainder = divmod(numerator, denominator)
+        note(first); note(second); note(numerator); note(quotient)
+        if remainder:
+            raise ExactSolveFailure("multi-RHS Bareiss division is nonexact")
+        return quotient
+
+    if factor is None:
+        # Permutations depend on A only, never on a RHS or a floating solve.
+        column_order = sorted(range(n), key=lambda j: (
+            sum(bool(row[j]) for row in matrix),
+            max(abs(row[j]).bit_length() for row in matrix), j))
+        row_order = sorted(range(n), key=lambda i: (
+            sum(bool(value) for value in matrix[i]),
+            max(abs(value).bit_length() for value in matrix[i]), i))
+        work = [[matrix[i][j] for j in column_order] +
+                [rhs[i] for rhs in rhs_columns] for i in row_order]
+        previous, steps = 1, []
+        elimination_started = time.perf_counter()
+        try:
+            for k in range(n - 1):
+                check_time()
+                candidates = [i for i in range(k, n) if work[i][k]]
+                if not candidates:
+                    raise ExactSolveFailure("exact repair system is singular")
+                chosen = min(candidates, key=lambda i: (abs(work[i][k]).bit_length(),
+                                                       abs(work[i][k]), i))
+                if chosen != k:
+                    work[k], work[chosen] = work[chosen], work[k]
+                pivot = work[k][k]
+                factors = tuple(work[i][k] for i in range(k + 1, n))
+                steps.append((k, chosen, pivot, previous, factors))
+                for i in range(k + 1, n):
+                    check_time()
+                    value = work[i][k]
+                    p, f, denominator = row_factors(pivot, value, previous, n + count - k - 1)
+                    for j in range(k + 1, n + count):
+                        work[i][j] = reduce_entry(work[i][j], work[k][j],
+                                                  p, f, denominator)
+                    work[i][k] = 0
+                previous = pivot
+        finally:
+            report["bareiss_elimination_seconds"] = time.perf_counter() - elimination_started
+        if not work[-1][n - 1]:
+            raise ExactSolveFailure("exact repair system is singular")
+        factor = {"matrix": [row[:] for row in matrix], "rows": row_order,
+                  "columns": column_order, "upper": [row[:n] for row in work],
+                  "steps": steps,
+                  "peak_intermediate_integer_bit_length": report["peak_intermediate_integer_bit_length"]}
+        factor["factorization_sha256"] = _sha_json({
+            "matrix_sha256": matrix_sha, "rows": row_order, "columns": column_order,
+            "upper_sha256": _integer_rows_sha256(factor["upper"]),
+            "steps_sha256": _integer_rows_sha256([
+                [k, chosen, pivot, previous, *values]
+                for k, chosen, pivot, previous, values in steps])})
+        if factor_cache is not None:
+            factor_cache[matrix_sha] = factor
+        transformed_rhs = [row[n:] for row in work]
+    else:
+        transformed_rhs = [[rhs[i] for rhs in rhs_columns] for i in factor["rows"]]
+        elimination_started = time.perf_counter()
+        try:
+            for k, chosen, pivot, previous, factors in factor["steps"]:
+                check_time()
+                if chosen != k:
+                    transformed_rhs[k], transformed_rhs[chosen] = \
+                        transformed_rhs[chosen], transformed_rhs[k]
+                for i, value in zip(range(k + 1, n), factors):
+                    p, f, denominator = row_factors(pivot, value, previous, count)
+                    for j in range(count):
+                        transformed_rhs[i][j] = reduce_entry(
+                            transformed_rhs[i][j], transformed_rhs[k][j],
+                            p, f, denominator)
+        finally:
+            report["rhs_elimination_replay_seconds"] = time.perf_counter() - elimination_started
+        report["bareiss_elimination_seconds"] = 0.0
+    report.update(factorization_sha256=factor["factorization_sha256"],
+                  row_permutation=factor["rows"], column_permutation=factor["columns"])
+    solutions = []
+    back_started = time.perf_counter()
+    try:
+        for column in range(count):
+            solution = [Fraction(0)] * n
+            for i in range(n - 1, -1, -1):
+                check_time()
+                value = Fraction(transformed_rhs[i][column]) - sum(
+                    (factor["upper"][i][j] * solution[j] for j in range(i + 1, n)), Fraction(0))
+                solution[i] = value / factor["upper"][i][i]
+            original_order = [Fraction(0)] * n
+            for j, original in enumerate(factor["columns"]):
+                original_order[original] = solution[j]
+            solutions.append(original_order)
+    finally:
+        report["back_substitution_seconds"] = time.perf_counter() - back_started
+    replay_started = time.perf_counter()
+    for solution, rhs in zip(solutions, rhs_columns):
+        for row, expected in zip(matrix, rhs):
+            check_time()
+            if sum((value * x for value, x in zip(row, solution)), Fraction(0)) != expected:
+                raise ExactSolveFailure("selected multi-RHS system exact replay failed")
+    report.update(selected_system_replay_seconds=time.perf_counter() - replay_started,
+                  selected_system_replay_verified=True,
+                  exact_linear_solve_seconds=time.perf_counter() - started)
+    return solutions, report
+
+
+def _solve_exact_correction_rhs(matrix, rhs_columns, timeout_seconds,
+                                factor_cache, diagnostics):
+    started = time.perf_counter()
+    integers, rhs, denominators, profile = _integerize_correction_system(
+        matrix, rhs_columns)
+    diagnostics.update(profile)
+    diagnostics["rational_matrix_sha256"] = _integer_rows_sha256([
+        [part for value in row for part in (value.numerator, value.denominator)]
+        for row in matrix])
+    # A shared exact scalar in a generator column should not inflate every
+    # determinant. Solve for y_j=gcd_j*x_j and undo that scaling exactly.
+    column_divisors = [math.gcd(*(row[j] for row in integers))
+                       for j in range(len(integers))]
+    if any(value == 0 for value in column_divisors):
+        raise ExactSolveFailure("correction matrix has a zero column")
+    primitive = [[value // divisor for value, divisor in zip(row, column_divisors)]
+                 for row in integers]
+    diagnostics.update(
+        column_gcd_bits_removed=[value.bit_length() - 1 for value in column_divisors],
+        column_scaling_sha256=_integer_rows_sha256([column_divisors]),
+        column_primitive_matrix_sha256=_integer_rows_sha256(primitive),
+        column_primitive_matrix_maximum_bit_length=max(
+            abs(value).bit_length() for row in primitive for value in row))
+    print(json.dumps({"stage": "exact_correction_system_before_solve",
+                      **diagnostics}), flush=True)
+    remaining = timeout_seconds - (time.perf_counter() - started)
+    if remaining <= 0:
+        raise ExactSolveFailure("correction integerization deadline")
+    solved, _report = _exact_multi_rhs_solve(
+        primitive, rhs, remaining, factor_cache, diagnostics)
+    solutions = [[value / (denominator * divisor)
+                  for value, divisor in zip(column, column_divisors)]
+                 for column, denominator in zip(solved, denominators)]
+    replay_started = time.perf_counter()
+    for solution, expected in zip(solutions, rhs_columns):
+        for row, value in zip(matrix, expected):
+            if _dot(row, solution) != value:
+                raise ExactSolveFailure("original rational correction system replay failed")
+    diagnostics.update(original_rational_system_replay_verified=True,
+                       original_rational_system_replay_seconds=time.perf_counter() - replay_started)
+    print(json.dumps({"stage": "exact_correction_system_solved",
+                      **diagnostics}), flush=True)
+    return solutions
+
+
 def _oriented_ray_rows(lp: ExactCanonicalLP, raw_ray, convention: int,
                        threshold: float):
     result = []
@@ -2478,39 +2758,94 @@ def _irrational_quadratic_branch_inside(a, b, discriminant, sign, interval):
 
 
 def box_aware_correction_bases(sensitivity, candidate, low, high, maximum=8):
-    """Untrusted deterministic slack-weighted QR; exact replay is authoritative."""
+    """Prefer positive-slack spanning pools; numerical rank remains untrusted."""
     rows = sensitivity.shape[0]
-    slack = np.asarray([max(0.0, float(min(_fr(value) - lo, hi - _fr(value))))
-                        for value, lo, hi in zip(candidate, low, high)])
-    free = np.asarray([index for index, (lo, hi) in enumerate(zip(low, high))
-                       if lo < hi], dtype=np.int64)
+    exact_slack = [max(Fraction(0), min(_fr(value) - lo, hi - _fr(value)))
+                   for value, lo, hi in zip(candidate, low, high)]
+    slack = np.asarray([float(value) for value in exact_slack])
+    free = np.asarray([i for i, (lo, hi) in enumerate(zip(low, high)) if lo < hi],
+                      dtype=np.int64)
+    positive = np.asarray([i for i in free if exact_slack[int(i)] > 0], dtype=np.int64)
     if len(free) < rows:
         raise ExactSolveFailure("too few free correction sources")
-    scale = max(float(slack.max()), np.finfo(np.float64).tiny)
-    weights = np.maximum(slack[free] / scale, 1e-6)
+    tolerance = max(sensitivity.shape) * np.finfo(np.float64).eps * max(
+        (float(np.linalg.norm(sensitivity[:, i])) for i in free), default=0.0)
+
+    def propose(pool, weights=None):
+        if not len(pool):
+            return None, 0
+        values = sensitivity[:, pool]
+        if weights is not None:
+            values = values * weights
+        _q, r, pivots = qr(values, mode="economic", pivoting=True)
+        # A selected basis is screened again on the unweighted original columns.
+        columns = tuple(int(i) for i in pool[pivots[:rows]])
+        _q, unweighted = qr(sensitivity[:, columns], mode="economic")
+        rank = int(np.sum(np.abs(np.diag(unweighted)) > tolerance))
+        return (columns if len(pool) >= rows and rank == rows else None), rank
+
+    positive_basis, positive_rank = propose(positive)
+    best_pool = positive if positive_basis is not None else free
+    threshold_searches = 0
+    if positive_basis is not None:
+        thresholds = sorted(set(float(exact_slack[int(i)]) for i in positive))
+        left, right = 0, len(thresholds)
+        while left < right:
+            middle = (left + right) // 2
+            pool = positive[slack[positive] >= thresholds[middle]]
+            basis, _rank = propose(pool)
+            threshold_searches += 1
+            if basis is not None:
+                best_pool = pool
+                left = middle + 1
+            else:
+                right = middle
+    audit = {
+        "source_count": len(candidate),
+        "source_variables_with_positive_slack": len(positive),
+        "source_slack_threshold_counts": {
+            value: sum(s >= Fraction(value) for s in exact_slack)
+            for value in ("1e-12", "1e-9", "1e-6", "1e-3")},
+        "positive_slack_pool_numerical_rank": positive_rank,
+        "positive_slack_full_rank_candidate_found": positive_basis is not None,
+        "positive_slack_basis_classification": (
+            "POSITIVE_SLACK_FULL_RANK_CANDIDATE_FOUND" if positive_basis is not None
+            else "POSITIVE_SLACK_BASIS_IMPOSSIBLE_TOO_FEW_SOURCES" if len(positive) < rows
+            else "POSITIVE_SLACK_FULL_RANK_NOT_FOUND_BY_NUMERICAL_SCREEN"),
+        "rank_screen_is_not_an_exact_nonexistence_proof": True,
+        "slack_threshold_rank_searches": threshold_searches,
+    }
     bases, seen = [], set()
-    for ordinal in range(maximum * 2):
-        # Larger slack wins subject to rank; deterministic modulation supplies
-        # alternative pivots without relying on radius/outcome selection.
-        modulation = 0.5 + ((free * (2 * ordinal + 1) + ordinal) % 17) / 16.0
-        weighted = sensitivity[:, free] * (
-            weights ** (1.0 if ordinal % 2 == 0 else 0.5) * modulation)
-        _q, r, pivots = qr(weighted, mode="economic", pivoting=True)
-        threshold = max(weighted.shape) * np.finfo(np.float64).eps * (
-            abs(r[0, 0]) if r.size else 0.0)
-        if int(np.sum(np.abs(np.diag(r)) > threshold)) != rows:
-            continue  # Never send a numerically rank-deficient basis to Bareiss.
-        basis = tuple(int(value) for value in free[pivots[:rows]])
-        if basis in seen:
-            continue
-        seen.add(basis)
-        bases.append({"columns": basis, "basis_sha256": _sha_json(basis),
-                      "minimum_selected_source_slack": float(min(
-                          slack[list(basis)])), "numerical_rank": rows})
+    pools = [best_pool] if positive_basis is None else [best_pool, positive]
+    for pool in pools:
+        scale = max(float(slack[pool].max()), np.finfo(np.float64).tiny)
+        weights = np.maximum(slack[pool] / scale, 1e-6)
+        for ordinal in range(maximum * 2):
+            modulation = 0.5 + ((pool * (2 * ordinal + 1) + ordinal) % 17) / 16.0
+            columns, rank = propose(pool, weights ** (
+                1.0 if ordinal % 2 == 0 else 0.5) * modulation)
+            if columns is None or columns in seen:
+                continue
+            seen.add(columns)
+            selected_slack = [exact_slack[i] for i in columns]
+            bases.append({
+                "columns": columns, "basis_sha256": _sha_json(columns),
+                "minimum_selected_source_slack": float(min(selected_slack)),
+                "minimum_selected_source_slack_exact": _fs(min(selected_slack)),
+                "selected_source_slacks_exact": [_fs(value) for value in selected_slack],
+                "selected_source_slacks": [float(value) for value in selected_slack],
+                "numerical_rank": rank})
+            if len(bases) == maximum:
+                break
         if len(bases) == maximum:
             break
     if not bases:
         raise ExactSolveFailure("fixed-pattern cancellation correction rank deficient")
+    bases.sort(key=lambda row: (-row["minimum_selected_source_slack"], row["columns"]))
+    audit["maximum_minimum_slack_among_deterministic_full_rank_candidates"] = max(
+        row["minimum_selected_source_slack"] for row in bases)
+    for basis in bases:
+        basis["slack_diagnostics"] = audit
     return bases, slack
 
 
@@ -2720,19 +3055,29 @@ def reconstruct_exact_fixed_pattern_witness(
     # Each basis supplies t and, if available, a nonbasic source direction.
     # Fixed sources remain the exact dyadic LP proposal. All work is bounded by
     # the existing global deadline and at most eight 30-second family budgets.
+    exact_matrix_cache, factor_cache = {}, {}
+    linear_systems = []
+    slack_diagnostics = bases[0].get("slack_diagnostics", {})
+
+    def emit(row):
+        families.append(row)
+        print(json.dumps({"stage": "box_aware_reconstruction_family",
+                          "family": len(families) - 1, **row}), flush=True)
+
     for basis in bases:
+        if len(families) >= 8 or time.perf_counter() >= deadline:
+            break
         columns = basis["columns"]
         remaining_sources = sorted(
             (index for index in range(source_count)
              if index not in columns and problem.low[index] < problem.high[index]),
             key=lambda index: (-slack[index], index))
         directions = [None] + remaining_sources[:1]
-        exact_matrix = None
+        basis_started = time.perf_counter()
+        pending = []
         for free_source in directions:
-            if len(families) >= 8 or time.perf_counter() >= deadline:
+            if len(families) + len(pending) >= 8:
                 break
-            family_started = time.perf_counter()
-            family_deadline = min(deadline, family_started + 30.0)
             row = {key: value for key, value in basis.items() if key != "columns"}
             row.update(
                 free_parameter="t" if free_source is None else
@@ -2741,62 +3086,84 @@ def reconstruct_exact_fixed_pattern_witness(
                 alpha_interval=None, polynomial_degree=None,
                 roots_total=0, roots_inside_interval=0,
                 exact_replay_result=None, verified=False)
-            restore_alarm = _start_reconstruction_alarm(
-                family_deadline - family_started)
-            try:
-                fixed_conditions = [
-                    (f"fixed_source[{index}]", value, Fraction(0), lo, hi)
-                    for index, (value, lo, hi) in enumerate(zip(
-                        xi_candidate, problem.low, problem.high))
-                    if index not in columns and index != free_source]
-                if free_source is not None:
-                    fixed_conditions.append(("fixed_t", t_candidate,
-                                             Fraction(0), t_lower, t_upper))
-                early_interval = exact_affine_parameter_interval(fixed_conditions)
-                if early_interval["alpha_interval_empty"]:
-                    row.update(early_interval, alpha_interval=early_interval,
-                               polynomial_constructed=False)
-                    raise ExactSolveFailure("fixed family constraints violate authenticated box/scale")
-                if exact_matrix is None:
-                    exact_matrix = [[_dot(m, centered_source(column))
-                                     for column in columns]
-                                    for m in difference_matrix]
+            fixed_conditions = [
+                (f"fixed_source[{index}]", value, Fraction(0), lo, hi)
+                for index, (value, lo, hi) in enumerate(zip(
+                    xi_candidate, problem.low, problem.high))
+                if index not in columns and index != free_source]
+            if free_source is not None:
+                fixed_conditions.append(("fixed_t", t_candidate,
+                                         Fraction(0), t_lower, t_upper))
+            early_interval = exact_affine_parameter_interval(fixed_conditions)
+            if early_interval["alpha_interval_empty"]:
+                row.update(early_interval, alpha_interval=early_interval,
+                           polynomial_constructed=False,
+                           failure="fixed family constraints violate authenticated box/scale",
+                           runtime_seconds=time.perf_counter() - basis_started)
+                emit(row)
+            else:
+                pending.append((free_source, row))
+        if not pending:
+            continue
+        shared_deadline = min(deadline, basis_started + 30.0)
+        if time.perf_counter() >= shared_deadline:
+            for _source, row in pending:
+                row.update(failure="reconstruction family deadline",
+                           runtime_seconds=time.perf_counter() - basis_started)
+                emit(row)
+            continue
+        restore_alarm = _start_reconstruction_alarm(shared_deadline - time.perf_counter())
+        profile = {"basis_sha256": basis["basis_sha256"],
+                   "selected_source_slacks": basis.get("selected_source_slacks"),
+                   "selected_source_slacks_exact": basis.get("selected_source_slacks_exact"),
+                   "minimum_selected_source_slack": basis["minimum_selected_source_slack"],
+                   "shared_free_directions": [row["free_parameter"] for _, row in pending]}
+        linear_systems.append(profile)
+        recorded = set()
+        try:
+            def remaining():
+                value = shared_deadline - time.perf_counter()
+                if value <= 0:
+                    raise ExactSolveFailure("reconstruction family deadline")
+                return value
+            assembly_started = time.perf_counter()
+            if columns not in exact_matrix_cache:
+                exact_matrix_cache[columns] = [
+                    [_dot(m, centered_source(column)) for column in columns]
+                    for m in difference_matrix]
+            exact_matrix = exact_matrix_cache[columns]
+            rhs_columns, direction_data = [], []
+            for free_source, row in pending:
                 t_constant = Fraction(0) if free_source is None else t_candidate
                 t_slope = Fraction(1) if free_source is None else Fraction(0)
                 free_c = ([Fraction(0)] * d if free_source is None
                           else centered_source(free_source))
-                constant_rhs = [
-                    -r + v * (t_candidate - t_constant)
-                    for r, v in zip(residual, difference_t)]
-                slope_rhs = [-v * t_slope - _dot(m, free_c)
-                             for m, v in zip(difference_matrix, difference_t)]
-                integer_matrix, rhs_a, rhs_b = [], [], []
-                for m, a, b in zip(exact_matrix, constant_rhs, slope_rhs):
-                    integers = _integerize([*m, a, b])
-                    integer_matrix.append(integers[:-2])
-                    rhs_a.append(integers[-2])
-                    rhs_b.append(integers[-1])
-                def remaining():
-                    value = family_deadline - time.perf_counter()
-                    if value <= 0:
-                        raise ExactSolveFailure("reconstruction family deadline")
-                    return value
-                constant_delta = _bareiss_solve(integer_matrix, rhs_a,
-                                                remaining() / 2)
-                slope_delta = _bareiss_solve(integer_matrix, rhs_b, remaining())
+                rhs_columns.append([-r + v * (t_candidate - t_constant)
+                                    for r, v in zip(residual, difference_t)])
+                rhs_columns.append([-v * t_slope - _dot(m, free_c)
+                                    for m, v in zip(difference_matrix, difference_t)])
+                direction_data.append((t_constant, t_slope, free_c))
+            profile["rational_assembly_seconds"] = time.perf_counter() - assembly_started
+            condition = float(np.linalg.cond(sensitivity[:, columns]))
+            profile["numerical_condition_estimate"] = condition if math.isfinite(condition) else None
+            profile["numerical_condition_estimate_nonfinite"] = not math.isfinite(condition)
+            solved = _solve_exact_correction_rhs(
+                exact_matrix, rhs_columns, remaining(), factor_cache, profile)
+            for ordinal, ((free_source, row), (t_constant, t_slope, free_c)) in enumerate(
+                    zip(pending, direction_data)):
+                remaining()
+                constant_delta, slope_delta = solved[2 * ordinal:2 * ordinal + 2]
                 source_constant = list(xi_candidate)
                 source_slope = [Fraction(0)] * source_count
                 c_constant, c_slope = list(c_candidate), list(free_c)
                 if free_source is not None:
                     source_slope[free_source] = Fraction(1)
-                for ordinal, column in enumerate(columns):
-                    source_constant[column] += constant_delta[ordinal]
-                    source_slope[column] = slope_delta[ordinal]
+                for j, column in enumerate(columns):
+                    source_constant[column] += constant_delta[j]
+                    source_slope[column] = slope_delta[j]
                     for feature, value in enumerate(centered_source(column)):
-                        c_constant[feature] += value * constant_delta[ordinal]
-                        c_slope[feature] += value * slope_delta[ordinal]
-                # Exact cancellation identities are linear node constraints.
-                # They must hold identically before this family can be searched.
+                        c_constant[feature] += value * constant_delta[j]
+                        c_slope[feature] += value * slope_delta[j]
                 if any(_dot(m, c_constant) + v * t_constant or
                        _dot(m, c_slope) + v * t_slope
                        for m, v in zip(difference_matrix, difference_t)):
@@ -2805,36 +3172,39 @@ def reconstruct_exact_fixed_pattern_witness(
                 found, evidence = _replay_affine_family(
                     problem, pattern, source_constant, source_slope,
                     c_constant, c_slope, t_constant, t_slope, t_upper, node_lp)
-                row.update(evidence)
+                row.update(evidence, linear_solve=profile)
                 row["alpha_interval"] = {
                     key: evidence[key] for key in (
                         "alpha_interval_lower", "alpha_interval_upper",
                         "alpha_interval_empty", "active_constraint_at_lower",
                         "active_constraint_at_upper")}
-                row["verified"] = found is not None
-            except (RuntimeError, ExactSolveFailure, OverflowError) as error:
-                found = None
-                row["failure"] = f"{type(error).__name__}: {error}"
-            finally:
-                restore_alarm()
-            row["runtime_seconds"] = time.perf_counter() - family_started
-            families.append(row)
-            print(json.dumps({"stage": "box_aware_reconstruction_family",
-                              "family": len(families) - 1, **row}),
-                  flush=True)
-            if found is not None:
-                return found, {
-                    "attempted": True, "verified": True,
-                    "method": "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
-                    "families": families,
-                    "selected_correction_variables": d - 1,
-                    "runtime_seconds": time.perf_counter() - started}
-        if len(families) >= 8 or time.perf_counter() >= deadline:
-            break
+                row.update(verified=found is not None,
+                           runtime_seconds=time.perf_counter() - basis_started)
+                emit(row)
+                recorded.add(id(row))
+                if found is not None:
+                    return found, {
+                        "attempted": True, "verified": True,
+                        "method": "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
+                        "families": families, "linear_systems": linear_systems,
+                        "basis_slack_diagnostics": slack_diagnostics,
+                        "selected_correction_variables": d - 1,
+                        "runtime_seconds": time.perf_counter() - started}
+        except (RuntimeError, ExactSolveFailure, OverflowError) as error:
+            profile["failure"] = f"{type(error).__name__}: {error}"
+            for _source, row in pending:
+                if id(row) not in recorded:
+                    row.update(failure=profile["failure"], linear_solve=profile,
+                               runtime_seconds=time.perf_counter() - basis_started)
+                    emit(row)
+        finally:
+            restore_alarm()
     return None, {
         "attempted": True, "verified": False,
         "method": "BAREISS_127_CORRECTIONS_PLUS_QUADRATIC_ROOT",
-        "families": families, "permits_infeasibility_claim": False,
+        "families": families, "linear_systems": linear_systems,
+        "basis_slack_diagnostics": slack_diagnostics,
+        "permits_infeasibility_claim": False,
         "portfolio_limit": 8, "per_family_time_cap_seconds": 30.0,
         "runtime_seconds": time.perf_counter() - started}
 

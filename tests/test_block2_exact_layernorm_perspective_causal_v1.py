@@ -1022,3 +1022,216 @@ def test_portfolio_attempts_at_most_eight_families(monkeypatch):
     assert found is None
     assert len(evidence["families"]) == 8
     assert not evidence["permits_infeasibility_claim"]
+
+
+def independent_fraction_solve(matrix, rhs):
+    """Small test oracle: ordinary exact rational elimination, no producer code."""
+    n = len(matrix)
+    a = [[F(value) for value in row] + [F(value)] for row, value in zip(matrix, rhs)]
+    for k in range(n):
+        pivot = next(i for i in range(k, n) if a[i][k])
+        a[k], a[pivot] = a[pivot], a[k]
+        divisor = a[k][k]
+        a[k] = [value / divisor for value in a[k]]
+        for i in range(n):
+            if i == k:
+                continue
+            multiplier = a[i][k]
+            a[i] = [value - multiplier * other for value, other in zip(a[i], a[k])]
+    return [row[-1] for row in a]
+
+
+def test_exact_multi_rhs_matches_independent_fraction_solves():
+    matrix = [[0, 2, 3], [4, 5, 6], [7, 8, 10]]
+    columns = [[1, 2, 3], [9, -2, 0], [-1, 7, 11], [0, 0, 0]]
+    solutions, report = ORACLE._exact_multi_rhs_solve(matrix, columns, 2.0)
+    assert solutions == [independent_fraction_solve(matrix, rhs) for rhs in columns]
+    assert report["elimination_count"] == 1
+    assert report["selected_system_replay_verified"]
+
+
+def test_identical_matrix_reuses_authenticated_elimination_for_new_rhs():
+    matrix = [[0, 2, 3], [4, 5, 6], [7, 8, 10]]
+    cache = {}
+    _first, first = ORACLE._exact_multi_rhs_solve(matrix, [[1, 2, 3]], 2.0, cache)
+    solved, second = ORACLE._exact_multi_rhs_solve(matrix, [[9, -2, 0], [4, 5, 6]], 2.0, cache)
+    assert second["elimination_reused"] and second["elimination_count"] == 0
+    assert second["factorization_sha256"] == first["factorization_sha256"]
+    assert solved == [independent_fraction_solve(matrix, rhs) for rhs in ([9, -2, 0], [4, 5, 6])]
+
+
+def test_corrupted_factorization_is_rejected():
+    matrix = [[2, 1], [1, 2]]
+    cache = {}
+    ORACLE._exact_multi_rhs_solve(matrix, [[3, 3]], 2.0, cache)
+    factor = next(iter(cache.values()))
+    factor["upper"][0][0] += 1
+    with pytest.raises(ORACLE.ExactSolveFailure, match="factorization identity"):
+        ORACLE._exact_multi_rhs_solve(matrix, [[3, 3]], 2.0, cache)
+
+
+def test_row_gcd_and_sign_normalization_preserves_exact_solutions():
+    matrix = [[F(-2), F(-1)], [F(-2, 3), F(-4, 3)]]
+    rhs = [[F(-3), F(-2)], [F(2, 3), F(1, 5)]]
+    integers, columns, denominators, report = ORACLE._integerize_correction_system(matrix, rhs)
+    assert integers == [[2, 1], [1, 2]]
+    assert report["row_signs"] == [-1, -1]
+    solved, _report = ORACLE._exact_multi_rhs_solve(integers, columns, 2.0)
+    actual = [[value / divisor for value in solution]
+              for solution, divisor in zip(solved, denominators)]
+    assert actual == [independent_fraction_solve(matrix, column) for column in rhs]
+
+
+def test_rhs_denominators_do_not_inflate_coefficient_matrix():
+    matrix = [[F(3, 2), F(1, 4)], [F(1, 8), F(5, 16)]]
+    rhs = [[F(1, 2 ** 100), F(3, 2 ** 120)], [F(2, 3), F(1, 7)]]
+    integers, columns, denominators, profile = ORACLE._integerize_correction_system(matrix, rhs)
+    assert integers == [[6, 1], [2, 5]]
+    assert profile["integerized_matrix_maximum_bit_length"] == 3
+    old_rows = [ORACLE._integerize([*row, rhs[0][i], rhs[1][i]])
+                for i, row in enumerate(matrix)]
+    assert max(abs(value).bit_length() for row in old_rows for value in row[:2]) >= 100
+    solved, _report = ORACLE._exact_multi_rhs_solve(integers, columns, 2.0)
+    actual = [[value / divisor for value in solution]
+              for solution, divisor in zip(solved, denominators)]
+    assert actual == [independent_fraction_solve(matrix, column) for column in rhs]
+
+
+def test_exact_permutations_and_integer_growth_diagnostics_are_deterministic():
+    matrix = [[0, 0, 100], [2, 500, 7], [13, 17, 19]]
+    first, report = ORACLE._exact_multi_rhs_solve(matrix, [[1, 2, 3]], 2.0)
+    second, repeat = ORACLE._exact_multi_rhs_solve(matrix, [[1, 2, 3]], 2.0)
+    assert first == second == [independent_fraction_solve(matrix, [1, 2, 3])]
+    assert report["row_permutation"] == repeat["row_permutation"]
+    assert report["column_permutation"] == repeat["column_permutation"]
+    assert report["factorization_sha256"] == repeat["factorization_sha256"]
+    assert report["peak_intermediate_integer_bit_length"] > 0
+    assert report["bareiss_elimination_seconds"] >= 0
+    assert report["back_substitution_seconds"] >= 0
+
+
+def test_positive_slack_basis_beats_large_boundary_columns():
+    sensitivity = np.asarray([[1e9, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    bases, _slack = ORACLE.box_aware_correction_bases(
+        sensitivity, [1.0, 0.0, 0.0], [F(-1)] * 3, [F(1)] * 3)
+    assert all(set(basis["columns"]) == {1, 2} for basis in bases)
+    audit = bases[0]["slack_diagnostics"]
+    assert audit["source_variables_with_positive_slack"] == 2
+    assert audit["positive_slack_full_rank_candidate_found"]
+    assert audit["maximum_minimum_slack_among_deterministic_full_rank_candidates"] == 1.0
+    assert all(count == 2 for count in audit["source_slack_threshold_counts"].values())
+
+
+def test_unavoidable_boundary_source_is_reported_honestly():
+    bases, _slack = ORACLE.box_aware_correction_bases(
+        np.eye(2), [0.0, 1.0], [F(-1)] * 2, [F(1)] * 2)
+    audit = bases[0]["slack_diagnostics"]
+    assert bases[0]["minimum_selected_source_slack"] == 0.0
+    assert audit["source_variables_with_positive_slack"] == 1
+    assert audit["positive_slack_basis_classification"] == \
+        "POSITIVE_SLACK_BASIS_IMPOSSIBLE_TOO_FEW_SOURCES"
+    assert not audit["positive_slack_full_rank_candidate_found"]
+
+
+def test_positive_pool_numerical_rank_failure_is_not_nonexistence_proof():
+    bases, _slack = ORACLE.box_aware_correction_bases(
+        np.asarray([[1.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        [0.0, 0.0, 1.0], [F(-1)] * 3, [F(1)] * 3)
+    audit = bases[0]["slack_diagnostics"]
+    assert audit["positive_slack_pool_numerical_rank"] == 1
+    assert audit["rank_screen_is_not_an_exact_nonexistence_proof"]
+    assert audit["positive_slack_basis_classification"] == \
+        "POSITIVE_SLACK_FULL_RANK_NOT_FOUND_BY_NUMERICAL_SCREEN"
+
+
+def test_multiple_free_directions_share_one_elimination_and_reach_interval(monkeypatch):
+    fixture = replace(problem(), X=((F(1), F(-1)), (F(2), F(-2))),
+                      low=(F(-1), F(-1)), high=(F(1), F(1)), epsilon=F(1),
+                      W2=((F(0), F(0)), (F(0), F(0))))
+    reached = []
+    original = ORACLE._replay_affine_family
+    def replay(*args):
+        _found, evidence = original(*args)
+        reached.append(evidence)
+        return None, evidence
+    monkeypatch.setattr(ORACLE, "_replay_affine_family", replay)
+    found, report = ORACLE.reconstruct_exact_fixed_pattern_witness(
+        fixture, np.asarray([0.0, 0.0, 0.0, 0.0, 1.0]), [True, False], 2, 2.0)
+    assert found is None and len(reached) >= 2
+    assert all("alpha_interval_empty" in evidence for evidence in reached)
+    systems = report["linear_systems"]
+    assert all(row["rhs_count"] == 4 for row in systems)
+    assert sum(row["elimination_count"] for row in systems) == 1
+    assert all(row["original_rational_system_replay_verified"] for row in systems)
+    assert not report["permits_infeasibility_claim"]
+
+
+def test_integer_multi_rhs_singular_and_timeout_fail_closed():
+    with pytest.raises(ORACLE.ExactSolveFailure, match="singular"):
+        ORACLE._exact_multi_rhs_solve([[1, 2], [2, 4]], [[3, 6]], 2.0)
+    with pytest.raises(ORACLE.ExactSolveFailure, match="timeout"):
+        ORACLE._exact_multi_rhs_solve([[2, 1], [1, 2]], [[3, 3]], 0.0)
+
+
+def test_dense_127_multi_rhs_exact_fixture_under_bounded_budget():
+    import random
+    random_source = random.Random(3011)
+    n = 127
+    matrix = [[random_source.randrange(-128, 128) for _ in range(n)] for _ in range(n)]
+    for i in range(n):
+        matrix[i][i] = 65536 + i
+    expected = [[(j + k) % 5 - 2 for j in range(n)] for k in range(4)]
+    rhs = [[sum(value * x for value, x in zip(row, solution)) for row in matrix]
+           for solution in expected]
+    started = time.perf_counter()
+    solved, report = ORACLE._exact_multi_rhs_solve(matrix, rhs, 18.0)
+    elapsed = time.perf_counter() - started
+    assert solved == expected
+    assert report["elimination_count"] == 1 and report["rhs_count"] == 4
+    assert report["peak_intermediate_integer_bit_length"] > 16
+    print(json.dumps({"synthetic_dense_127_seconds": elapsed, **report}), flush=True)
+
+
+def test_exact_column_scaling_reduces_growth_and_restores_original_variables():
+    matrix = [[F(6 * 101), F(3 * 103)], [F(2 * 101), F(5 * 103)]]
+    rhs = [[F(1, 2 ** 53), F(3, 2 ** 52)], [F(5, 7), F(-2, 3)]]
+    report = {}
+    solved = ORACLE._solve_exact_correction_rhs(matrix, rhs, 2.0, {}, report)
+    assert solved == [independent_fraction_solve(matrix, column) for column in rhs]
+    assert report["column_primitive_matrix_maximum_bit_length"] == 3
+    assert min(report["column_gcd_bits_removed"]) >= 6
+    assert report["original_rational_system_replay_verified"]
+
+
+def test_corrupted_linear_answer_is_rejected_by_original_equation_replay(monkeypatch):
+    matrix = [[F(2), F(1)], [F(1), F(2)]]
+    monkeypatch.setattr(ORACLE, "_exact_multi_rhs_solve",
+                        lambda *_: ([[F(0), F(0)]], {}))
+    with pytest.raises(ORACLE.ExactSolveFailure, match="rational correction system replay"):
+        ORACLE._solve_exact_correction_rhs(matrix, [[F(3), F(3)]], 2.0, {}, {})
+
+
+def test_float_linear_solve_is_not_accepted_as_integer_evidence():
+    with pytest.raises(ORACLE.ExactSolveFailure, match="type differs"):
+        ORACLE._exact_multi_rhs_solve([[2.0, 1], [1, 2]], [[3, 3]], 2.0)
+
+
+def test_127_correction_fixture_reaches_interval_and_exact_witness():
+    d, n = 128, 127
+    zeros = (F(0),) * d
+    sources = tuple(tuple(F(int(j == i) - int(j == d - 1))
+                          for j in range(d)) for i in range(n))
+    fixture = ORACLE.ExactPerspectiveProblem(
+        x0=zeros, X=sources, low=(F(-1),) * n, high=(F(1),) * n,
+        gamma=(F(1),) * d, beta=zeros, epsilon=F(1),
+        W1=(zeros,) * d, b1=zeros, W2=(zeros,) * d, b2=zeros)
+    candidate = np.zeros(n + d + 1)
+    candidate[-1] = 1.0
+    found, report = ORACLE.reconstruct_exact_fixed_pattern_witness(
+        fixture, candidate, [False] * d, n, 15.0)
+    assert found is not None and report["verified"]
+    assert report["linear_systems"][0]["dimension"] == 127
+    assert report["linear_systems"][0]["elimination_count"] == 1
+    assert report["families"][-1]["alpha_interval"] is not None
+    assert not report["families"][-1]["alpha_interval_empty"]
+    assert ORACLE.replay_exact_perspective_witness(fixture, found)["verified"]
