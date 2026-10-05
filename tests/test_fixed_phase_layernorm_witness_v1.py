@@ -136,15 +136,17 @@ def test_infeasible_fallback_has_no_farkas_or_exclusion_authority(monkeypatch):
         unusable_feasibility_proposal, 3., feasibility_propose=fallback)
     assert found is None and report["search_status"] == "INCONCLUSIVE"
     assert report["fallback_attempts"] == 2 and report["exact_anchor_reconstruction_attempts"] == 0
-    assert not report["fixed_phase_farkas_attempted"] and not report["fixed_phase_farkas_verified"]
+    assert report["fixed_phase_farkas_attempted"] and not report["fixed_phase_farkas_verified"]
+    assert report["numerical_infeasible_methods"] == ["IPM_FEASIBILITY", "SIMPLEX_FEASIBILITY"]
+    assert len(report["certificate_attempts"]) == 2
     assert not report["permits_infeasibility_claim"]
 
 
 def test_primary_infeasible_bounded_repair_timeout_is_recorded(monkeypatch):
     p, lp, pattern, _ = fixture()
-    def timeout(*_):
+    def timeout(*args, **kwargs):
         raise O.ExactSolveFailure("exact repair Bareiss timeout")
-    monkeypatch.setattr(O, "attempt_fixed_phase_farkas", timeout)
+    monkeypatch.setattr(O, "attempt_fixed_phase_certificate", timeout)
     found, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
         lambda *_: {"model_status": "Infeasible", "column_values": None}, 3.,
         feasibility_propose=lambda *_: pytest.fail("primary Infeasible remains Farkas-only"))
@@ -426,7 +428,10 @@ def test_anchor_reconstruction_failure_is_inconclusive():
         O.ExactLPRow("extra_source", (0,), (F(1),), F(1), F(1)),))
     q0 = point(p, pattern, [0], 2)
     propose = lambda *_: {"model_status": "Optimal", "feasible": True, "column_values": q0}
-    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, propose, 2.)
+    # Isolate failed anchor repair: an independently verified certificate from
+    # a later Infeasible fallback is now legitimately decisive for THIS phase.
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, propose, 2.,
+        feasibility_propose=unusable_feasibility_proposal)
     assert found is None and not report["exact_anchor_replay_verified"]
     assert report["search_status"] == "INCONCLUSIVE"
 
@@ -841,10 +846,10 @@ def infeasible_fixed_phase_fixture():
 def test_infeasible_primal_never_reconstructed_and_exact_farkas_is_phase_local(monkeypatch):
     p, lp, pattern, certificate = infeasible_fixed_phase_fixture()
     calls = []
-    def repair(model, ray, seconds):
+    def repair(model, ray, seconds, **kwargs):
         calls.append(model.identity())
         return certificate, [], "EXACT_FARKAS_VERIFIED"
-    monkeypatch.setattr(O, "repair_direct_dual_ray", repair)
+    monkeypatch.setattr(O, "repair_fixed_phase_dual_ray", repair)
     monkeypatch.setattr(O, "FixedPhaseAnchorWorkspace",
                         lambda *_: pytest.fail("infeasible LP must not manufacture an anchor"))
     proposal = {"model_status": "Infeasible", "column_values": point(p, pattern, [0], 2),
@@ -862,13 +867,13 @@ def test_infeasible_primal_never_reconstructed_and_exact_farkas_is_phase_local(m
 def test_infeasible_without_exact_certificate_is_inconclusive(monkeypatch):
     p, lp, pattern, _ = fixture()
     calls = []
-    def fallback(model, _seconds):
+    def certificate_solve(model, _seconds):
         calls.append(model.identity())
-        return None, {"certificate_verified": False}
-    monkeypatch.setattr(O, "phase1_exact_farkas_fallback", fallback)
+        return O.solve_highspy(model, proposal_only=True, proposal_method="FIXED_PHASE_CERTIFICATE", time_limit_seconds=1.)
     monkeypatch.setattr(O, "FixedPhaseAnchorWorkspace", lambda *_: pytest.fail("no anchor"))
     found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: {
-        "model_status": "Infeasible", "column_values": point(p, pattern, [0], 1)}, 2.)
+        "model_status": "Infeasible", "column_values": point(p, pattern, [0], 1)}, 2.,
+        certificate_solver=certificate_solve)
     assert calls == [lp.identity()] and found is None
     assert report["fixed_phase_farkas_attempted"] and not report["fixed_phase_farkas_verified"]
     assert report["search_status"] == "INCONCLUSIVE" and not report["permits_infeasibility_claim"]
@@ -877,7 +882,7 @@ def test_infeasible_without_exact_certificate_is_inconclusive(monkeypatch):
 def test_unreplayed_farkas_claim_never_authorizes_fixed_phase_exclusion(monkeypatch):
     p, lp, pattern, certificate = infeasible_fixed_phase_fixture()
     certificate["canonical_lp_sha256"] = "different_lp"
-    monkeypatch.setattr(O, "repair_direct_dual_ray", lambda *_: (
+    monkeypatch.setattr(O, "repair_fixed_phase_dual_ray", lambda *args, **kwargs: (
         certificate, [], "EXACT_FARKAS_VERIFIED"))
     found, report = O.search_fixed_phase_exact_witness(p, lp, pattern, lambda *_: {
         "model_status": "Infeasible", "column_values": None,

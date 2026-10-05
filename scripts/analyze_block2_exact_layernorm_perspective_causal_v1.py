@@ -1504,6 +1504,284 @@ def repair_direct_dual_ray(lp: ExactCanonicalLP, raw_ray,
     return None, attempts, "DIRECT_RAY_SUPPORT_REPAIR_FAILED"
 
 
+_FIXED_PHASE_CERTIFICATE_FACTOR_CACHE = {}
+
+
+def _reduced_support_vertex(lp, support, deadline, factor_cache, audit):
+    """Untrusted sparse basic-support selection, then exact cancellation repair.
+
+    Only unbounded coordinates require a cancellation solve: residuals on
+    bounded coordinates are completed by their ORIGINAL variable bounds and
+    the full Farkas checker. Neither truncation nor numerical rank is proof.
+    """
+    from scipy.sparse import coo_matrix
+    stage = "support_matrix_build"
+    audit["exact_repair_timeout_stage"] = None
+    def check_time():
+        audit["current_repair_stage"] = stage
+        if time.perf_counter() >= deadline:
+            audit["exact_repair_timeout_stage"] = stage
+            raise ExactSolveFailure("fixed-phase reduced-support repair timeout")
+    unbounded = {i for i, (lo, hi) in enumerate(zip(lp.column_lower, lp.column_upper))
+                 if lo is None and hi is None}
+    # One-sided bounds are also permitted as original inequalities; completing
+    # a residual of the wrong sign fails closed in the full Farkas replay.
+    equations = {}
+    numerical_entries = []
+    coordinate_scales = {}
+    proposal_cost = []
+    numerator_bits = denominator_bits = 0
+    for j, (reference, _) in enumerate(support):
+        check_time()
+        indices, coefficients, row_rhs = _inequality(lp, reference)
+        proposal_cost.append(row_rhs)
+        for i, value in zip(indices, coefficients):
+            numerator_bits = max(numerator_bits, abs(value.numerator).bit_length())
+            denominator_bits = max(denominator_bits, value.denominator.bit_length())
+            if i in unbounded and value:
+                equations.setdefault(i, {})[j] = value
+            if value:
+                numerical_entries.append((i, j, value))
+                coordinate_scales[i] = max(coordinate_scales.get(i, Fraction(0)), abs(value))
+    rows = [equations[i] for i in sorted(equations)] + [dict.fromkeys(range(len(support)), Fraction(1))]
+    rhs = [Fraction(0)] * (len(rows) - 1) + [Fraction(1)]
+    audit.update(stationarity_equation_count=len(rows),
+                 coefficient_numerator_max_bits=numerator_bits,
+                 coefficient_denominator_max_bits=denominator_bits)
+    # The auxiliary numerical support selector includes original variable-bound
+    # inequalities and minimizes candidate lambda*b. Ignoring bound costs can
+    # select a non-contradictory stationary ray even when the direct ray works.
+    # This is ONLY proposal selection; exact repair/replay never uses this LP.
+    for i in sorted(coordinate_scales):
+        for orientation, bound in ((-1, lp.column_lower[i]), (1, lp.column_upper[i])):
+            if bound is not None:
+                j = len(proposal_cost)
+                proposal_cost.append(orientation * bound)
+                numerical_entries.append((i, j, Fraction(orientation)))
+                coordinate_scales[i] = max(coordinate_scales[i], Fraction(1))
+    coordinate_rows = {i: j for j, i in enumerate(sorted(coordinate_scales))}
+    indices = [coordinate_rows[i] for i, _, _ in numerical_entries]
+    columns = [j for _, j, _ in numerical_entries]
+    values = [float(value / coordinate_scales[i]) for i, _, value in numerical_entries]
+    normalization = len(coordinate_rows)
+    indices.extend([normalization] * len(support))
+    columns.extend(range(len(support)))
+    values.extend([1.] * len(support))
+    numeric = coo_matrix((values, (indices, columns)),
+                         shape=(normalization + 1, len(proposal_cost))).tocsr()
+    cost_scale = max(map(abs, proposal_cost)) or Fraction(1)
+    objective = np.asarray([float(value / cost_scale) for value in proposal_cost])
+    numerical_rhs = np.zeros(normalization + 1)
+    numerical_rhs[-1] = 1.
+    audit.update(support_selection_includes_original_bounds=True,
+                 support_selection_column_count=len(proposal_cost),
+                 support_selection_row_count=normalization + 1)
+    stage = "sparse_support_selection"
+    check_time()
+    numerical = linprog(objective, A_eq=numeric, b_eq=numerical_rhs,
+        bounds=(0., None), method="highs-ds", options={"presolve": True,
+                                                     "time_limit": max(.001, deadline - time.perf_counter())})
+    audit["support_selection_numerical_status"] = int(numerical.status)
+    check_time()
+    if not numerical.success or numerical.x is None or not np.isfinite(numerical.x).all():
+        raise ExactSolveFailure("reduced ray support has no usable numerical vertex")
+    maximum = max(1., float(np.max(np.abs(numerical.x[:len(support)]))))
+    positive = [int(j) for j in np.flatnonzero(numerical.x[:len(support)] > maximum * 1e-10)]
+    if not positive:
+        raise ExactSolveFailure("reduced ray vertex has empty candidate support")
+    audit["selected_independent_support_size"] = len(positive)
+    positive_set = set(positive)
+    reduced = [{j: value for j, value in row.items() if j in positive_set} for row in rows]
+    remaining_rhs = rhs[:]
+    adjacency = {j: set() for j in positive}
+    for i, row in enumerate(reduced):
+        for j in row:
+            adjacency[j].add(i)
+    # Peel singleton pivots and homogeneous two-term links exactly before any
+    # dense matrix. Long sparse chains of dual equalities need no Bareiss.
+    # This preserves every equation, including ones not selected numerically.
+    from collections import deque
+    queue = deque(i for i, row in enumerate(reduced) if len(row) == 1 or (
+        len(row) == 2 and not remaining_rhs[i]))
+    solved = {}
+    relations = []
+    peak_bits = max(numerator_bits, denominator_bits)
+    stage = "exact_sparse_link_elimination"
+    while queue:
+        check_time()
+        i = queue.popleft()
+        if len(reduced[i]) == 2 and not remaining_rhs[i]:
+            k, j = sorted(reduced[i])
+            ratio = -reduced[i][k] / reduced[i][j]
+            if ratio < 0:
+                raise ExactSolveFailure("positive candidate support has an opposite-sign link")
+            relations.append((j, k, ratio))
+            for row_index in sorted(adjacency[j]):
+                coefficient = reduced[row_index].pop(j, None)
+                if coefficient is None:
+                    continue
+                value = reduced[row_index].get(k, Fraction(0)) + coefficient * ratio
+                peak_bits = max(peak_bits, abs(value.numerator).bit_length(), value.denominator.bit_length())
+                if value:
+                    reduced[row_index][k] = value
+                    adjacency[k].add(row_index)
+                else:
+                    reduced[row_index].pop(k, None)
+                if len(reduced[row_index]) == 1 or (len(reduced[row_index]) == 2 and not remaining_rhs[row_index]):
+                    queue.append(row_index)
+            continue
+        if len(reduced[i]) != 1:
+            continue
+        j, coefficient = next(iter(reduced[i].items()))
+        value = remaining_rhs[i] / coefficient
+        if value < 0:
+            raise ExactSolveFailure("singleton ray multiplier is negative")
+        solved[j] = value
+        for k in sorted(adjacency[j]):
+            coefficient = reduced[k].pop(j, None)
+            if coefficient is not None:
+                remaining_rhs[k] -= coefficient * value
+                peak_bits = max(peak_bits, abs(remaining_rhs[k].numerator).bit_length(),
+                                remaining_rhs[k].denominator.bit_length())
+                if len(reduced[k]) == 1 or (len(reduced[k]) == 2 and not remaining_rhs[k]):
+                    queue.append(k)
+                elif not reduced[k] and remaining_rhs[k]:
+                    raise ExactSolveFailure("singleton ray cancellation is inconsistent")
+    linked = {j for j, _, _ in relations}
+    unresolved = [j for j in positive if j not in solved and j not in linked]
+    audit.update(singleton_pivots_eliminated=len(solved), sparse_links_eliminated=len(relations),
+                 exact_repair_matrix_dimension=len(unresolved),
+                 normalized_matrix_cache_hit=False, peak_intermediate_bit_size=peak_bits,
+                 peak_bit_size_measurement="tracked normalized rational values and Bareiss intermediates")
+    if unresolved:
+        stage = "independent_row_selection"
+        check_time()
+        nonempty = [i for i, row in enumerate(reduced) if row]
+        row_scales = [max(map(abs, reduced[i].values())) for i in nonempty]
+        numeric = np.asarray([[float(reduced[i].get(j, Fraction(0)) / scale)
+                               for j in unresolved] for i, scale in zip(nonempty, row_scales)])
+        _q, r, pivots = qr(numeric.T, mode="economic", pivoting=True)
+        check_time()
+        diag = np.abs(np.diag(r))
+        rank = int(np.count_nonzero(diag > max(numeric.shape) * np.finfo(float).eps *
+                                    (float(diag.max()) if diag.size else 0.)))
+        audit["numerical_support_rank"] = rank
+        if rank < len(unresolved):
+            # Bound auxiliaries may make the numerical vertex basic even when
+            # its row-ray projection has free directions. Fix the nonbasic
+            # multipliers rationally; repair ONLY an independent cancellation
+            # basis. Every dropped equation and sign is replayed below.
+            _cq, _cr, column_pivots = qr(numeric, mode="economic", pivoting=True)
+            independent = [unresolved[int(j)] for j in column_pivots[:rank]]
+            fixed = [j for j in unresolved if j not in set(independent)]
+            for j in fixed:
+                solved[j] = Fraction(float(numerical.x[j])).limit_denominator(2**24)
+            for i in nonempty:
+                for j in fixed:
+                    remaining_rhs[i] -= reduced[i].pop(j, Fraction(0)) * solved[j]
+            audit.update(rationally_fixed_nonbasic_multipliers=len(fixed),
+                         selected_independent_support_size=len(positive) - len(fixed),
+                         exact_repair_matrix_dimension=rank)
+            unresolved = independent
+        if not rank:
+            raise ExactSolveFailure("reduced ray cancellation basis is empty")
+        chosen = [nonempty[int(i)] for i in pivots[:rank]]
+        matrix = [[reduced[i].get(j, Fraction(0)) for j in unresolved] for i in chosen]
+        target = [remaining_rhs[i] for i in chosen]
+        stage = "integer_normalization"
+        check_time()
+        integers, integer_rhs, denominators, normalized = _integerize_correction_system(matrix, [target])
+        # Also remove exact column contents; never change the canonical LP.
+        divisors = [math.gcd(*(row[j] for row in integers)) for j in range(rank)]
+        if any(not value for value in divisors):
+            raise ExactSolveFailure("reduced ray matrix has a zero column")
+        primitive = [[value // divisor for value, divisor in zip(row, divisors)] for row in integers]
+        audit.update(integer_normalization=normalized,
+                     normalized_matrix_sha256=_integer_rows_sha256(primitive),
+                     integer_coefficient_max_bits=max(abs(value).bit_length() for row in primitive for value in row),
+                     integer_rhs_max_bits=max(abs(value).bit_length() for value in integer_rhs[0]))
+        stage = "cached_integer_elimination"
+        check_time()
+        solve_audit = {}
+        try:
+            answers, solve_audit = _exact_multi_rhs_solve(primitive, integer_rhs,
+                max(.001, deadline - time.perf_counter()), factor_cache=factor_cache, diagnostics=solve_audit)
+        finally:
+            audit.update(exact_integer_solve=solve_audit,
+                         normalized_matrix_cache_hit=solve_audit.get("elimination_reused", False),
+                         peak_intermediate_bit_size=max(peak_bits, solve_audit.get("peak_intermediate_integer_bit_length", 0)))
+            if time.perf_counter() >= deadline:
+                audit["exact_repair_timeout_stage"] = stage
+        for j, value, divisor in zip(unresolved, answers[0], divisors):
+            solved[j] = value / (denominators[0] * divisor)
+    else:
+        audit["numerical_support_rank"] = len(positive)
+    for j, k, ratio in reversed(relations):
+        solved[j] = ratio * solved[k]
+    multipliers = [solved.get(j, Fraction(0)) for j in range(len(support))]
+    stage = "full_support_stationarity_replay"
+    for row, expected in zip(rows, rhs):
+        check_time()
+        if sum((value * multipliers[j] for j, value in row.items()), Fraction(0)) != expected:
+            raise ExactSolveFailure("reduced ray full stationarity replay failed")
+    if any(value < 0 for value in multipliers):
+        raise ExactSolveFailure("reduced ray multiplier is negative")
+    return multipliers
+
+
+def repair_fixed_phase_dual_ray(lp, raw_ray, timeout_seconds=60., *, factor_cache=None):
+    """Fixed-phase-only reduced repair; strict root/node repair is unchanged."""
+    raw = np.asarray(raw_ray, dtype=np.float64)
+    if raw.shape != (len(lp.rows),) or not np.isfinite(raw).all():
+        raise FixedPhaseInvariantError("fixed-phase certificate ray topology/values differ")
+    cache = _FIXED_PHASE_CERTIFICATE_FACTOR_CACHE if factor_cache is None else factor_cache
+    deadline = time.perf_counter() + timeout_seconds
+    maximum = float(np.max(np.abs(raw))) if raw.size else 0.
+    raw_size = int(np.count_nonzero(raw))
+    # Small supports FIRST. Discarding an entry is only a candidate heuristic.
+    thresholds = list(dict.fromkeys([maximum * 1e-6, maximum * 1e-9, maximum * 1e-12, 0.]))
+    attempts = []
+    for threshold in thresholds:
+        for convention in (1, -1):
+            if time.perf_counter() >= deadline:
+                return None, attempts, "DIRECT_RAY_REPAIR_TIMEOUT"
+            support = _oriented_ray_rows(lp, raw, convention, threshold)
+            audit = {"raw_ray_support_size": raw_size, "threshold": threshold,
+                     "convention": convention, "truncated_candidate_support_size": len(support or []),
+                     "selected_independent_support_size": 0, "exact_repair_matrix_dimension": None,
+                     "exact_repair_timeout_stage": None, "peak_intermediate_bit_size": 0,
+                     "normalized_matrix_cache_hit": False, "exact_farkas_replay_verified": False,
+                     "exact_farkas_rhs": None}
+            attempt_started = time.perf_counter()
+            if not support:
+                audit.update(result="ORIENTATION_OR_SUPPORT_INVALID", exact_repair_seconds=0.)
+                attempts.append(audit)
+                continue
+            try:
+                multipliers = _reduced_support_vertex(lp, support, deadline, cache, audit)
+                audit["current_repair_stage"] = "full_original_lp_farkas_replay"
+                certificate, replay = _complete_farkas_with_bounds(lp, support, multipliers)
+                audit.update(result="EXACT_FARKAS_VERIFIED", exact_farkas_replay_verified=True,
+                             exact_farkas_rhs=replay["exact_lambda_b"],
+                             exact_repair_seconds=time.perf_counter() - attempt_started)
+                attempts.append(audit)
+                return certificate, attempts, "EXACT_FARKAS_VERIFIED"
+            except FixedPhaseInvariantError:
+                raise
+            except (RuntimeError, ExactSolveFailure) as error:
+                if time.perf_counter() >= deadline or "timeout" in str(error).lower():
+                    audit["exact_repair_timeout_stage"] = audit.get("current_repair_stage")
+                audit.update(result="EXACT_REPAIR_FAILED", failure=f"{type(error).__name__}: {error}")
+            finally:
+                audit["exact_repair_seconds"] = time.perf_counter() - attempt_started
+                # Bound the persistent cache entry count; replay also gates hits.
+                while len(cache) > 4:
+                    cache.pop(next(iter(cache)))
+                print(json.dumps({"stage": "fixed_phase_reduced_certificate_repair", **audit}), flush=True)
+            attempts.append(audit)
+    return None, attempts, "DIRECT_RAY_SUPPORT_REPAIR_FAILED"
+
+
 @dataclass(frozen=True)
 class ExactPerspectiveProblem:
     """Small exact instance used for witness replay and unit tests.
@@ -2316,12 +2594,14 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
                   time_limit_seconds=None, proposal_only=False,
                   proposal_method="PRIMARY"):
     import highspy
-    if proposal_method not in ("PRIMARY", "IPM_FEASIBILITY", "SIMPLEX_FEASIBILITY"):
+    if proposal_method not in ("PRIMARY", "IPM_FEASIBILITY", "SIMPLEX_FEASIBILITY",
+                               "FIXED_PHASE_CERTIFICATE"):
         raise FixedPhaseInvariantError("unknown fixed-phase proposal method")
-    fallback = proposal_method != "PRIMARY"
-    if fallback and not proposal_only:
+    fallback = proposal_method in ("IPM_FEASIBILITY", "SIMPLEX_FEASIBILITY")
+    certificate_mode = proposal_method == "FIXED_PHASE_CERTIFICATE"
+    if (fallback or certificate_mode) and not proposal_only:
         raise FixedPhaseInvariantError("feasibility fallback has no proof authority")
-    if fallback:
+    if fallback or certificate_mode:
         if objective is not None and any(_fr(v) for v in objective):
             raise FixedPhaseInvariantError("feasibility fallback requires zero objective")
         if time_limit_seconds is not None and (
@@ -4039,8 +4319,99 @@ def attempt_fixed_phase_farkas(lp, proposal, timeout_seconds):
     return audit
 
 
+def attempt_fixed_phase_certificate(lp, trigger_method, timeout_seconds, *,
+                                    certificate_solver=None, factor_cache=None):
+    """Dedicated original-LP simplex/ray solve. Status has no proof authority."""
+    started = time.perf_counter()
+    deadline = started + timeout_seconds
+    audit = {"certificate_trigger_solver_method": trigger_method,
+             "canonical_lp_sha256": lp.identity(),
+             "certificate_scope": "THIS_FIXED_PHASE_LINEAR_LP_ONLY",
+             "permits_node_exclusion": False,
+             "fixed_phase_farkas_attempted": True, "fixed_phase_farkas_verified": False,
+             "exact_farkas_replay_verified": False, "exact_farkas_rhs": None,
+             "raw_ray_support_size": 0, "truncated_candidate_support_size": 0,
+             "selected_independent_support_size": 0, "exact_repair_matrix_dimension": None,
+             "coefficient_numerator_max_bits": None, "coefficient_denominator_max_bits": None,
+             "integer_coefficient_max_bits": None, "integer_rhs_max_bits": None,
+             "normalized_matrix_sha256": None, "numerical_support_rank": None,
+             "singleton_pivots_eliminated": 0, "sparse_links_eliminated": 0,
+             "peak_bit_size_measurement": None,
+             "peak_intermediate_bit_size": None, "exact_repair_seconds": 0.,
+             "exact_repair_timeout_stage": None, "normalized_matrix_cache_hit": False}
+    def remaining():
+        seconds = deadline - time.perf_counter()
+        if seconds <= 0:
+            raise ExactSolveFailure("fixed-phase certificate deadline")
+        return seconds
+    if certificate_solver is None:
+        def certificate_solver(model, seconds):
+            return solve_highspy(model, proposal_only=True,
+                proposal_method="FIXED_PHASE_CERTIFICATE", time_limit_seconds=min(30., seconds))
+    restore = _start_reconstruction_alarm(max(1e-6, timeout_seconds))
+    stage = "dedicated_original_lp_simplex"
+    try:
+        solver = certificate_solver(lp, min(30., remaining()))
+        diagnostic = solver.get("construction_diagnostic", {})
+        if diagnostic.get("canonical_lp_sha256") != lp.identity():
+            raise FixedPhaseInvariantError("fixed-phase certificate original LP identity differs")
+        if (solver.get("solver_method") != "FIXED_PHASE_CERTIFICATE" or
+                solver.get("rational_objective_sha256") != _sha_json([_fs(Fraction(0))] * lp.column_count)):
+            raise FixedPhaseInvariantError("fixed-phase certificate zero-objective/method identity differs")
+        if solver.get("options", {}).get("presolve") != "off" or solver.get("options", {}).get("solver") != "simplex":
+            raise FixedPhaseInvariantError("fixed-phase certificate solve is not original-LP simplex")
+        if solver.get("solver_scaling", {}).get("original_canonical_lp_sha256") != lp.identity():
+            raise FixedPhaseInvariantError("fixed-phase certificate row-scaling identity differs")
+        if solver["solver_scaling"].get("solver_scaled_lp_sha256") != diagnostic.get("solver_scaled_lp_sha256"):
+            raise FixedPhaseInvariantError("fixed-phase certificate solver-copy identity differs")
+        audit.update(certificate_solver_method="FIXED_PHASE_CERTIFICATE",
+                     certificate_numerical_run_status=solver["run_status"],
+                     certificate_numerical_model_status=solver["model_status"],
+                     certificate_solver_seconds=solver.get("runtime_seconds"),
+                     certificate_solver_audit_path=solver.get("proposal_audit_path"),
+                     ray_mapping="solve_highspy maps solver-scaled ray to original rows exactly once")
+        ray = solver.get("original_row_dual_ray")
+        if solver["model_status"] != "Infeasible" or ray is None:
+            audit["direct_ray_repair_status"] = "NO_USABLE_DEDICATED_DUAL_RAY"
+            return audit
+        stage = "reduced_support_exact_repair"
+        repair_started = time.perf_counter()
+        certificate, attempts, status = repair_fixed_phase_dual_ray(lp, ray, remaining(), factor_cache=factor_cache)
+        audit.update(direct_ray_attempts=attempts, direct_ray_repair_status=status,
+                     exact_repair_seconds=time.perf_counter() - repair_started)
+        if attempts:
+            audit.update({key: value for key, value in attempts[-1].items() if key in audit
+                          and key not in ("exact_repair_seconds", "exact_farkas_replay_verified", "exact_farkas_rhs")})
+        if certificate is not None:
+            stage = "full_original_lp_farkas_replay"
+            try:
+                remaining()
+                replay = verify_exact_lp_farkas(lp, certificate)
+            except FixedPhaseInvariantError:
+                raise
+            except ExactSolveFailure:
+                raise
+            except RuntimeError as error:
+                audit["exact_certificate_rejection"] = str(error)
+            else:
+                audit.update(fixed_phase_farkas_verified=True, exact_farkas_replay_verified=True,
+                             exact_farkas_rhs=replay["exact_lambda_b"], exact_replay=replay,
+                             fixed_phase_farkas_certificate=certificate)
+        return audit
+    except ExactSolveFailure as error:
+        timed_out = time.perf_counter() >= deadline or "timeout" in str(error).lower()
+        audit.update(direct_ray_repair_status="DIRECT_RAY_REPAIR_TIMEOUT" if timed_out else "DIRECT_RAY_SUPPORT_REPAIR_FAILED",
+                     failure=f"{type(error).__name__}: {error}",
+                     exact_repair_timeout_stage=stage if timed_out else None)
+        return audit
+    finally:
+        audit["certificate_attempt_seconds"] = time.perf_counter() - started
+        restore()
+        print(json.dumps({"stage": "fixed_phase_certificate_attempt", **audit}), flush=True)
+
+
 def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seconds,
-                                     *, feasibility_propose=None):
+                                     *, feasibility_propose=None, certificate_solver=None):
     """Witness-only search: no finite failed portfolio can close a phase."""
     started = time.perf_counter()
     deadline = started + timeout_seconds
@@ -4054,6 +4425,7 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
               "proposal_attempts": [], "fallback_attempts": 0,
               "fallback_usable_primals": 0, "exact_anchor_reconstruction_attempts": 0,
               "exact_anchors_verified": 0,
+              "numerical_infeasible_methods": [], "certificate_attempts": [],
               "proposal_seconds": 0.0, "direction_seconds": 0.0,
               "search_status": "INCONCLUSIVE"}
     def remaining():
@@ -4113,10 +4485,12 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
                 "proposal_failure_reason": candidate.get("proposal_failure_reason"), **admission}
             report["anchors"].append(anchor_audit)
             try:
-                if candidate["model_status"] == "Infeasible" and method == "PRIMARY":
+                if candidate["model_status"] == "Infeasible":
+                    report["numerical_infeasible_methods"].append(method)
                     report["fixed_phase_farkas_attempted"] = True
                     try:
-                        certificate_audit = attempt_fixed_phase_farkas(lp, candidate, min(60., remaining()))
+                        certificate_audit = attempt_fixed_phase_certificate(lp, method, min(60., remaining()),
+                            certificate_solver=certificate_solver)
                     except ExactSolveFailure as error:
                         anchor_audit.update(fixed_phase_farkas_attempted=True,
                                             fixed_phase_farkas_verified=False,
@@ -4124,13 +4498,16 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
                         report["failure"] = f"{type(error).__name__}: {error}"
                         return None
                     anchor_audit.update(certificate_audit)
+                    report["certificate_attempts"].append(certificate_audit)
                     if role == "anchor":
                         report.update(certificate_audit)
                         if report["fixed_phase_farkas_verified"]:
                             report["search_status"] = "FIXED_PHASE_LINEARLY_INFEASIBLE"
                     elif certificate_audit["fixed_phase_farkas_verified"]:
                         raise FixedPhaseInvariantError("fixed-phase Farkas contradicts authenticated anchor")
-                    return None
+                    if certificate_audit["fixed_phase_farkas_verified"] or method == "PRIMARY":
+                        return None
+                    continue
                 if admission["anchor_reconstruction_skipped_reason"] is not None:
                     anchor_audit.update(replay_verified=False, heuristic_failure=True)
                     if role == "anchor":
@@ -4800,10 +5177,13 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             def propose_feasibility(model, seconds, method, role):
                 return propose_fixed(model, [Fraction(0)] * model.column_count,
                                      seconds, role, method=method)
+            def certificate_solve(model, seconds):
+                return propose_fixed(model, [Fraction(0)] * model.column_count,
+                                     seconds, "certificate", method="FIXED_PHASE_CERTIFICATE")
             found, reconstruction = search_fixed_phase_exact_witness(
                 exact_problem, fixed_lp, pattern, propose_fixed,
                 min(240., max(.1, started + wall_seconds - time.perf_counter())),
-                feasibility_propose=propose_feasibility)
+                feasibility_propose=propose_feasibility, certificate_solver=certificate_solve)
             reconstruction.update(fixed_phase_lp_audit=audit,
                                   fixed_phase_lp_artifact=fixed_artifact)
             for counter in ("fallback_attempts", "fallback_usable_primals",
