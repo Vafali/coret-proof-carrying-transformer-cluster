@@ -3,6 +3,7 @@ from fractions import Fraction as F
 import importlib.util
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -284,7 +285,8 @@ def test_float_point_cannot_discharge_exact_anchor_replay():
 
 def _proposal_warning_engine(monkeypatch, log_path, *, api="run", mutation=None,
                              warning="WARNING: Problem has some excessively small costs",
-                             model_status=None):
+                             model_status=None, solution_factory=None,
+                             run_status=None, pass_status=None, run_mutation=None):
     import highspy
     real = highspy.Highs
     class Engine:
@@ -298,16 +300,21 @@ def _proposal_warning_engine(monkeypatch, log_path, *, api="run", mutation=None,
                 mutation(self.inner)
             if api == "passModel":
                 log_path.write_text(warning + "\n")
-                return highspy.HighsStatus.kWarning
+                return highspy.HighsStatus.kWarning if pass_status is None else pass_status
             return result
         def run(self):
             self.inner.run()
+            if run_mutation is not None:
+                run_mutation(self.inner)
             if api == "run":
                 log_path.write_text(warning + "\n")
-                return highspy.HighsStatus.kWarning
+                return highspy.HighsStatus.kWarning if run_status is None else run_status
             return highspy.HighsStatus.kOk
         def getModelStatus(self):
             return self.inner.getModelStatus() if model_status is None else model_status
+        def getSolution(self):
+            solution = self.inner.getSolution()
+            return solution if solution_factory is None else solution_factory(solution)
     monkeypatch.setattr(highspy, "Highs", Engine)
 
 
@@ -370,13 +377,150 @@ def test_proposal_warning_rejects_solver_changed_constraints(monkeypatch, tmp_pa
         O.solve_highspy(lp, log, proposal_only=True)
 
 
-@pytest.mark.parametrize("warning", ["WARNING: matrix entries were dropped",
+@pytest.mark.parametrize("warning", ["WARNING: no useful basis was obtained",
                                      "WARNING: unknown solver warning", ""])
-def test_unknown_or_structural_warning_not_admitted(monkeypatch, tmp_path, warning):
+def test_unclassified_execution_warning_is_heuristic_if_model_intact(monkeypatch, tmp_path, warning):
     _, lp, _, _ = fixture()
     log = tmp_path / "unknown.log"
     _proposal_warning_engine(monkeypatch, log, warning=warning)
+    result = O.solve_highspy(lp, log, proposal_only=True)
+    assert result["proposal_warning"] and result["proposal_usable_primal"]
+    assert all(result["construction_diagnostic"]["proposal_retained_model_audit"].values())
+
+
+@pytest.mark.parametrize("values,reason", [
+    (None, "NO_PRIMAL_ARRAY"),
+    ([], "PRIMAL_DIMENSION_MISMATCH"),
+    ([0.] * 7, "PRIMAL_DIMENSION_MISMATCH"),
+    ([float("nan")] * 8, "NONFINITE_PRIMAL_VALUES"),
+    ([float("inf")] * 8, "NONFINITE_PRIMAL_VALUES"),
+])
+def test_unknown_warning_without_usable_primal_is_audited_inconclusive(monkeypatch, tmp_path,
+                                                                   values, reason):
+    import highspy
+    p, lp, pattern, _ = fixture()
+    log = tmp_path / "unknown.log"
+    _proposal_warning_engine(monkeypatch, log,
+        model_status=highspy.HighsModelStatus.kUnknown, warning="",
+        solution_factory=lambda _: SimpleNamespace(col_value=values, value_valid=False))
+    result = O.solve_highspy(lp, log, proposal_only=True)
+    assert result["model_status"] == "Unknown"
+    assert result["proposal_warning"]
+    assert not result["proposal_usable_primal"] and not result["proposal_available"]
+    assert result["proposal_failure_reason"] == reason
+    assert result["column_values"] is None
+    assert not result["infeasible"] and not result["direct_dual_ray_available"]
+    persisted = O.cluster_common.verified_json(Path(result["proposal_audit_path"]))
+    assert persisted["proposal_failure_reason"] == reason
+    assert persisted["model_status"] == "Unknown"
+    assert not persisted["authorizes_witness_or_exclusion"]
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+                                                      lambda *_: result, 2.)
+    assert found is None and report["search_status"] == "INCONCLUSIVE"
+    assert not report["exact_anchor_replay_verified"]
+    assert not report["permits_infeasibility_claim"]
+    assert report["anchors"][0]["heuristic_failure"]
+    assert report["anchors"][0]["proposal_failure_reason"] == reason
+
+
+@pytest.mark.parametrize("execution_status", ["kWarning", "kError", "kOk"])
+def test_unknown_finite_proposal_attempts_exact_reconstruction_and_replay(monkeypatch, tmp_path,
+                                                                      execution_status):
+    import highspy
+    p, lp, pattern, _ = fixture()
+    log = tmp_path / "finite_unknown.log"
+    _proposal_warning_engine(monkeypatch, log,
+        model_status=highspy.HighsModelStatus.kUnknown, warning="",
+        run_status=getattr(highspy.HighsStatus, execution_status),
+        solution_factory=lambda s: SimpleNamespace(col_value=s.col_value, value_valid=False))
+    result = O.solve_highspy(lp, log, proposal_only=True)
+    assert result["proposal_usable_primal"] and result["proposal_available"]
+    assert result["proposal_failure_reason"] is None
+    assert not result["feasible"] and not result["infeasible"]
+    calls = []
+    replay = O.replay_exact_linear_point
+    def record_replay(*args):
+        calls.append(args)
+        return replay(*args)
+    monkeypatch.setattr(O, "replay_exact_linear_point", record_replay)
+    found, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+                                                      lambda *_: result, 2.)
+    assert calls and report["exact_anchor_replay_verified"]
+    assert found is not None
+    assert O.replay_fixed_phase_semantic_witness(p, lp, found)["verified"]
+
+
+@pytest.mark.parametrize("api", ["passModel", "run"])
+def test_identical_unknown_warning_in_strict_mode_is_fatal(monkeypatch, tmp_path, api):
+    import highspy
+    _, lp, _, _ = fixture()
+    log = tmp_path / "strict_unknown.log"
+    _proposal_warning_engine(monkeypatch, log, api=api,
+                             model_status=highspy.HighsModelStatus.kUnknown, warning="")
     with pytest.raises(O.HighsCanonicalLPDiagnosticError):
+        O.solve_highspy(lp, log)
+
+
+def test_pass_model_error_remains_fatal_in_proposal_mode(monkeypatch, tmp_path):
+    import highspy
+    _, lp, _, _ = fixture()
+    log = tmp_path / "construction_error.log"
+    _proposal_warning_engine(monkeypatch, log, api="passModel",
+                             pass_status=highspy.HighsStatus.kError)
+    with pytest.raises(O.HighsCanonicalLPDiagnosticError):
+        O.solve_highspy(lp, log, proposal_only=True)
+
+
+@pytest.mark.parametrize("api", ["passModel", "run"])
+def test_matrix_corruption_rejected_even_with_ok_api_status(monkeypatch, tmp_path, api):
+    import highspy
+    _, lp, _, _ = fixture()
+    log = tmp_path / "corrupt_ok.log"
+    mutate = lambda h: h.changeCoeff(0, 0, 0.5)
+    _proposal_warning_engine(monkeypatch, log, api=api,
+        mutation=mutate if api == "passModel" else None,
+        run_mutation=mutate if api == "run" else None,
+        pass_status=highspy.HighsStatus.kOk, run_status=highspy.HighsStatus.kOk)
+    with pytest.raises(O.HighsCanonicalLPDiagnosticError) as failure:
+        O.solve_highspy(lp, log, proposal_only=True)
+    assert failure.value.diagnostic["failure_classification"] == "HIGHS_LOADED_CANONICAL_MODEL_DIFFERS"
+
+
+def test_missing_primal_anchor_does_not_stop_phase_bab(monkeypatch, tmp_path):
+    import highspy
+    p, lp, pattern, _ = fixture()
+    log = tmp_path / "bab_unknown.log"
+    _proposal_warning_engine(monkeypatch, log,
+        model_status=highspy.HighsModelStatus.kUnknown,
+        solution_factory=lambda _: None, warning="")
+    result = O.solve_highspy(lp, log, proposal_only=True)
+    monkeypatch.setattr(O, "DIMENSION", 2)
+    root = np.zeros(8)
+    root[6] = .25
+    bounds = {"stable_active": [], "stable_inactive": [1], "unstable": [0]}
+    attempts, nodes = [], []
+    def witness(_pattern, _candidate, node_id):
+        found, report = O.search_fixed_phase_exact_witness(p, lp, pattern,
+                                                         lambda *_: result, 2.)
+        attempts.append(node_id)
+        assert report["search_status"] == "INCONCLUSIVE"
+        return found, report
+    def solve_node(_phases, node_id):
+        nodes.append(node_id)
+        return {"feasible": True, "solution": root, "infeasible": False}
+    found, branch = O.run_phase_continuation(root, bounds, 1, 3, 4,
+        O.time.perf_counter() + 2., solve_node, witness)
+    assert found is None and len(attempts) == 3 and len(nodes) == 2
+    assert branch["nodes_closed_by_certificate"] == 0 and branch["nodes_open"] == 2
+
+
+def test_proposal_execution_programming_error_still_propagates(monkeypatch, tmp_path):
+    _, lp, _, _ = fixture()
+    log = tmp_path / "implementation_error.log"
+    def implementation_error(_):
+        raise O.FixedPhaseInvariantError("actual implementation defect")
+    _proposal_warning_engine(monkeypatch, log, run_mutation=implementation_error)
+    with pytest.raises(O.FixedPhaseInvariantError, match="actual implementation defect"):
         O.solve_highspy(lp, log, proposal_only=True)
 
 

@@ -2279,44 +2279,36 @@ def _proposal_model_unchanged(highs, arrays, diagnostic):
 
 
 def _check_proposal_highs_status(api, status, highs, arrays, diagnostic, log_path):
-    """No warning is proof. Only audited heuristic proposals may continue."""
+    """Loaded-model integrity is mandatory; execution status has no authority."""
     import highspy
-    if status != highspy.HighsStatus.kWarning:
+    if diagnostic.get("proposal_only") is not True or api not in ("passModel", "run"):
+        return _check_highs_status(api, status, highspy.HighsStatus.kOk,
+                                   diagnostic, log_path)
+    # An API error while constructing the model is not a heuristic outcome.
+    if api == "passModel" and status not in (highspy.HighsStatus.kOk,
+                                            highspy.HighsStatus.kWarning):
         return _check_highs_status(api, status, highspy.HighsStatus.kOk,
                                    diagnostic, log_path)
     log = ("" if log_path is None or not log_path.is_file() else
            log_path.read_text(errors="replace")[-20000:])
-    model_status = highs.getModelStatus()
-    diagnostic.update(highs_log_text=log,
-                      model_status_at_warning=highs.modelStatusToString(model_status))
-    warnings = [line.strip() for line in log.splitlines()
-                if "WARNING:" in line]
-    cost_only = bool(warnings) and all(
-        line == "WARNING: Problem has some excessively small costs"
-        for line in warnings)
-    # A limited simplex run can return a useful *untrusted* iterate. In
-    # particular kWarning is the normal API status for kTimeLimit.
-    limited = api == "run" and model_status in (
-        highspy.HighsModelStatus.kTimeLimit,
-        highspy.HighsModelStatus.kIterationLimit)
-    reason = ("PROPOSAL_SOLVER_LIMIT" if limited else
-              "PROPOSAL_SMALL_COST_WARNING" if cost_only else None)
-    safe = (diagnostic.get("proposal_only") is True
-            and diagnostic["preflight_failure_classification"] is None
-            and diagnostic["sub_small_matrix_value_count"] == 0
-            and reason is not None
-            and (not warnings or cost_only)
-            and (api == "passModel" or model_status in (
-                highspy.HighsModelStatus.kOptimal,
-                highspy.HighsModelStatus.kObjectiveBound,
-                highspy.HighsModelStatus.kTimeLimit,
-                highspy.HighsModelStatus.kIterationLimit))
-            and _proposal_model_unchanged(highs, arrays, diagnostic))
-    if not safe:
-        return _check_highs_status(api, status, highspy.HighsStatus.kOk,
-                                   diagnostic, log_path)
+    diagnostic["highs_log_text"] = log
+    if status != highspy.HighsStatus.kOk:
+        diagnostic["model_status_at_warning"] = highs.modelStatusToString(
+            highs.getModelStatus())
+    # Check even kOk. A warning whitelist cannot establish that no constraints
+    # were lost, nor can a reassuring status substitute for this comparison.
+    intact = _proposal_model_unchanged(highs, arrays, diagnostic)
+    diagnostic.setdefault("proposal_model_audits", []).append({
+        "api": api, **diagnostic["proposal_retained_model_audit"]})
+    if (diagnostic["preflight_failure_classification"] is not None
+            or diagnostic["sub_small_matrix_value_count"] != 0 or not intact):
+        diagnostic.update(failed_api_call=api, failed_highs_status=str(status),
+                          failure_classification="HIGHS_LOADED_CANONICAL_MODEL_DIFFERS")
+        raise HighsCanonicalLPDiagnosticError(
+            f"{api}: loaded proposal model differs from canonical solver copy", diagnostic)
     diagnostic["api_statuses"].append({"api": api, "status": str(status),
-        "proposal_warning_reason": reason, "exact_replay_required": True})
+        "heuristic_execution_status": api == "run",
+        "exact_replay_required": True})
 
 
 def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
@@ -2501,24 +2493,43 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
                         map_solver_row_ray_to_original(raw_ray,
                                                        scaling.scales))
     solution = highs.getSolution()
-    columns = (np.asarray(solution.col_value, dtype=np.float64)
-               if solution.value_valid else None)
-    proposal_available = (proposal_only and columns is not None
-        and columns.shape == (lp.column_count,) and np.all(np.isfinite(columns))
-        and status in (highspy.HighsModelStatus.kOptimal,
-                       highspy.HighsModelStatus.kObjectiveBound,
-                       highspy.HighsModelStatus.kTimeLimit,
-                       highspy.HighsModelStatus.kIterationLimit))
+    proposal_failure_reason = None
+    if proposal_only:
+        # Even value_valid/feasibility/optimality are untrusted solver claims.
+        # Any finite, correctly shaped iterate can be submitted to exact repair.
+        values = None if solution is None else getattr(solution, "col_value", None)
+        columns = None if values is None else np.asarray(values, dtype=np.float64)
+        if columns is None:
+            proposal_failure_reason = "NO_PRIMAL_ARRAY"
+        elif columns.shape != (lp.column_count,):
+            proposal_failure_reason = "PRIMAL_DIMENSION_MISMATCH"
+        elif not np.all(np.isfinite(columns)):
+            proposal_failure_reason = "NONFINITE_PRIMAL_VALUES"
+        proposal_available = proposal_failure_reason is None
+        if not proposal_available:
+            columns = None
+    else:
+        columns = (np.asarray(solution.col_value, dtype=np.float64)
+                   if solution.value_valid else None)
+        proposal_available = False
+    proposal_warning = bool(proposal_only and (
+        any(entry["status"] != str(highspy.HighsStatus.kOk)
+            for entry in diagnostic["api_statuses"])
+        or status not in (highspy.HighsModelStatus.kOptimal,
+                          highspy.HighsModelStatus.kObjectiveBound)))
     result = {
         "run_status": str(run_status), "model_status": status_name,
-        "infeasible": status == highspy.HighsModelStatus.kInfeasible,
-        "feasible": status in (highspy.HighsModelStatus.kOptimal,
-                               highspy.HighsModelStatus.kObjectiveBound),
+        "infeasible": not proposal_only and status == highspy.HighsModelStatus.kInfeasible,
+        "feasible": not proposal_only and status in (highspy.HighsModelStatus.kOptimal,
+                                                    highspy.HighsModelStatus.kObjectiveBound),
         "direct_dual_ray_available": raw_ray is not None,
         "raw_dual_ray": raw_ray,
         "original_row_dual_ray": original_row_ray,
         "column_values": columns,
         "proposal_available": bool(proposal_available),
+        "proposal_usable_primal": bool(proposal_available),
+        "proposal_warning": proposal_warning,
+        "proposal_failure_reason": proposal_failure_reason,
         "exact_replay_required": proposal_only,
         "runtime_seconds": runtime, "highs_runtime_seconds": highs.getRunTime(),
         "highspy_version": importlib.metadata.version("highspy"),
@@ -2541,6 +2552,9 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
             "construction_diagnostic": diagnostic,
             "run_status": result["run_status"], "model_status": status_name,
             "proposal_available": bool(proposal_available),
+            "proposal_usable_primal": bool(proposal_available),
+            "proposal_warning": proposal_warning,
+            "proposal_failure_reason": proposal_failure_reason,
             "runtime_seconds": runtime,
             "exact_replay_required": True,
             "authorizes_witness_or_exclusion": False,
@@ -3786,7 +3800,12 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
         report["proposal_seconds"] += time.perf_counter() - proposal_started
         report["fixed_phase_linear_lp_status"] = first["model_status"]
         if not first.get("proposal_available", first.get("feasible")) or first.get("column_values") is None:
-            report["failure"] = "NO_LINEAR_FEASIBLE_PROPOSAL_IS_NOT_A_PROOF"
+            report["failure"] = "NO_USABLE_ANCHOR_PROPOSAL_IS_NOT_A_PROOF"
+            report["anchors"].append({"role": "q0", "replay_verified": False,
+                "heuristic_failure": True, "proposal_status": first["model_status"],
+                "proposal_warning": first.get("proposal_warning"),
+                "proposal_failure_reason": first.get("proposal_failure_reason"),
+                "proposal_audit_path": first.get("proposal_audit_path")})
             return None, report
         workspace_started = time.perf_counter()
         workspace = FixedPhaseAnchorWorkspace(problem, pattern, lp)
@@ -3819,7 +3838,10 @@ def search_fixed_phase_exact_witness(problem, lp, pattern, propose, timeout_seco
                 report["proposal_seconds"] += time.perf_counter() - proposal_started
                 if not second.get("proposal_available", second.get("feasible")) or second.get("column_values") is None:
                     report["anchors"].append({"role": sense, "replay_verified": False,
-                                               "proposal_status": second["model_status"]})
+                        "heuristic_failure": True, "proposal_status": second["model_status"],
+                        "proposal_warning": second.get("proposal_warning"),
+                        "proposal_failure_reason": second.get("proposal_failure_reason"),
+                        "proposal_audit_path": second.get("proposal_audit_path")})
                     continue
                 q1, profile = workspace.reconstruct_anchor(second["column_values"], min(60., remaining()))
                 report["anchors"].append({"role": sense, **profile})
@@ -4408,6 +4430,8 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
                                   "status": proposal["model_status"],
                                   "run_status": proposal["run_status"],
                                   "proposal_available": proposal["proposal_available"],
+                                  "proposal_warning": proposal["proposal_warning"],
+                                  "proposal_failure_reason": proposal["proposal_failure_reason"],
                                   "proposal_audit_path": proposal.get("proposal_audit_path"),
                                   "proposal_audit_sha256": proposal.get("proposal_audit_sha256"),
                                   "proposal_seconds": proposal["runtime_seconds"]}), flush=True)
