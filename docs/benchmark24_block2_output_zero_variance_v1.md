@@ -60,6 +60,15 @@ differences of a rounded mean. For coordinate j<127, h_j=c_j-c_127 and
 A_ji=G_ij-G_i,127; solve `h+A*xi=0` with every authenticated range.
 Numerical LP, least-squares, QR selection and dual searches are proposals only.
 
+For this capture schema, `--exact-solve-timeout-seconds` also imposes a hard
+wall-clock deadline on the entire per-token attempt AFTER capture authentication:
+proposal solvers, dual search, exact construction, reconstruction, persistence
+and full replay. A supervised CPU child is terminated at the deadline (with
+bounded termination cleanup); the parent writes `INCONCLUSIVE` with reason
+`EXACT_EXCLUSION_TIMEOUT`, elapsed time and the last reported stage. This does
+not change any solver settings or mathematical acceptance condition. The
+original legacy oracle's selected-integer-solve timer remains unchanged.
+
 - `EXACT_ZERO_VARIANCE_FEASIBLE`: a rational witness replays all 127 original
   equations and all 14,000 ranges exactly. The JSON witness is reread/rechecked.
   This proves the captured incoming abstract state admits a constant vector at

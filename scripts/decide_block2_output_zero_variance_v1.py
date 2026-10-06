@@ -13,6 +13,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import signal
 import sys
@@ -58,6 +59,7 @@ EXCLUSION_SCHEMA = "CORET_BLOCK2_OUTPUT_ZERO_VARIANCE_EXACT_FARKAS_V1"
 FEASIBLE = "EXACT_ZERO_VARIANCE_FEASIBLE"
 EXCLUDED = "EXACT_ZERO_VARIANCE_EXCLUDED"
 INCONCLUSIVE = "INCONCLUSIVE"
+EXACT_EXCLUSION_TIMEOUT = "EXACT_EXCLUSION_TIMEOUT"
 
 
 def _atomic_json(path: Path, value: dict) -> dict:
@@ -311,6 +313,7 @@ def numerical_primal_search(problem: dict,
     free = ~fixed
     if free.any():
         stage_started = time.perf_counter()
+        _progress(variant_name, "bounded_least_squares_start", stage_started)
         lsq = lsq_linear(
             A[:, free] / scale[:, None], -adjusted_b / scale,
             bounds=(low[free], high[free]), method="trf", lsq_solver="lsmr",
@@ -1047,7 +1050,7 @@ def near_zero_gate(problem: dict, primal: dict) -> dict:
     }
 
 
-def decide_variant(name: str, variant: dict, exact_max_rank: int,
+def _decide_variant_unbounded(name: str, variant: dict, exact_max_rank: int,
                    certificate_dir: Path, *, skip_exact: bool = False,
                    exact_only_if_near_zero: bool = True,
                    fast_first: bool = True,
@@ -1064,6 +1067,7 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
     candidate, primal = numerical_primal_search(problem, name)
     gate = near_zero_gate(problem, primal)
     dual_started = time.perf_counter()
+    _progress(name, "dual_stage_start", dual_started)
     dual = dual_scaling_search(problem, candidate, name)
     _progress(
         name, "dual_stage_complete", dual_started,
@@ -1122,6 +1126,7 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
     if require_exact_exclusion and decision == DECISION_UNRESOLVED:
         decision = INCONCLUSIVE
     if exact is not None:
+        _progress(name, "exact_witness_persist_and_replay_start", time.perf_counter())
         certificate_path = certificate_dir / f"{name}_exact_zero_witness.json"
         persisted = _atomic_json(certificate_path, exact)
         # Re-read and recheck the serialized rational witness.
@@ -1132,6 +1137,7 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
             "record_sha256": persisted["record_sha256"],
         }
     if exclusion is not None:
+        _progress(name, "exact_exclusion_persist_and_replay_start", time.perf_counter())
         exclusion_path = certificate_dir / f"{name}_exact_exclusion.json"
         persisted = _atomic_json(exclusion_path, exclusion)
         verify_exact_exclusion_certificate(problem, persisted)
@@ -1155,6 +1161,97 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
         name, "variant_complete", started, decision=decision,
         exact_attempted=bool(exact_status.get("attempted", False)))
     return record
+
+
+def _exclusion_attempt_worker(connection, args, kwargs):
+    """Same computation, supervised for wall time; no numerical changes."""
+    original_progress = globals()["_progress"]
+    def progress(variant, stage, started, **fields):
+        connection.send(("stage", {"stage": stage, **fields}))
+        original_progress(variant, stage, started, **fields)
+    globals()["_progress"] = progress
+    try:
+        connection.send(("result", _decide_variant_unbounded(*args, **kwargs)))
+    except Exception as error:
+        # Transport/re-raise errors, NEVER reinterpret them as numerical failure.
+        connection.send(("error", error))
+    finally:
+        globals()["_progress"] = original_progress
+        connection.close()
+
+
+def decide_variant(name: str, variant: dict, exact_max_rank: int,
+                   certificate_dir: Path, *, skip_exact: bool = False,
+                   exact_only_if_near_zero: bool = True,
+                   fast_first: bool = True,
+                   exact_solve_timeout_seconds: float = 300.0,
+                   require_exact_exclusion: bool = False) -> dict:
+    kwargs = dict(skip_exact=skip_exact, exact_only_if_near_zero=exact_only_if_near_zero,
+                  fast_first=fast_first, exact_solve_timeout_seconds=exact_solve_timeout_seconds,
+                  require_exact_exclusion=require_exact_exclusion)
+    args = (name, variant, exact_max_rank, certificate_dir)
+    if not require_exact_exclusion:
+        return _decide_variant_unbounded(*args, **kwargs)  # Legacy policy unchanged.
+    if not math.isfinite(exact_solve_timeout_seconds) or exact_solve_timeout_seconds <= 0:
+        raise RuntimeError("exact exclusion wall-time budget must be finite and positive")
+    if "fork" not in multiprocessing.get_all_start_methods():
+        raise RuntimeError("hard CPU exclusion watchdog requires POSIX fork; cannot silently disable it")
+    context = multiprocessing.get_context("fork")
+    receiving, sending = context.Pipe(duplex=False)
+    process = context.Process(target=_exclusion_attempt_worker, args=(sending, args, kwargs))
+    started = time.perf_counter()
+    deadline = started + exact_solve_timeout_seconds
+    stage = {"stage": "exclusion_attempt_start"}
+    try:
+        process.start()
+        sending.close()
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0 or not receiving.poll(remaining):
+                break
+            try:
+                kind, value = receiving.recv()
+            except EOFError as error:
+                raise RuntimeError(f"exclusion worker exited without result at {stage['stage']}") from error
+            # A result arriving after the deadline cannot acquire authority.
+            if time.perf_counter() >= deadline:
+                break
+            if kind == "stage":
+                stage = value
+            elif kind == "error":
+                raise value
+            elif kind == "result":
+                return value
+            else:
+                raise RuntimeError("exclusion watchdog received an invalid message")
+        # Terminate before publishing INCONCLUSIVE, including native/C work.
+        process.terminate()
+        process.join(.1)
+        if process.is_alive():
+            process.kill()
+            process.join(.1)
+        elapsed = time.perf_counter() - started
+        diagnostics = {"timeout_seconds": exact_solve_timeout_seconds,
+                       "elapsed_seconds": elapsed, "stage": stage["stage"],
+                       "last_stage_diagnostics": stage, "worker_terminated": not process.is_alive(),
+                       "scope": "entire_proposal_exclusion_reconstruction_persistence_and_replay_attempt"}
+        _progress(name, "exact_exclusion_timeout", started,
+                  timeout_stage=stage["stage"], timeout_seconds=exact_solve_timeout_seconds,
+                  worker_terminated=diagnostics["worker_terminated"])
+        return {"variant": name, "decision": INCONCLUSIVE, "reason": EXACT_EXCLUSION_TIMEOUT,
+                "generator_count": len(variant["ids"]),
+                "native_generator_count": variant["native_generator_count"],
+                "numerical_generator_count": variant["numerical_generator_count"],
+                "exact_zero_certificate": None, "exact_exclusion_certificate": None,
+                "exact_zero_certificate_status": {"verified": False, "reason": EXACT_EXCLUSION_TIMEOUT},
+                "timeout_diagnostics": diagnostics, "runtime_seconds": elapsed}
+    finally:
+        sending.close()
+        receiving.close()
+        if process.pid is not None:
+            if process.is_alive():
+                process.kill()
+            process.join(.1)
 
 
 def _capture_variant(state: dict, token: int) -> dict:
@@ -1233,11 +1330,14 @@ def _execute_benchmark_capture(manifest_path, output_path, exact_max_rank, *,
     final_status = (FEASIBLE if any(r["decision"] == FEASIBLE for r in rows) else
                     EXCLUDED if len(rows) == (1 if token_index == "4" else state["proof"]["num_tokens"])
                     and all(r["decision"] == EXCLUDED for r in rows) else INCONCLUSIVE)
+    timeouts = [r for r in rows if r.get("reason") == EXACT_EXCLUSION_TIMEOUT]
     return _atomic_json(output_path, {
         "schema": SCHEMA, "property_id": expected_property_id, "stage_label": STAGE,
         "authenticated_capture": identity, "requested_token_scope": token_index,
         "token_index_convention": "zero_based_native_tensor", "results": rows,
         "final_status": final_status, "complete_state_decision": final_status,
+        "reason": EXACT_EXCLUSION_TIMEOUT if final_status == INCONCLUSIVE and timeouts else None,
+        "timeout_diagnostics": timeouts[0]["timeout_diagnostics"] if timeouts else None,
         "decision_scope": "token_4_only" if token_index == "4" else "any_token_zero_variance",
         "interpretation": {FEASIBLE: "Captured abstract state admits a constant vector; tightening alone cannot exclude it.",
                            EXCLUDED: "Exact zero excluded only for the stated token scope; no production variance repair implemented.",

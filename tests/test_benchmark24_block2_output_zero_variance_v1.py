@@ -4,6 +4,7 @@ from fractions import Fraction
 import json
 from pathlib import Path
 import sys
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -305,3 +306,74 @@ def test_finite_near_zero_without_exact_witness_remains_inconclusive(tmp_path, m
     assert result["decision"] == D.INCONCLUSIVE
     assert result["exact_zero_certificate_status"]["status_code"] == D.EXACT_REPLAY_FAILED
     assert result["exact_zero_certificate"] is None and result["exact_exclusion_certificate"] is None
+
+
+@pytest.mark.parametrize("stage", ["bounded_least_squares_start", "exact_farkas_replay_start",
+                                  "exact_reconstruction_start", "exact_exclusion_persist_and_replay_start"])
+def test_hard_exclusion_watchdog_stops_slow_path_without_certificate(tmp_path, monkeypatch, stage):
+    def slow(*args, **kwargs):
+        D._progress(args[0], stage, time.perf_counter())
+        time.sleep(2)
+        pytest.fail("watchdog must terminate before this point")
+    monkeypatch.setattr(D, "_decide_variant_unbounded", slow)
+    variant = {"ids": ["g"], "native_generator_count": 1, "numerical_generator_count": 0}
+    started = time.perf_counter()
+    row = D.decide_variant("slow", variant, 127, tmp_path,
+                           require_exact_exclusion=True, exact_solve_timeout_seconds=.08)
+    elapsed = time.perf_counter() - started
+    assert .08 <= elapsed < .6  # Fixed bounded cleanup/scheduling allowance.
+    assert row["decision"] == D.INCONCLUSIVE and row["reason"] == D.EXACT_EXCLUSION_TIMEOUT
+    assert row["timeout_diagnostics"]["stage"] == stage
+    assert row["timeout_diagnostics"]["worker_terminated"] is True
+    assert row["exact_zero_certificate"] is None and row["exact_exclusion_certificate"] is None
+
+
+def test_timeout_writes_final_inconclusive_decision_file(capture_fixture, monkeypatch):
+    manifest, _, _ = capture_fixture
+    def slow(*args, **kwargs):
+        D._progress(args[0], "exact_farkas_replay_start", time.perf_counter())
+        time.sleep(2)
+        pytest.fail("slow exact path must be stopped")
+    monkeypatch.setattr(D, "_decide_variant_unbounded", slow)
+    output = manifest.parent / "timed_decision.json"
+    report = D.execute(manifest, output, expected_property_id=CAP.PROPERTY_ID,
+                       variant="complete_post_reduction", token_index="4",
+                       exact_solve_timeout_seconds=.08)
+    persisted = C.verified_json(output)
+    assert persisted == report
+    assert persisted["final_status"] == D.INCONCLUSIVE
+    assert persisted["reason"] == D.EXACT_EXCLUSION_TIMEOUT
+    assert persisted["timeout_diagnostics"]["elapsed_seconds"] >= .08
+    assert persisted["timeout_diagnostics"]["stage"] == "exact_farkas_replay_start"
+    assert (manifest.parent / "timed_decision.partial.json").is_file()
+
+
+def test_watchdog_does_not_swallow_programming_errors(tmp_path, monkeypatch):
+    def broken(*args, **kwargs):
+        raise AssertionError("unrelated invariant failure")
+    monkeypatch.setattr(D, "_decide_variant_unbounded", broken)
+    with pytest.raises(AssertionError, match="unrelated invariant failure"):
+        D.decide_variant("broken", {"ids": []}, 127, tmp_path,
+                         require_exact_exclusion=True, exact_solve_timeout_seconds=1)
+
+
+@pytest.mark.parametrize("slow_function,expected_stage", [
+    ("lsq_linear", "bounded_least_squares_start"),
+    ("_farkas_replay", "exact_farkas_replay_start"),
+])
+def test_actual_attempt_bounds_slow_lsq_and_exact_replay(tmp_path, monkeypatch, slow_function, expected_stage):
+    def stalled(*args, **kwargs):
+        time.sleep(2)
+        pytest.fail("stalled proposal/replay must be terminated")
+    monkeypatch.setattr(D, slow_function, stalled)
+    # Actual tiny infeasible LP, NOT a captured property or Transformer state.
+    variant = {"center": np.array([1., -1.]), "generators": np.array([[0., 0.]]),
+               "low": np.array([0.]), "high": np.array([1. if slow_function == "lsq_linear" else 0.]),
+               "ids": ["g"], "native_generator_count": 1, "numerical_generator_count": 0}
+    started = time.perf_counter()
+    row = D.decide_variant("stalled", variant, 127, tmp_path,
+                           require_exact_exclusion=True, exact_solve_timeout_seconds=.2)
+    assert time.perf_counter() - started < .8
+    assert row["decision"] == D.INCONCLUSIVE and row["reason"] == D.EXACT_EXCLUSION_TIMEOUT
+    assert row["timeout_diagnostics"]["stage"] == expected_stage
+    assert row["timeout_diagnostics"]["worker_terminated"] is True
