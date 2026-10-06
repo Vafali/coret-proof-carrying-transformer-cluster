@@ -1,0 +1,4032 @@
+{
+  "frozen_execution_source_hashes": {
+    "research_hab/coret_bounded_native_depth_graph_v1.py": "ff72b8fe24f9ecf42c352af25a9ab0b4426455fe44f93362f80b1062c98f1a95",
+    "research_hab/coret_bounded_native_execution_v1.py": "838f21a5e4015ec8ccd09f904ef86ba847a25dcb9424a874dbf33aa7d8c70595",
+    "research_hab/coret_bounded_native_production_graph_v1.py": "fd1ee8b1e4c4a633fc0860744d9a956af0b7a9c2efb57c5cec9deb9c5f1002b0",
+    "research_hab/coret_deept_depth_adapter_v1.py": "89886cc6d552ecb08d280bea7e3ae74d3009e2b63f3363c5aea18112f12f1f8e",
+    "research_hab/coret_deept_exact_standard_ln_adapter.py": "91414ab6b17b3663b4135ee27e0c5d4cc753e942bd0dfba66392ee0f3357b2fd",
+    "research_hab/coret_factorized_precise_dot_checker_v1.py": "b66ee7ad21380c7a382d46da597c50049a0a9554dc67f53e4d4ccde798e9fdfd",
+    "research_hab/coret_native_numerical_checker_v1.py": "2c3eba7f345c8e999e00e9bd9042549de1c1e68264ac6d5f8d55a04dea45edb3",
+    "research_hab/coret_native_numerical_witness_v1.py": "76dc1b89263958404e3a356dada858fdd7d05019b2f5664db8400c34925b0292",
+    "research_hab/coret_native_semantics_checker_v1.py": "516e67a9574b63229f03cb563960a502d85a22c41dbc840bd9253c9c265729f8",
+    "research_hab/coret_native_semantics_production_graph_v1.py": "e9be8e0243cb3de0132d01363f96a13ded68ee07f6391a9830ec970947340b6b",
+    "research_hab/coret_native_semantics_proof_v1.py": "496b4b9347014ab9a509a3206d4fece6d626261dcc400df147cb04a823417e7e",
+    "research_hab/coret_optimized_historical_127_v1.py": "b62494ba6230773a227f1599684faac5832442189ca555339cdb893d8179fd70",
+    "research_hab/coret_optimized_three_property_smoke_v1.py": "1471ec5203e88f548d11217e0a9eaaa565469e620d36c90fe2428319e59e26c7",
+    "research_hab/coret_production_av_checker_v1.py": "d309dc1959993be883842a93833a40c52ca143bc64ad8274ef48b1ade9e97d23",
+    "research_hab/coret_production_av_trace_v1.py": "294d59ebf6eac9b49ce29a01134aa0bcfe404e01d148aa382d5adbc0a7695134",
+    "research_hab/coret_production_block0_trace_v1.py": "d8a11780a89cee772f4566a8ab839875fb517ec671f175875e007b41fddb2755",
+    "research_hab/coret_production_prefix_checker_v1.py": "f0f1c6efef5f4ef9fb2a961bbf28d46b938e438bb1e7177361e8f46e1cce85f3",
+    "research_hab/coret_production_prefix_trace_v1.py": "c2ce497fb2154978d82d541b30936c05a1170fdad29a122c7cd5aae687204540",
+    "research_hab/coret_production_softmax_checker_v1.py": "72dd7b4aacf79a026c0d3aa3bf624300820abdc0043082129e5c66344cc6270b",
+    "research_hab/coret_production_softmax_trace_v1.py": "3aae340761b0a40b98d11f9fb4bead5f636649d106aaae0ebca0b557e07d56fb",
+    "research_hab/coret_proof_carrying_historical_127_v1.py": "eb79a2a790e0dbbbfbd26a0f487b0dce789db0c3f45192bc76fdfc342ac192c1",
+    "research_hab/coret_proof_carrying_historical_smoke_v1.py": "32a337077a691f353828e95ef5133eff36dae31bc94aaff3da2196ad2db81932",
+    "research_hab/coret_psd_layernorm_experiment_v1.py": "72f5565d7c21c8fa45a71179fca66fcce7894056c9f738abf04d14045b9a108d",
+    "research_hab/coret_rigorous_precise_dot_backend_v1.py": "9c44ed2991c5b18b34fcd8a1ff1dd37ba8d5d5e642987cdbdff160e5dfa41066",
+    "research_hab/coret_sound_fp64_block0_feasibility_v1.py": "bf5187c2a03d6168feb4bfdace804bfd9281ef8ac5ad620aeb88f688c93fe5ec",
+    "research_hab/coret_sound_reference_v1.py": "d737a8478af54642aecf4058a4da66c37263e3c7d7ea521879d8e83a792cf54b",
+    "research_hab/coret_structural_support_lifetime_v1.py": "f26a0f5453409407a06a6491966bd8f13965365669ca9e7bd68229013a065f6e",
+    "research_hab/coret_structural_support_precise_dot_v1.py": "7f1ee0b7765f2a664576dde191237c088369f78142c1ee2e821160e8d653bbd4",
+    "research_hab/coret_structural_support_tok10_lifetime_v1.py": "56fadef6ce114db877a96e73b742bfa704ef32d4c86031d7b16778038c1c04cc",
+    "research_hab/coret_structural_support_tok10_real_gate_v1.py": "cc60c60e075aa1f192dd745f89109926350be14f9e6960e68614eb24c5e16171",
+    "research_hab/coret_trace_checker_v1.py": "b205a42232f3567a49640eadda68679cacb2bf40f49dc6daa7e59b358ee3113c",
+    "research_hab/coret_trace_witness_v1.py": "f03ca9160a07bcca68b103d7c33f1a2ff9dfe42f19adc3bab1e93da8ee5e92ca",
+    "research_hab/deept_stagea_model.py": "51cd52ed2afdbc889e4c4580ff7be7e71d80252c9994a7129b07dd3cff708742",
+    "scripts/a40_fresh_common.py": "e67aa7b3b52a13ed45030ca044dd2239541e1dc3516252ad7f3157ff0cd7fc31",
+    "scripts/cluster_common.py": "ec7fa68cbff90bafef9967190ed0f764c30f2c70ceafaa5a7fffc98c2f9b31ad",
+    "scripts/run_sound_fp64_3l_campaign.py": "8181279e0a9cb95ea404c16f37eeab877abaa9431bccc05864234befeed95c4b",
+    "scripts/run_sound_fp64_finish_3l_v1.py": "f62bcac72cf38748603d3b1cc4eada4ba2a19d8ba921e1f44f759746548dc051"
+  },
+  "manifest_sha256": "46f5380d7bfacd0cc61da2938465d951fa3e72246b01a98223352510b331a338",
+  "measurement_inventory": {
+    "certificate_integrity": {
+      "available": true,
+      "not_independent_numerical_soundness": true,
+      "source": "campaign._verified_result artifact/report hashes"
+    },
+    "cpu_execution": {
+      "available": false,
+      "reason": "finish3l.execute explicitly requires CUDA"
+    },
+    "failure_stage_operator": {
+      "available": true,
+      "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+      "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+    },
+    "final_proof_status": {
+      "available": true,
+      "independently_certified_requires": "complete independent checker PASS",
+      "source": "campaign terminal_status and final_sound_lower_margin"
+    },
+    "generator_count": {
+      "available": true,
+      "source": "final_generator_count if completed/domain-failed"
+    },
+    "independent_certificate_check": {
+      "available": false,
+      "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+      "status": "NOT_AVAILABLE"
+    },
+    "numerical_diagnostics": {
+      "available": true,
+      "full_containment_checker_status": "NOT_AVAILABLE",
+      "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+    },
+    "peak_memory": {
+      "available": true,
+      "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+      "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+    },
+    "reduction_counts": {
+      "available": true,
+      "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+      "source": "certificate_report.reductions"
+    },
+    "runtime": {
+      "available": true,
+      "source": "runtime_seconds; entire property"
+    }
+  },
+  "membership_replacement_allowed": false,
+  "no_outcome_dependent_selection": true,
+  "preparation_bound_calls": 0,
+  "preparation_scientific_queries": 0,
+  "properties": [
+    {
+      "benchmark_ordinal": 22,
+      "canonical_binary_test_index": 1489,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "62fe7f10ad23da87998d6d968584ce9536d5b025899f3fa2e30587df9d4a5e46",
+      "historical_radius_rank": 16,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s001_line1794_tok05",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_lower_tertile",
+      "raw_sentence_sha256": "6aad3e6cd1996f5315a053ced6c764fc93213b91ccf7e48ab1d8d8eb9d3e3654",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 0,
+        "radius_stratum": "historical_radius_lower_tertile",
+        "selection_ordinal": 0,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s001_line1794",
+      "sentence_ordinal": 1,
+      "sequence_length": 27,
+      "sequence_length_stratum": "long_gt20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 1794,
+      "tested_radius": 0.0009637451171875001,
+      "tested_radius_hex": "0x1.f947ae147ae15p-11",
+      "token": "opera",
+      "token_id": 442,
+      "token_ids": [
+        8396,
+        18,
+        236,
+        2,
+        20,
+        442,
+        9,
+        5430,
+        46,
+        3333,
+        3,
+        1310,
+        2,
+        40,
+        12,
+        46,
+        6777,
+        3,
+        147,
+        72,
+        202,
+        1,
+        1428,
+        1462,
+        14407,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "18ce3b480112ab325cd1a51c6b3f4d883ccfbc0dbc94eb1c9a2f31932a8d6002",
+      "token_position": 5
+    },
+    {
+      "benchmark_ordinal": 13,
+      "canonical_binary_test_index": 432,
+      "clean_label": 1,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "522bc6aebbb65277a3169e31f5d1c2014fa70b7168a6c34d100f2dd870c730b9",
+      "historical_radius_rank": 63,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 1,
+      "property_id": "deept_table7_stdln3_s000_line504_tok14",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_middle_tertile",
+      "raw_sentence_sha256": "5eeb2deb7b348c6135baf15af70286ea7d9f3fb4de856a7e405502dbf5732e2e",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 0,
+        "radius_stratum": "historical_radius_middle_tertile",
+        "selection_ordinal": 1,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s000_line504",
+      "sentence_ordinal": 0,
+      "sequence_length": 20,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 504,
+      "tested_radius": 0.0011590576171875001,
+      "tested_radius_hex": "0x1.2fd70a3d70a3ep-10",
+      "token": "most",
+      "token_id": 44,
+      "token_ids": [
+        8396,
+        32,
+        395,
+        222,
+        2,
+        22,
+        1,
+        1486,
+        9,
+        2480,
+        31,
+        11,
+        4762,
+        4,
+        44,
+        122,
+        423,
+        505,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "7cb8f5105afdbb516e5bb6a62d16ee71aff54edfb2d3e99551a9361c4fe7d8ff",
+      "token_position": 14
+    },
+    {
+      "benchmark_ordinal": 87,
+      "canonical_binary_test_index": 762,
+      "clean_label": 1,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "6ed3f6d76243b4c9ed9f5a4724fe4766a1c49651f21f26250312e22b8592553f",
+      "historical_radius_rank": 106,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 1,
+      "property_id": "deept_table7_stdln3_s006_line882_tok13",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_upper_tertile",
+      "raw_sentence_sha256": "73010a65de8c56fbde1270dc4e39c5094da9664505b1180870f6f2574cbed3b6",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 0,
+        "radius_stratum": "historical_radius_upper_tertile",
+        "selection_ordinal": 2,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s006_line882",
+      "sentence_ordinal": 6,
+      "sequence_length": 16,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 882,
+      "tested_radius": 0.0013122558593749998,
+      "tested_radius_hex": "0x1.57fffffffffffp-10",
+      "token": "adventure",
+      "token_id": 440,
+      "token_ids": [
+        8396,
+        24398,
+        11023,
+        2,
+        10926,
+        22575,
+        17902,
+        22083,
+        10391,
+        29118,
+        10510,
+        715,
+        1595,
+        440,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "d1944edeeaf6a13457be5cb7e74a1ab5ca52c30056d2065c3c7032eda4e9b3af",
+      "token_position": 13
+    },
+    {
+      "benchmark_ordinal": 97,
+      "canonical_binary_test_index": 996,
+      "clean_label": 1,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "61d2be7f8acec6ee5eb3909e104ad47fe5659e570863c871d39cef852236f389",
+      "historical_radius_rank": 24,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 1,
+      "property_id": "deept_table7_stdln3_s007_line1172_tok15",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_lower_tertile",
+      "raw_sentence_sha256": "58c6a1b9647c497613a1d281c0d1b5e4b2b83ff37995278aa1c0458c35ecd89b",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 1,
+        "radius_stratum": "historical_radius_lower_tertile",
+        "selection_ordinal": 3,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s007_line1172",
+      "sentence_ordinal": 7,
+      "sequence_length": 18,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 1172,
+      "tested_radius": 0.001005859375,
+      "tested_radius_hex": "0x1.07ae147ae147bp-10",
+      "token": "basically",
+      "token_id": 6048,
+      "token_ids": [
+        8396,
+        2531,
+        10257,
+        3775,
+        1933,
+        17142,
+        917,
+        308,
+        11,
+        3,
+        5085,
+        19,
+        94,
+        10447,
+        2,
+        6048,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "a5d2f714a96b2281f7bb058f5e85dac15d599db84c93aa711a02a3f2e0c28ed8",
+      "token_position": 15
+    },
+    {
+      "benchmark_ordinal": 60,
+      "canonical_binary_test_index": 1677,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "6e937d9a79e7f1aa70fcb34ba67c5c4548e3c23b77ca131edb09df759a512ed5",
+      "historical_radius_rank": 77,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s003_line2031_tok12",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_middle_tertile",
+      "raw_sentence_sha256": "f42b19ada828aa51a372bd9a33bc08f74a7aaf4a18a439ae378f595a09e8c576",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 1,
+        "radius_stratum": "historical_radius_middle_tertile",
+        "selection_ordinal": 4,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s003_line2031",
+      "sentence_ordinal": 3,
+      "sequence_length": 17,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 2031,
+      "tested_radius": 0.0012030029296875003,
+      "tested_radius_hex": "0x1.3b5c28f5c28f7p-10",
+      "token": "of",
+      "token_id": 5,
+      "token_ids": [
+        8396,
+        59,
+        2,
+        12,
+        46,
+        6777,
+        32,
+        316,
+        13,
+        47,
+        13,
+        80,
+        5,
+        17,
+        12592,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "4fc99fcbc24fd45864c585eda68829421f6f4473a9070da7fe3bb6d195fbe405",
+      "token_position": 12
+    },
+    {
+      "benchmark_ordinal": 117,
+      "canonical_binary_test_index": 1675,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "8d0078edcf770898f5f1cb2a15ac950939a084b8bbccd57f0df6b197ca07ac2a",
+      "historical_radius_rank": 85,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s009_line2029_tok09",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_upper_tertile",
+      "raw_sentence_sha256": "19c40cd9c58c2ca7d2ef507082624f90c88bfeebaa2418fa6d0eab15aeb28e1b",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 1,
+        "radius_stratum": "historical_radius_upper_tertile",
+        "selection_ordinal": 5,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s009_line2029",
+      "sentence_ordinal": 9,
+      "sequence_length": 22,
+      "sequence_length_stratum": "long_gt20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 2029,
+      "tested_radius": 0.001243896484375,
+      "tested_radius_hex": "0x1.46147ae147ae1p-10",
+      "token": "from",
+      "token_id": 36,
+      "token_ids": [
+        8396,
+        494,
+        1347,
+        138,
+        328,
+        1,
+        288,
+        1842,
+        454,
+        36,
+        2248,
+        23820,
+        7,
+        6166,
+        1970,
+        11,
+        1,
+        1098,
+        1933,
+        11592,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "6d25c5fec0e93f7f825b84b851cca458e496435234e4fceded7e6d0e005e9757",
+      "token_position": 9
+    },
+    {
+      "benchmark_ordinal": 64,
+      "canonical_binary_test_index": 190,
+      "clean_label": 1,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "5f6d6592bbca90ec7a7f253a4ade44aaf3d50b898bbc3f6d128b027dd7fce793",
+      "historical_radius_rank": 1,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 1,
+      "property_id": "deept_table7_stdln3_s004_line216_tok01",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_lower_tertile",
+      "raw_sentence_sha256": "2443c2cbc6733062b7e24a1a2d09d6c31c7aef236bcd9106cef6e2d6e9536559",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 2,
+        "radius_stratum": "historical_radius_lower_tertile",
+        "selection_ordinal": 6,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s004_line216",
+      "sentence_ordinal": 4,
+      "sequence_length": 12,
+      "sequence_length_stratum": "short_le12",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 216,
+      "tested_radius": 0.0008178710937500001,
+      "tested_radius_hex": "0x1.acccccccccccep-11",
+      "token": "daring",
+      "token_id": 1590,
+      "token_ids": [
+        8396,
+        1590,
+        2,
+        1035,
+        4,
+        7613,
+        10257,
+        175,
+        7,
+        874,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "ca582cdc52452d01210a28d45f14af39e38fd3435118fa49d69693beab2589b0",
+      "token_position": 1
+    },
+    {
+      "benchmark_ordinal": 79,
+      "canonical_binary_test_index": 1599,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "c00929df9be19c32b0095e6656c87f198e34381a29f3cf6a0d4bff823ff864cf",
+      "historical_radius_rank": 62,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s005_line1931_tok10",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_middle_tertile",
+      "raw_sentence_sha256": "41a19d7e9b7db8820b6a4a9c6787c9355682503b25628d6524bd8bdf31375f20",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 2,
+        "radius_stratum": "historical_radius_middle_tertile",
+        "selection_ordinal": 7,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s005_line1931",
+      "sentence_ordinal": 5,
+      "sequence_length": 16,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 1931,
+      "tested_radius": 0.0011572265625,
+      "tested_radius_hex": "0x1.2f5c28f5c28f6p-10",
+      "token": "thing",
+      "token_id": 270,
+      "token_ids": [
+        8396,
+        56,
+        6806,
+        1,
+        950,
+        10478,
+        7648,
+        5,
+        59,
+        120,
+        270,
+        14,
+        5303,
+        4943,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "370f9d49c485a797fbb271f4e6a917ff92c7d42f049d9c7dd5b0301cc363d95d",
+      "token_position": 10
+    },
+    {
+      "benchmark_ordinal": 48,
+      "canonical_binary_test_index": 1229,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "1c098c182930e1b54182bf399d035a0fcde12125241696a404f68136993934a8",
+      "historical_radius_rank": 101,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s002_line1468_tok06",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_upper_tertile",
+      "raw_sentence_sha256": "fa91884d26c057bd121c26f6cbf8ff9c57c2b2472ee86594c00c11cf1fc30b84",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 2,
+        "radius_stratum": "historical_radius_upper_tertile",
+        "selection_ordinal": 8,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s002_line1468",
+      "sentence_ordinal": 2,
+      "sequence_length": 8,
+      "sequence_length_stratum": "short_le12",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 1468,
+      "tested_radius": 0.0013000488281249998,
+      "tested_radius_hex": "0x1.54cccccccccccp-10",
+      "token": ".",
+      "token_id": 6,
+      "token_ids": [
+        8396,
+        188,
+        395,
+        490,
+        9,
+        3729,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "891df0716cfc3c64c8581d0f774c7f628525111d413e8bb391dec13a1ddc1c9e",
+      "token_position": 6
+    },
+    {
+      "benchmark_ordinal": 43,
+      "canonical_binary_test_index": 1229,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "301980b08b4424810720146cc7f6dcf24c9107be417b00c7af2320aeee531653",
+      "historical_radius_rank": 4,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s002_line1468_tok01",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_lower_tertile",
+      "raw_sentence_sha256": "fa91884d26c057bd121c26f6cbf8ff9c57c2b2472ee86594c00c11cf1fc30b84",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 3,
+        "radius_stratum": "historical_radius_lower_tertile",
+        "selection_ordinal": 9,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s002_line1468",
+      "sentence_ordinal": 2,
+      "sequence_length": 8,
+      "sequence_length_stratum": "short_le12",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 1468,
+      "tested_radius": 0.0008825683593749998,
+      "tested_radius_hex": "0x1.ceb851eb851eap-11",
+      "token": "almost",
+      "token_id": 188,
+      "token_ids": [
+        8396,
+        188,
+        395,
+        490,
+        9,
+        3729,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "891df0716cfc3c64c8581d0f774c7f628525111d413e8bb391dec13a1ddc1c9e",
+      "token_position": 1
+    },
+    {
+      "benchmark_ordinal": 70,
+      "canonical_binary_test_index": 190,
+      "clean_label": 1,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "95b63cc53b0b4159246f1d772bac6dee2455d73922e3001f5f2dd03b5614b03b",
+      "historical_radius_rank": 58,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 1,
+      "property_id": "deept_table7_stdln3_s004_line216_tok09",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_middle_tertile",
+      "raw_sentence_sha256": "2443c2cbc6733062b7e24a1a2d09d6c31c7aef236bcd9106cef6e2d6e9536559",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 3,
+        "radius_stratum": "historical_radius_middle_tertile",
+        "selection_ordinal": 10,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s004_line216",
+      "sentence_ordinal": 4,
+      "sequence_length": 12,
+      "sequence_length_stratum": "short_le12",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 216,
+      "tested_radius": 0.0011517333984375003,
+      "tested_radius_hex": "0x1.2deb851eb8520p-10",
+      "token": "forget",
+      "token_id": 874,
+      "token_ids": [
+        8396,
+        1590,
+        2,
+        1035,
+        4,
+        7613,
+        10257,
+        175,
+        7,
+        874,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "ca582cdc52452d01210a28d45f14af39e38fd3435118fa49d69693beab2589b0",
+      "token_position": 9
+    },
+    {
+      "benchmark_ordinal": 42,
+      "canonical_binary_test_index": 1489,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "8d02bf25086fc28cdffe2a4830b36cb3a1bdee853ea561fd85f06df51180ad7c",
+      "historical_radius_rank": 121,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s001_line1794_tok25",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_upper_tertile",
+      "raw_sentence_sha256": "6aad3e6cd1996f5315a053ced6c764fc93213b91ccf7e48ab1d8d8eb9d3e3654",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 3,
+        "radius_stratum": "historical_radius_upper_tertile",
+        "selection_ordinal": 11,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s001_line1794",
+      "sentence_ordinal": 1,
+      "sequence_length": 27,
+      "sequence_length_stratum": "long_gt20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 1794,
+      "tested_radius": 0.001397705078125,
+      "tested_radius_hex": "0x1.6e66666666666p-10",
+      "token": ".",
+      "token_id": 6,
+      "token_ids": [
+        8396,
+        18,
+        236,
+        2,
+        20,
+        442,
+        9,
+        5430,
+        46,
+        3333,
+        3,
+        1310,
+        2,
+        40,
+        12,
+        46,
+        6777,
+        3,
+        147,
+        72,
+        202,
+        1,
+        1428,
+        1462,
+        14407,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "18ce3b480112ab325cd1a51c6b3f4d883ccfbc0dbc94eb1c9a2f31932a8d6002",
+      "token_position": 25
+    },
+    {
+      "benchmark_ordinal": 49,
+      "canonical_binary_test_index": 1677,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "0f0fbdbeb135a5dd89b1f04ad5acc9973377fa19e844462975f38f07b4025733",
+      "historical_radius_rank": 13,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s003_line2031_tok01",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_lower_tertile",
+      "raw_sentence_sha256": "f42b19ada828aa51a372bd9a33bc08f74a7aaf4a18a439ae378f595a09e8c576",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 4,
+        "radius_stratum": "historical_radius_lower_tertile",
+        "selection_ordinal": 12,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s003_line2031",
+      "sentence_ordinal": 3,
+      "sequence_length": 17,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 2031,
+      "tested_radius": 0.0009405517578124999,
+      "tested_radius_hex": "0x1.ed1eb851eb851p-11",
+      "token": "no",
+      "token_id": 59,
+      "token_ids": [
+        8396,
+        59,
+        2,
+        12,
+        46,
+        6777,
+        32,
+        316,
+        13,
+        47,
+        13,
+        80,
+        5,
+        17,
+        12592,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "4fc99fcbc24fd45864c585eda68829421f6f4473a9070da7fe3bb6d195fbe405",
+      "token_position": 1
+    },
+    {
+      "benchmark_ordinal": 91,
+      "canonical_binary_test_index": 996,
+      "clean_label": 1,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "2710fe88ae361609efdc34e1d3e9d8e72d20aa39553e111619cc5d509b619c7d",
+      "historical_radius_rank": 56,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 1,
+      "property_id": "deept_table7_stdln3_s007_line1172_tok07",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_middle_tertile",
+      "raw_sentence_sha256": "58c6a1b9647c497613a1d281c0d1b5e4b2b83ff37995278aa1c0458c35ecd89b",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 4,
+        "radius_stratum": "historical_radius_middle_tertile",
+        "selection_ordinal": 13,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s007_line1172",
+      "sentence_ordinal": 7,
+      "sequence_length": 18,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 1172,
+      "tested_radius": 0.0011499023437500002,
+      "tested_radius_hex": "0x1.2d70a3d70a3d8p-10",
+      "token": "place",
+      "token_id": 308,
+      "token_ids": [
+        8396,
+        2531,
+        10257,
+        3775,
+        1933,
+        17142,
+        917,
+        308,
+        11,
+        3,
+        5085,
+        19,
+        94,
+        10447,
+        2,
+        6048,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "a5d2f714a96b2281f7bb058f5e85dac15d599db84c93aa711a02a3f2e0c28ed8",
+      "token_position": 7
+    },
+    {
+      "benchmark_ordinal": 83,
+      "canonical_binary_test_index": 1599,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "6434bcf54b89dee5a3dd5675251ba38368dcce83cfc3ced3c05e16fb0da071d3",
+      "historical_radius_rank": 114,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s005_line1931_tok14",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_upper_tertile",
+      "raw_sentence_sha256": "41a19d7e9b7db8820b6a4a9c6787c9355682503b25628d6524bd8bdf31375f20",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 4,
+        "radius_stratum": "historical_radius_upper_tertile",
+        "selection_ordinal": 14,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s005_line1931",
+      "sentence_ordinal": 5,
+      "sequence_length": 16,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 1931,
+      "tested_radius": 0.001341552734375,
+      "tested_radius_hex": "0x1.5fae147ae147bp-10",
+      "token": ".",
+      "token_id": 6,
+      "token_ids": [
+        8396,
+        56,
+        6806,
+        1,
+        950,
+        10478,
+        7648,
+        5,
+        59,
+        120,
+        270,
+        14,
+        5303,
+        4943,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "370f9d49c485a797fbb271f4e6a917ff92c7d42f049d9c7dd5b0301cc363d95d",
+      "token_position": 14
+    },
+    {
+      "benchmark_ordinal": 0,
+      "canonical_binary_test_index": 432,
+      "clean_label": 1,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "63e20b3525ffdb80997018ebbfa3260a32d5313a00996eebca076d20ff21e44b",
+      "historical_radius_rank": 18,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 1,
+      "property_id": "deept_table7_stdln3_s000_line504_tok01",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_lower_tertile",
+      "raw_sentence_sha256": "5eeb2deb7b348c6135baf15af70286ea7d9f3fb4de856a7e405502dbf5732e2e",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 5,
+        "radius_stratum": "historical_radius_lower_tertile",
+        "selection_ordinal": 15,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s000_line504",
+      "sentence_ordinal": 0,
+      "sequence_length": 20,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 504,
+      "tested_radius": 0.000968017578125,
+      "tested_radius_hex": "0x1.fb851eb851eb8p-11",
+      "token": "not",
+      "token_id": 32,
+      "token_ids": [
+        8396,
+        32,
+        395,
+        222,
+        2,
+        22,
+        1,
+        1486,
+        9,
+        2480,
+        31,
+        11,
+        4762,
+        4,
+        44,
+        122,
+        423,
+        505,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "7cb8f5105afdbb516e5bb6a62d16ee71aff54edfb2d3e99551a9361c4fe7d8ff",
+      "token_position": 1
+    },
+    {
+      "benchmark_ordinal": 122,
+      "canonical_binary_test_index": 1675,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "b23775dbda0ba6b7fb2fc88726f8267cf62be7b6a6dfcf3a00003e148fa1e588",
+      "historical_radius_rank": 81,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s009_line2029_tok14",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_middle_tertile",
+      "raw_sentence_sha256": "19c40cd9c58c2ca7d2ef507082624f90c88bfeebaa2418fa6d0eab15aeb28e1b",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 5,
+        "radius_stratum": "historical_radius_middle_tertile",
+        "selection_ordinal": 16,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s009_line2029",
+      "sentence_ordinal": 9,
+      "sequence_length": 22,
+      "sequence_length_stratum": "long_gt20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 2029,
+      "tested_radius": 0.0012268066406250003,
+      "tested_radius_hex": "0x1.419999999999bp-10",
+      "token": "eastwood",
+      "token_id": 1970,
+      "token_ids": [
+        8396,
+        494,
+        1347,
+        138,
+        328,
+        1,
+        288,
+        1842,
+        454,
+        36,
+        2248,
+        23820,
+        7,
+        6166,
+        1970,
+        11,
+        1,
+        1098,
+        1933,
+        11592,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "6d25c5fec0e93f7f825b84b851cca458e496435234e4fceded7e6d0e005e9757",
+      "token_position": 14
+    },
+    {
+      "benchmark_ordinal": 84,
+      "canonical_binary_test_index": 762,
+      "clean_label": 1,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "b15095b283a2d0b0a012b42836f0cc8bc1c9236df601a7e3a2a67f360698a7f6",
+      "historical_radius_rank": 117,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 1,
+      "property_id": "deept_table7_stdln3_s006_line882_tok03",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_upper_tertile",
+      "raw_sentence_sha256": "73010a65de8c56fbde1270dc4e39c5094da9664505b1180870f6f2574cbed3b6",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 5,
+        "radius_stratum": "historical_radius_upper_tertile",
+        "selection_ordinal": 17,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s006_line882",
+      "sentence_ordinal": 6,
+      "sequence_length": 16,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 882,
+      "tested_radius": 0.001361083984375,
+      "tested_radius_hex": "0x1.64ccccccccccdp-10",
+      "token": ",",
+      "token_id": 2,
+      "token_ids": [
+        8396,
+        24398,
+        11023,
+        2,
+        10926,
+        22575,
+        17902,
+        22083,
+        10391,
+        29118,
+        10510,
+        715,
+        1595,
+        440,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "d1944edeeaf6a13457be5cb7e74a1ab5ca52c30056d2065c3c7032eda4e9b3af",
+      "token_position": 3
+    },
+    {
+      "benchmark_ordinal": 73,
+      "canonical_binary_test_index": 1599,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "c3b65cb5feadbe2c41429f1bc21b323217db4d42da0ad1b9654e9823de303e28",
+      "historical_radius_rank": 12,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s005_line1931_tok02",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_lower_tertile",
+      "raw_sentence_sha256": "41a19d7e9b7db8820b6a4a9c6787c9355682503b25628d6524bd8bdf31375f20",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 6,
+        "radius_stratum": "historical_radius_lower_tertile",
+        "selection_ordinal": 18,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s005_line1931",
+      "sentence_ordinal": 5,
+      "sequence_length": 16,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 1931,
+      "tested_radius": 0.0009387207031249999,
+      "tested_radius_hex": "0x1.ec28f5c28f5c2p-11",
+      "token": "watched",
+      "token_id": 6806,
+      "token_ids": [
+        8396,
+        56,
+        6806,
+        1,
+        950,
+        10478,
+        7648,
+        5,
+        59,
+        120,
+        270,
+        14,
+        5303,
+        4943,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "370f9d49c485a797fbb271f4e6a917ff92c7d42f049d9c7dd5b0301cc363d95d",
+      "token_position": 2
+    },
+    {
+      "benchmark_ordinal": 33,
+      "canonical_binary_test_index": 1489,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "f974e86099226d266db0a76468a68f8e9a2f94c380e93a6717b652bad4ff6d6f",
+      "historical_radius_rank": 75,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s001_line1794_tok16",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_middle_tertile",
+      "raw_sentence_sha256": "6aad3e6cd1996f5315a053ced6c764fc93213b91ccf7e48ab1d8d8eb9d3e3654",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 6,
+        "radius_stratum": "historical_radius_middle_tertile",
+        "selection_ordinal": 19,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s001_line1794",
+      "sentence_ordinal": 1,
+      "sequence_length": 27,
+      "sequence_length_stratum": "long_gt20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 1794,
+      "tested_radius": 0.0011920166015625,
+      "tested_radius_hex": "0x1.387ae147ae148p-10",
+      "token": "s",
+      "token_id": 6777,
+      "token_ids": [
+        8396,
+        18,
+        236,
+        2,
+        20,
+        442,
+        9,
+        5430,
+        46,
+        3333,
+        3,
+        1310,
+        2,
+        40,
+        12,
+        46,
+        6777,
+        3,
+        147,
+        72,
+        202,
+        1,
+        1428,
+        1462,
+        14407,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "18ce3b480112ab325cd1a51c6b3f4d883ccfbc0dbc94eb1c9a2f31932a8d6002",
+      "token_position": 16
+    },
+    {
+      "benchmark_ordinal": 67,
+      "canonical_binary_test_index": 190,
+      "clean_label": 1,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "ec043cce5dffdce9d936db67f03a57e5e6efa80fb349ad12bb369d5e7896bd84",
+      "historical_radius_rank": 93,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 1,
+      "property_id": "deept_table7_stdln3_s004_line216_tok04",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_upper_tertile",
+      "raw_sentence_sha256": "2443c2cbc6733062b7e24a1a2d09d6c31c7aef236bcd9106cef6e2d6e9536559",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 6,
+        "radius_stratum": "historical_radius_upper_tertile",
+        "selection_ordinal": 20,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s004_line216",
+      "sentence_ordinal": 4,
+      "sequence_length": 12,
+      "sequence_length_stratum": "short_le12",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 216,
+      "tested_radius": 0.0012731933593749997,
+      "tested_radius_hex": "0x1.4dc28f5c28f5bp-10",
+      "token": "and",
+      "token_id": 4,
+      "token_ids": [
+        8396,
+        1590,
+        2,
+        1035,
+        4,
+        7613,
+        10257,
+        175,
+        7,
+        874,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "ca582cdc52452d01210a28d45f14af39e38fd3435118fa49d69693beab2589b0",
+      "token_position": 4
+    },
+    {
+      "benchmark_ordinal": 109,
+      "canonical_binary_test_index": 1675,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "24db2f7b535aecbec95055257b3bc5c494fd163ab83e89f80449775170e4fc8b",
+      "historical_radius_rank": 8,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s009_line2029_tok01",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_lower_tertile",
+      "raw_sentence_sha256": "19c40cd9c58c2ca7d2ef507082624f90c88bfeebaa2418fa6d0eab15aeb28e1b",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 7,
+        "radius_stratum": "historical_radius_lower_tertile",
+        "selection_ordinal": 21,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s009_line2029",
+      "sentence_ordinal": 9,
+      "sequence_length": 22,
+      "sequence_length_stratum": "long_gt20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 2029,
+      "tested_radius": 0.0009210205078124999,
+      "tested_radius_hex": "0x1.e2e147ae147adp-11",
+      "token": "de",
+      "token_id": 494,
+      "token_ids": [
+        8396,
+        494,
+        1347,
+        138,
+        328,
+        1,
+        288,
+        1842,
+        454,
+        36,
+        2248,
+        23820,
+        7,
+        6166,
+        1970,
+        11,
+        1,
+        1098,
+        1933,
+        11592,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "6d25c5fec0e93f7f825b84b851cca458e496435234e4fceded7e6d0e005e9757",
+      "token_position": 1
+    },
+    {
+      "benchmark_ordinal": 85,
+      "canonical_binary_test_index": 762,
+      "clean_label": 1,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "1b149d5be3055cffb5da61e1dfb22b27e4138ab11f2ecae54d8b97ed0ba980b2",
+      "historical_radius_rank": 61,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 1,
+      "property_id": "deept_table7_stdln3_s006_line882_tok11",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_middle_tertile",
+      "raw_sentence_sha256": "73010a65de8c56fbde1270dc4e39c5094da9664505b1180870f6f2574cbed3b6",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 7,
+        "radius_stratum": "historical_radius_middle_tertile",
+        "selection_ordinal": 22,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s006_line882",
+      "sentence_ordinal": 6,
+      "sequence_length": 16,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 882,
+      "tested_radius": 0.00115478515625,
+      "tested_radius_hex": "0x1.2eb851eb851ecp-10",
+      "token": "animated",
+      "token_id": 715,
+      "token_ids": [
+        8396,
+        24398,
+        11023,
+        2,
+        10926,
+        22575,
+        17902,
+        22083,
+        10391,
+        29118,
+        10510,
+        715,
+        1595,
+        440,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "d1944edeeaf6a13457be5cb7e74a1ab5ca52c30056d2065c3c7032eda4e9b3af",
+      "token_position": 11
+    },
+    {
+      "benchmark_ordinal": 56,
+      "canonical_binary_test_index": 1677,
+      "clean_label": 0,
+      "frozen_artifact_identifiers": {
+        "DeepT_positions": {
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+          "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+        },
+        "dataset_member": "data/sst/test.txt",
+        "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+        "model": {
+          "checkpoint": {
+            "byte_count": 17231984,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+            "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+          },
+          "config": {
+            "byte_count": 338,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+            "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+          },
+          "configuration": {
+            "attention_probs_dropout_prob": 0.1,
+            "hidden_act": "relu",
+            "hidden_dropout_prob": 0.1,
+            "hidden_size": 128,
+            "initializer_range": 0.02,
+            "intermediate_size": 128,
+            "layer_norm": "standard",
+            "max_position_embeddings": 512,
+            "num_attention_heads": 4,
+            "num_hidden_layers": 3,
+            "type_vocab_size": 2,
+            "vocab_size": 30629
+          },
+          "depth": 3,
+          "vocab": {
+            "byte_count": 232496,
+            "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+            "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+          }
+        },
+        "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+        "production_manifest": {
+          "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+          "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+          "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+        },
+        "scientific_manifest": {
+          "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+          "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+          "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+        },
+        "threat_model": {
+          "norm_p": 100,
+          "perturbed_tokens": 1,
+          "single_token_embedding_Linf": true,
+          "source_dimension": 128
+        }
+      },
+      "historical_property_row_sha256": "2481427f6be97771061fe9c88c9dc4647ea5809f400883d13fd4ce7aa6bf749a",
+      "historical_radius_rank": 103,
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "nominal_prediction": 0,
+      "property_id": "deept_table7_stdln3_s003_line2031_tok08",
+      "radius_source": "cached_DeepT_reference.certified_lower_endpoint_binary64",
+      "radius_stratum": "historical_radius_upper_tertile",
+      "raw_sentence_sha256": "f42b19ada828aa51a372bd9a33bc08f74a7aaf4a18a439ae378f595a09e8c576",
+      "selection_rationale": {
+        "algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+        "completion_guard": "exact discrete remaining-quota feasibility, metadata only",
+        "radius_round": 7,
+        "radius_stratum": "historical_radius_upper_tertile",
+        "selection_ordinal": 23,
+        "sentence_quota": "2 or 3 per unique raw sentence; 9 sentences total",
+        "tie_break": "SHA256(schema + ':' + property_id), then historical ordinal",
+        "token_diversity": "prefer farthest normalized position within sentence, then least repeated position globally"
+      },
+      "sentence_id": "deept_table7_stdln3_s003_line2031",
+      "sentence_ordinal": 3,
+      "sequence_length": 17,
+      "sequence_length_stratum": "medium_13to20",
+      "source_dimension": 128,
+      "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+      "source_test_line": 2031,
+      "tested_radius": 0.00130126953125,
+      "tested_radius_hex": "0x1.551eb851eb852p-10",
+      "token": "as",
+      "token_id": 13,
+      "token_ids": [
+        8396,
+        59,
+        2,
+        12,
+        46,
+        6777,
+        32,
+        316,
+        13,
+        47,
+        13,
+        80,
+        5,
+        17,
+        12592,
+        6,
+        8397
+      ],
+      "token_ids_sha256": "4fc99fcbc24fd45864c585eda68829421f6f4473a9070da7fe3bb6d195fbe405",
+      "token_position": 8
+    }
+  ],
+  "property_count": 24,
+  "radius_policy": "unchanged historical DeepT candidate, one evaluation, no shrink/search",
+  "schema": "CORET_PREREGISTERED_TRANSFORMER_BENCHMARK24_V1",
+  "selection_algorithm": "historical_radius_tertiles_balanced_sentences_spaced_tokens_v1",
+  "selection_input_whitelist": [
+    "property_id",
+    "benchmark_ordinal",
+    "sentence_id",
+    "sentence_ordinal",
+    "source_test_line",
+    "canonical_binary_test_index",
+    "raw_sentence_sha256",
+    "sequence_length",
+    "source_dimension",
+    "token_position",
+    "token",
+    "token_id",
+    "clean_label",
+    "nominal_prediction",
+    "cached_DeepT_reference.certified_lower_endpoint_binary64"
+  ],
+  "selection_order": "low/middle/high historical radius rank tertile, 8 rounds",
+  "source_artifacts": {
+    "DeepT_positions": {
+      "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl",
+      "sha256": "67e80d74cf83e5f810726405a6f6f0cf9928f4dda84d7f87decf59f354c8181d"
+    },
+    "dataset_member": "data/sst/test.txt",
+    "dataset_sha256": "6e54806dee95cf80cd918e7dfb3f6770f6df24bf826f289a4d1f709e1c8f6761",
+    "model": {
+      "checkpoint": {
+        "byte_count": 17231984,
+        "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/pytorch_model.bin",
+        "sha256": "27ae76c19331bc4d83c2226f9af84650d1ca714c9d0f5f38c1439c620eecda71"
+      },
+      "config": {
+        "byte_count": 338,
+        "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/config.json",
+        "sha256": "42da21bb7e1a78fd2af5a8a91eac57f68dc7288640936f9a2a45947d71e19523"
+      },
+      "configuration": {
+        "attention_probs_dropout_prob": 0.1,
+        "hidden_act": "relu",
+        "hidden_dropout_prob": 0.1,
+        "hidden_size": 128,
+        "initializer_range": 0.02,
+        "intermediate_size": 128,
+        "layer_norm": "standard",
+        "max_position_embeddings": 512,
+        "num_attention_heads": 4,
+        "num_hidden_layers": 3,
+        "type_vocab_size": 2,
+        "vocab_size": 30629
+      },
+      "depth": 3,
+      "vocab": {
+        "byte_count": 232496,
+        "git_path": "Robustness-Verification-for-Transformers/sst_bert_standard_layer_norm_3/ckpt-5/vocab.txt",
+        "sha256": "2f3c38a1bb9b81a7e6296059d85ff4d9d494b37bb2914297ed103d959c4bd793"
+      }
+    },
+    "pinned_DeepT_revision": "16ffe4075f1f8a7c87fa2a187d8c46cfd51e07bf",
+    "production_manifest": {
+      "canonical_sha256": "cd1375408818c8fb93a2f227d31229990d62034dc4997467fbc013cc1eb94ab2",
+      "relative_path": "payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json",
+      "sha256": "9abb9fe6b16f7491b8c8604e35337229fcbbe58d0c23aafda097b8abfb0a98b2"
+    },
+    "scientific_manifest": {
+      "canonical_sha256": "7e4b2fea94424e554f07272aa8a246da7cda1212be83af57bbcdae7c870ed9dd",
+      "relative_path": "payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json",
+      "sha256": "97fbf249b4c1993facc552c743774d1697565317470481a7602bd0f96c18045b"
+    },
+    "threat_model": {
+      "norm_p": 100,
+      "perturbed_tokens": 1,
+      "single_token_embedding_Linf": true,
+      "source_dimension": 128
+    }
+  },
+  "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+  "source_property_count": 127
+}

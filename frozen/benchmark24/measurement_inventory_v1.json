@@ -1,0 +1,1739 @@
+{
+  "bound_calls": 0,
+  "cuda_calls": 0,
+  "manifest_sha256": "46f5380d7bfacd0cc61da2938465d951fa3e72246b01a98223352510b331a338",
+  "properties": [
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s001_line1794_tok05",
+      "tested_radius": 0.0009637451171875001
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s000_line504_tok14",
+      "tested_radius": 0.0011590576171875001
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s006_line882_tok13",
+      "tested_radius": 0.0013122558593749998
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s007_line1172_tok15",
+      "tested_radius": 0.001005859375
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s003_line2031_tok12",
+      "tested_radius": 0.0012030029296875003
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s009_line2029_tok09",
+      "tested_radius": 0.001243896484375
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s004_line216_tok01",
+      "tested_radius": 0.0008178710937500001
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s005_line1931_tok10",
+      "tested_radius": 0.0011572265625
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s002_line1468_tok06",
+      "tested_radius": 0.0013000488281249998
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s002_line1468_tok01",
+      "tested_radius": 0.0008825683593749998
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s004_line216_tok09",
+      "tested_radius": 0.0011517333984375003
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s001_line1794_tok25",
+      "tested_radius": 0.001397705078125
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s003_line2031_tok01",
+      "tested_radius": 0.0009405517578124999
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s007_line1172_tok07",
+      "tested_radius": 0.0011499023437500002
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s005_line1931_tok14",
+      "tested_radius": 0.001341552734375
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s000_line504_tok01",
+      "tested_radius": 0.000968017578125
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s009_line2029_tok14",
+      "tested_radius": 0.0012268066406250003
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s006_line882_tok03",
+      "tested_radius": 0.001361083984375
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s005_line1931_tok02",
+      "tested_radius": 0.0009387207031249999
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s001_line1794_tok16",
+      "tested_radius": 0.0011920166015625
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s004_line216_tok04",
+      "tested_radius": 0.0012731933593749997
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s009_line2029_tok01",
+      "tested_radius": 0.0009210205078124999
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s006_line882_tok11",
+      "tested_radius": 0.00115478515625
+    },
+    {
+      "benchmark_outcome": "NOT_RUN",
+      "input_errors": [
+        {
+          "artifact": "production_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_optimized_historical_127_v1_20260924/coret_optimized_historical_127_manifest_v2.json"
+        },
+        {
+          "artifact": "scientific_manifest",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/coret_deept_paper_benchmark_execution_manifest_v5.json"
+        },
+        {
+          "artifact": "DeepT_positions",
+          "kind": "FROZEN_ARTIFACT_MISSING",
+          "path": "/home/vafali_ubuntu/coret-proof-carrying-transformer-cluster/runtime_inputs/payload/research_hab/results/coret_deept_paper_benchmark_v5_20260917/deept_positions_v5.jsonl"
+        }
+      ],
+      "input_readiness": "MISSING_OR_CORRUPT_ARTIFACTS",
+      "measurement_inventory": {
+        "certificate_integrity": {
+          "available": true,
+          "not_independent_numerical_soundness": true,
+          "source": "campaign._verified_result artifact/report hashes"
+        },
+        "cpu_execution": {
+          "available": false,
+          "reason": "finish3l.execute explicitly requires CUDA"
+        },
+        "failure_stage_operator": {
+          "available": true,
+          "limitation": "non-domain Block2 exceptions may identify only block2_to_margin",
+          "source": "failure_stage/reason; domain_failure_diagnostic when emitted"
+        },
+        "final_proof_status": {
+          "available": true,
+          "independently_certified_requires": "complete independent checker PASS",
+          "source": "campaign terminal_status and final_sound_lower_margin"
+        },
+        "generator_count": {
+          "available": true,
+          "source": "final_generator_count if completed/domain-failed"
+        },
+        "independent_certificate_check": {
+          "available": false,
+          "reason": "current complete sound-FP64 path emits integrity/support checks and optional MPFR spots, not an independent complete-graph numerical verdict",
+          "status": "NOT_AVAILABLE"
+        },
+        "numerical_diagnostics": {
+          "available": true,
+          "full_containment_checker_status": "NOT_AVAILABLE",
+          "source": "numerical_widening, max_numerical_native_ratio, report.stages/MPFR spots if emitted"
+        },
+        "peak_memory": {
+          "available": true,
+          "scope": "GPU peak generally Block2-to-margin only; CPU RSS is process lifetime; unavailable values stay null",
+          "source": "peak_gpu_allocated/reserved_bytes and peak_cpu_rss_bytes"
+        },
+        "reduction_counts": {
+          "available": true,
+          "scope": "Block2-to-head only; earlier per-stage reports are discarded by existing campaign",
+          "source": "certificate_report.reductions"
+        },
+        "runtime": {
+          "available": true,
+          "source": "runtime_seconds; entire property"
+        }
+      },
+      "property_id": "deept_table7_stdln3_s003_line2031_tok08",
+      "tested_radius": 0.00130126953125
+    }
+  ],
+  "property_count": 24,
+  "record_sha256": "70c08aca6830021cf4f20129ffbeef6485c5d503fc1116b7db14045c0ea4900a",
+  "schema": "CORET_BENCHMARK24_MEASUREMENT_INVENTORY_V1",
+  "scientific_queries": 0
+}
