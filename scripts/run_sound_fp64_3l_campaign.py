@@ -55,6 +55,10 @@ def _verified_result(path: Path) -> dict:
     result = cluster_common.verified_json(path)
     if result.get("schema") != RESULT_SCHEMA:
         raise RuntimeError(f"campaign result schema differs: {path}")
+    if result.get("layernorm_separator_witnesses_sha256"):
+        witness_path = path.parent / "layernorm_separator_witnesses.pt"
+        if not witness_path.is_file() or cluster_common.sha256(witness_path) != result["layernorm_separator_witnesses_sha256"]:
+            raise RuntimeError(f"LayerNorm separator archive identity differs: {path}")
     artifact = path.parent / "certificate.pt"
     report = path.parent / "certificate_report.json"
     if result.get("terminal_status") == "COMPLETE":
@@ -372,15 +376,18 @@ def _run_stage(name: str, function, inputs: tuple, output: Path,
     result = function(*inputs, output, device=device)
     if not output.is_file():
         raise RuntimeError(f"{name}: stage artifact missing")
-    sound._load_artifact(output, schema)
+    payload = sound._load_artifact(output, schema)
     report = result.get("report", result)
     if int(report.get("generic_fallback_count", 0)) != 0:
         raise RuntimeError(f"{name}: generic fallback reached")
-    return {
+    result = {
         "name": name, "output_schema": schema,
         "output_sha256": cluster_common.sha256(output),
         "generic_fallback_count": 0,
     }
+    if payload.get("separating_variance_witnesses"):
+        result["_separating_variance_witnesses"] = payload["separating_variance_witnesses"]
+    return result
 
 
 def execute_property(row: dict, result_root: Path, device: str) -> dict:
@@ -401,6 +408,7 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
         shutil.rmtree(workspace)
     workspace.mkdir(parents=True)
     stage = "initialization"
+    separator_witnesses = []
     started = time.perf_counter()
     try:
         with _property_source(row, candidate):
@@ -413,6 +421,9 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
             stage = "block0"
             result = sound.export_block0_state(
                 paths[0], device=device, run_representative_mpfr=False)
+            block0_payload = sound._load_artifact(paths[0], "CORET_SOUND_FP64_BLOCK0_STATE_V1")
+            separator_witnesses.extend(block0_payload.get("separating_variance_witnesses", []))
+            del block0_payload
             stages.append({
                 "name": stage,
                 "output_schema": "CORET_SOUND_FP64_BLOCK0_STATE_V1",
@@ -455,8 +466,9 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
                  (paths[12],), paths[13], finish3l.INPUT_SCHEMA),
             ]
             for stage, function, inputs, output, schema in specs:
-                stages.append(_run_stage(
-                    stage, function, inputs, output, schema, device))
+                stage_result = _run_stage(stage, function, inputs, output, schema, device)
+                separator_witnesses.extend(stage_result.pop("_separating_variance_witnesses", []))
+                stages.append(stage_result)
             report_path = _block1_report(paths[13], stages)
             stage = "block2_to_margin"
             directory.mkdir(parents=True, exist_ok=True)
@@ -469,6 +481,11 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
                 cluster_common.sha256(report_path),
                 run_representative_mpfr=False,
                 expected_num_tokens=len(row["token_ids"]))
+            separator_witnesses.extend(report.pop("_separating_variance_witnesses", []))
+            if certificate.is_file():
+                final_payload = sound._load_artifact(certificate, finish3l.OUTPUT_SCHEMA)
+                separator_witnesses.extend(final_payload.get("separating_variance_witnesses", []))
+                del final_payload
         if (report["clean_label"] != int(row["clean_label"])
                 or report["fixture_token_ids"] != row["token_ids"]
                 or report["fixture_rho_hex"] != candidate.hex()):
@@ -597,6 +614,22 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
             "verifier_evaluations": 1,
             "generic_fallback_count": None,
         }
+    if separator_witnesses:
+        witness_path = directory / "layernorm_separator_witnesses.pt"
+        directory.mkdir(parents=True, exist_ok=True)
+        import sound_fp64_layernorm_separator_v1 as separator
+        for payload in separator_witnesses:
+            separator.replay_payload(payload)
+        temporary = witness_path.with_suffix(".tmp.pt")
+        sound.torch.save({"schema": "CORET_SOUND_FP64_LAYERNORM_SEPARATOR_ARCHIVE_V1",
+                          "property_id": property_id, "candidate_radius_hex": candidate.hex(),
+                          "witnesses": separator_witnesses}, temporary)
+        os.replace(temporary, witness_path)
+        record["layernorm_separator_witnesses_path"] = str(witness_path)
+        record["layernorm_separator_witnesses_sha256"] = cluster_common.sha256(witness_path)
+        record["layernorm_separator_repaired_tokens"] = [
+            {"label": w["label"], "tokens": w["failed_tokens"],
+             "lower_by_token": w["semantic_lower_by_token"]} for w in separator_witnesses]
     _atomic_json(result_path, record)
     shutil.rmtree(workspace, ignore_errors=True)
     return _verified_result(result_path)

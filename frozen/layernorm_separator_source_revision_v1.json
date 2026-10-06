@@ -1,0 +1,17 @@
+{
+  "benchmark_manifest_sha256": "46f5380d7bfacd0cc61da2938465d951fa3e72246b01a98223352510b331a338",
+  "bound_calls": 0,
+  "producer_revision": "SOUND_FP64_SEPARATING_LAYERNORM_V1",
+  "record_sha256": "b67406cc9602f0b928b58431f9cfef3f431f8cc349bc566ac27ece23e24f85ba",
+  "scientific_queries": 0,
+  "source_hashes": {
+    "research_hab/coret_psd_layernorm_experiment_v1.py": "cea51d2e69a41444c215c3aaa0e289be5f5f83e9ff4c8c4d040d8d11d6198235",
+    "research_hab/coret_sound_fp64_block0_feasibility_v1.py": "6000a4494159b982b7fb7000d93e59618a1725a89e911c6d896845c27adb9510",
+    "scripts/certify_block2_output_separating_variance_v1.py": "b40a11a07b684e2a56c8c41e294a2f2da45ff023a639c059ca2c1d93f7e4e694",
+    "scripts/run_sound_fp64_3l_campaign.py": "cf07ed164eaa9c4c448f748ca4519ea9405f5d345b6a4357061245ba4f6a9277",
+    "scripts/run_sound_fp64_finish_3l_v1.py": "e3938d0738cee013e17a93f364c3b77e9d74bec306760239060c91ae2be50718",
+    "scripts/run_sound_fp64_separator_property_v1.py": "f409c9b46442329ef607a2e7a580627a829e887a21de0b163cb6ced2de861933",
+    "scripts/separating_variance_checker_v1.py": "99255b79ef91bcf03a85afd5f620b7523b258052fba6cfec1011231a4f0f6d56",
+    "scripts/sound_fp64_layernorm_separator_v1.py": "a42b3cd4c22d6ea0e7ac855c7bf7c3dd4a15cdcdbb7fc79404f24ae512d13720"
+  }
+}

@@ -288,6 +288,9 @@ def test_campaign_block0_initializes_reduction_ledger_before_first_reduction(
                         lambda *_args: object())
     monkeypatch.setattr(campaign.sound, "_layernorm_majorant",
                         lambda *_args: 0.0)
+    monkeypatch.setattr(campaign.sound, "_layernorm_sound_raw",
+                        lambda _dispatch, state, state_proof, *_args:
+                        (state, state_proof, None))
     monkeypatch.setattr(campaign.sound, "_reserve_from_majorant",
                         lambda *_args: 0.0)
 

@@ -179,7 +179,7 @@ def _domain_failure_report(authenticated, clean_label, nominal_logits,
                            diagnostics, rows, reductions, dispatch,
                            total_started, experimental_layernorm=None):
     """Return a controlled, non-certificate outcome for a valid domain miss."""
-    return {
+    result = {
         "schema": SCHEMA,
         "verdict": "CORET_SOUND_FP64_3L_UNCERTIFIED_DOMAIN_FAILURE",
         "authenticated_input": authenticated,
@@ -201,6 +201,28 @@ def _domain_failure_report(authenticated, clean_label, nominal_logits,
         "bound_calls": 0,
         "experimental_psd_layernorm": experimental_layernorm,
     }
+    if hasattr(dispatch, "separating_variance_witnesses"):
+        result["_separating_variance_witnesses"] = dispatch.separating_variance_witnesses
+    return result
+
+
+def _repair_layernorm_domain(state, proof, variance_low, diagnostics):
+    prepared = sound._prepare_layernorm_separator(state, proof, variance_low, diagnostics["label"])
+    if prepared is None:
+        return variance_low, diagnostics, None
+    updated = dict(diagnostics)
+    if not prepared["admissible"]:
+        updated["separator_attempt"] = {k:v for k,v in prepared.items() if k != "payload"}
+        return variance_low, updated, prepared
+    effective = sound._checked_layernorm_low(variance_low, prepared)
+    lower = float(effective.min())
+    updated.update({"generic_sound_variance_lower": diagnostics["sound_variance_lower"],
+                    "sound_variance_lower": lower, "domain_admissible": lower > 0,
+                    "sqrt_input_lower": math.nextafter(lower+LAYER_NORM_EPSILON, -math.inf),
+                    "sqrt_safety_margin": lower,
+                    "separating_variance_tokens": prepared["payload"]["failed_tokens"],
+                    "separating_variance_lower_by_token": prepared["semantic_lower_by_token"]})
+    return effective, updated, prepared
 
 
 def _sha256(path: Path) -> str:
@@ -539,6 +561,10 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 _layernorm_variance_state(
                     residual, residual_proof, "block2_post_attention")
             variance_low, variance_high = variance.concretize()
+            prepared_separator = None
+            if not variance_diagnostics["domain_admissible"] and experimental_post_attention_layernorm is None:
+                variance_low, variance_diagnostics, prepared_separator = _repair_layernorm_domain(
+                    residual, residual_proof, variance_low, variance_diagnostics)
             variance_min = variance_diagnostics["sound_variance_lower"]
             if not variance_diagnostics["domain_admissible"]:
                 if experimental_post_attention_layernorm is None:
@@ -572,10 +598,9 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             else:
                 delegate._hidden = residual_proof
                 delegate._attention_output = residual_proof
-                raw_post = dispatch.layer_norm(
-                    residual, parameters["attention_ln"], "standard")
-                raw_post_proof = structural.get_support(raw_post)
-                ln_reserve = None
+                raw_post, raw_post_proof, ln_reserve = sound._layernorm_sound_raw(
+                    dispatch, residual, residual_proof, parameters["attention_ln"],
+                    "block2_post_attention", variance_low, prepared_separator)
             ln_ops = 16 * 128 * (residual.num_error_terms + 1) ** 2 + 4096
             if ln_reserve is None:
                 ln_reserve = sound._reserve_from_majorant(
@@ -669,6 +694,8 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 _layernorm_variance_state(
                     output_input, output_input_proof, "block2_output")
             variance_low, variance_high = variance.concretize()
+            variance_low, variance_diagnostics, prepared_separator = _repair_layernorm_domain(
+                output_input, output_input_proof, variance_low, variance_diagnostics)
             variance_min = variance_diagnostics["sound_variance_lower"]
             if not variance_diagnostics["domain_admissible"]:
                 if experimental_layernorm_failure_capture is not None:
@@ -687,13 +714,13 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             delegate._layer_norm_index = 6
             delegate._post_attention = output_input_proof
             delegate._relu = output_input_proof
-            raw_output = dispatch.layer_norm(
-                output_input, parameters["output_ln"], "standard")
-            raw_output_proof = structural.get_support(raw_output)
+            raw_output, raw_output_proof, ln_reserve = sound._layernorm_sound_raw(
+                dispatch, output_input, output_input_proof, parameters["output_ln"],
+                "block2_output", variance_low, prepared_separator)
             ln_ops = 16 * 128 * (output_input.num_error_terms + 1) ** 2 + 4096
-            ln_reserve = sound._reserve_from_majorant(
-                sound._layernorm_majorant(output_input, parameters["output_ln"]),
-                ln_ops)
+            if ln_reserve is None:
+                ln_reserve = sound._reserve_from_majorant(
+                    sound._layernorm_majorant(output_input, parameters["output_ln"]), ln_ops)
             output, output_proof = sound._inject(
                 raw_output, raw_output_proof, [output_input],
                 "b2_output_layernorm", ln_ops, measurements,
@@ -846,6 +873,12 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 "scientific_properties": 0, "bound_calls": 0,
             }
             output_path.parent.mkdir(parents=True, exist_ok=True)
+            if hasattr(dispatch, "separating_variance_witnesses"):
+                artifact_report["_separating_variance_witnesses"] = dispatch.separating_variance_witnesses
+                artifact_report["layernorm_separator_summaries"] = [
+                    {"label": w["label"], "tokens": w["failed_tokens"],
+                     "lower_by_token": w["semantic_lower_by_token"]}
+                    for w in dispatch.separating_variance_witnesses]
             saved = sound._save_artifact(
                 output_path, OUTPUT_SCHEMA,
                 {"margin": (margin, margin_proof)}, artifact_report)

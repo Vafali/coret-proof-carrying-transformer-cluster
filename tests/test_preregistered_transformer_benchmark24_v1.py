@@ -210,6 +210,14 @@ def test_actual_frozen_manifest_rebuild_is_identical_without_evaluation():
         pytest.skip("local frozen metadata unavailable")
     frozen = R.read_protocol()
     rebuilt = P.build_manifest(LOCAL_PRODUCTION, scientific, positions)
-    assert rebuilt == frozen
+    # The population/radii remain frozen. The explicitly versioned LayerNorm
+    # repair has new producer source pins, never retrofitted into that manifest.
+    from run_sound_fp64_separator_property_v1 import source_audit
+    audit = source_audit(frozen)
+    assert set(rebuilt["frozen_execution_source_hashes"]) == set(frozen["frozen_execution_source_hashes"])
+    source_fields = {"frozen_execution_source_hashes", "manifest_sha256"}
+    assert {k:v for k,v in rebuilt.items() if k not in source_fields} == {
+        k:v for k,v in frozen.items() if k not in source_fields}
+    assert audit["benchmark_manifest_unchanged"]
     assert frozen['manifest_sha256'] == R.FROZEN_MANIFEST_SHA
     assert frozen['preparation_scientific_queries'] == frozen['preparation_bound_calls'] == 0

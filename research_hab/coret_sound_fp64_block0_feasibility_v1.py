@@ -238,6 +238,43 @@ def _layernorm_majorant(source, normalizer):
                          torch.maximum(reciprocal, output))
 
 
+def _prepare_layernorm_separator(source, proof, generic_low, label):
+    if not bool((generic_low <= 0).any()):
+        return None
+    if str(REPO / "scripts") not in sys.path:
+        sys.path.insert(0, str(REPO / "scripts"))
+    import sound_fp64_layernorm_separator_v1 as separator
+    return separator.prepare(source, proof, generic_low, label)
+
+
+def _layernorm_sound_raw(dispatch, source, proof, normalizer, label,
+                         generic_low=None, prepared=None):
+    """Keep native dispatch/reserves unchanged unless its variance domain fails."""
+    if generic_low is None:
+        d = source.word_embedding_size
+        average = torch.ones((d, d), dtype=source.zonotope_w.dtype, device=source.device)/d
+        centered = source.add(source.matmul(average).multiply(-1.0))
+        generic_low, _ = centered.square_and_sum_and_repeat().multiply(1.0/d).concretize()
+    if prepared is None:
+        prepared = _prepare_layernorm_separator(source, proof, generic_low, label)
+    if prepared is None:
+        raw = dispatch.layer_norm(source, normalizer, "standard")
+        return raw, structural.get_support(raw), None
+    import sound_fp64_layernorm_separator_v1 as separator
+    return separator.execute_prepared(dispatch, source, proof, normalizer, prepared)
+
+
+def _checked_layernorm_low(generic_low, prepared):
+    if prepared is None or not prepared.get("admissible"):
+        return generic_low
+    if prepared["semantic_lower_by_token"] != prepared["payload"]["semantic_lower_by_token"]:
+        raise RuntimeError("separating LayerNorm prepared lower metadata differs")
+    result = generic_low.clone()
+    for token in prepared["payload"]["failed_tokens"]:
+        result[token] = prepared["semantic_lower_by_token"][token]
+    return result
+
+
 def _softmax_majorant(scores):
     low, high = scores.concretize()
     maximum_difference = high.amax(dim=-1, keepdim=True) - low.amin(
@@ -1206,6 +1243,8 @@ def export_block0_state(path, device=None, run_representative_mpfr=True):
                 "num_tokens": proof.num_tokens,
             },
         }
+        if _context.get("separating_variance_witnesses"):
+            payload["separating_variance_witnesses"] = _context["separating_variance_witnesses"]
         torch.save(payload, destination)
         return {
             "path": str(destination), "byte_count": destination.stat().st_size,
@@ -1259,6 +1298,9 @@ def _save_artifact(path, schema, states, report):
                    for name, (z, proof) in states.items()},
         "report": report,
     }
+    witnesses = report.pop("_separating_variance_witnesses", [])
+    if witnesses:
+        payload["separating_variance_witnesses"] = witnesses
     destination = Path(path)
     torch.save(payload, destination)
     return {"path": str(destination), "byte_count": destination.stat().st_size,
@@ -2581,15 +2623,19 @@ def run_block1_stage2_post_ln(input_path, output_path, device=None):
             centered = residual.add(residual.matmul(average).multiply(-1.0))
             variance = centered.square_and_sum_and_repeat().multiply(1.0/width)
             variance_low, variance_high = variance.concretize()
-            if float(variance_low.min()) <= 0:
+            prepared = _prepare_layernorm_separator(
+                residual, residual_proof, variance_low, "block1_post_attention")
+            if prepared is not None and not prepared["admissible"]:
                 raise RuntimeError("Block-1 post-attention variance is nonpositive")
-            raw = dispatch.layer_norm(residual, parameter, "standard")
-            raw_proof = structural.get_support(raw)
+            raw, raw_proof, separator_reserve = _layernorm_sound_raw(
+                dispatch, residual, residual_proof, parameter, "block1_post_attention",
+                variance_low, prepared)
+            variance_low = _checked_layernorm_low(variance_low, prepared)
             ops = 16 * 128 * (residual.num_error_terms + 1) ** 2 + 4096
             post, post_proof = _inject(
                 raw, raw_proof, [residual], "b1_post_attention_layernorm",
-                ops, measurements, reserve=_reserve_from_majorant(
-                    _layernorm_majorant(residual, parameter), ops))
+                ops, measurements, reserve=(separator_reserve if separator_reserve is not None
+                    else _reserve_from_majorant(_layernorm_majorant(residual, parameter), ops)))
             post, post_proof = _maybe_reduce(
                 post, post_proof, "b1_post_attention_layernorm", reductions)
             reserve = max(item["maximum_local_widening"]
@@ -2634,7 +2680,9 @@ def run_block1_stage2_post_ln(input_path, output_path, device=None):
             }
             artifact = _save_artifact(
                 output_path, "CORET_SOUND_FP64_BLOCK1_STAGE2_POST_V1",
-                {"post_attention": (post, post_proof)}, report)
+                {"post_attention": (post, post_proof)},
+                {**report, **({"_separating_variance_witnesses": dispatch.separating_variance_witnesses}
+                             if hasattr(dispatch, "separating_variance_witnesses") else {})})
             return {"report": report, "artifact": artifact}
     finally:
         torch.set_default_dtype(prior_dtype)
@@ -2852,15 +2900,18 @@ def run_block1_stage3_final_ln(input_path, output_path, device=None):
             centered = residual.add(residual.matmul(average).multiply(-1.0))
             variance = centered.square_and_sum_and_repeat().multiply(1.0/width)
             variance_low, variance_high = variance.concretize()
-            if float(variance_low.min()) <= 0:
+            prepared = _prepare_layernorm_separator(
+                residual, residual_proof, variance_low, "block1_output")
+            if prepared is not None and not prepared["admissible"]:
                 raise RuntimeError("Block-1 output variance is nonpositive")
-            raw = dispatch.layer_norm(residual, parameter, "standard")
-            raw_proof = structural.get_support(raw)
+            raw, raw_proof, separator_reserve = _layernorm_sound_raw(
+                dispatch, residual, residual_proof, parameter, "block1_output", variance_low, prepared)
+            variance_low = _checked_layernorm_low(variance_low, prepared)
             ops = 16 * 128 * (residual.num_error_terms + 1) ** 2 + 4096
             output, output_proof = _inject(
                 raw, raw_proof, [residual], "b1_output_layernorm", ops,
-                measurements, reserve=_reserve_from_majorant(
-                    _layernorm_majorant(residual, parameter), ops))
+                measurements, reserve=(separator_reserve if separator_reserve is not None
+                    else _reserve_from_majorant(_layernorm_majorant(residual, parameter), ops)))
             output, output_proof = _maybe_reduce(
                 output, output_proof, "b1_output_layernorm", reductions)
 
@@ -2912,7 +2963,9 @@ def run_block1_stage3_final_ln(input_path, output_path, device=None):
             }
             artifact = _save_artifact(
                 output_path, "CORET_SOUND_FP64_BLOCK1_FINAL_V1",
-                {"pre_block2": (output, output_proof)}, report)
+                {"pre_block2": (output, output_proof)},
+                {**report, **({"_separating_variance_witnesses": dispatch.separating_variance_witnesses}
+                             if hasattr(dispatch, "separating_variance_witnesses") else {})})
             return {"report": report, "artifact": artifact}
     finally:
         torch.set_default_dtype(prior_dtype)
@@ -3040,11 +3093,11 @@ def run_sound_fp64(device=None, continuation=None,
 
             embedding_ln = _parameter(
                 checkpoint, "bert.embeddings.LayerNorm", device)
-            raw = dispatch.layer_norm(z, embedding_ln, "standard")
-            raw_proof = structural.get_support(raw)
+            raw, raw_proof, ln_reserve = _layernorm_sound_raw(
+                dispatch, z, proof, embedding_ln, "embedding_layernorm")
             ln_ops = 16 * 128 * (z.num_error_terms + 1) ** 2 + 4096
-            ln_reserve = _reserve_from_majorant(
-                _layernorm_majorant(z, embedding_ln), ln_ops)
+            if ln_reserve is None:
+                ln_reserve = _reserve_from_majorant(_layernorm_majorant(z, embedding_ln), ln_ops)
             z, proof = _inject(
                 raw, raw_proof, [z], "embedding_layernorm", ln_ops,
                 measurements, reserve=ln_reserve)
@@ -3186,14 +3239,14 @@ def run_sound_fp64(device=None, continuation=None,
                 "block0_attention_residual", reductions)
             delegate._hidden = attention_residual_proof
             delegate._attention_output = attention_residual_proof
-            raw_post = dispatch.layer_norm(
-                attention_residual, parameters["attention_ln"], "standard")
-            raw_post_proof = structural.get_support(raw_post)
+            raw_post, raw_post_proof, post_ln_reserve = _layernorm_sound_raw(
+                dispatch, attention_residual, attention_residual_proof,
+                parameters["attention_ln"], "block0_post_attention")
             ln_ops = (16 * 128 *
                       (attention_residual.num_error_terms + 1) ** 2 + 4096)
-            post_ln_reserve = _reserve_from_majorant(
-                _layernorm_majorant(
-                    attention_residual, parameters["attention_ln"]), ln_ops)
+            if post_ln_reserve is None:
+                post_ln_reserve = _reserve_from_majorant(
+                    _layernorm_majorant(attention_residual, parameters["attention_ln"]), ln_ops)
             post, post_proof = _inject(
                 raw_post, raw_post_proof, [attention_residual],
                 "post_attention_layernorm", ln_ops, measurements,
@@ -3249,14 +3302,17 @@ def run_sound_fp64(device=None, continuation=None,
                 ffn_residual.matmul(average).multiply(-1.0))
             variance = centered.square_and_sum_and_repeat().multiply(1.0 / width)
             variance_low, variance_high = variance.concretize()
-            raw_output = dispatch.layer_norm(
-                ffn_residual, parameters["output_ln"], "standard")
-            raw_output_proof = structural.get_support(raw_output)
+            prepared = _prepare_layernorm_separator(
+                ffn_residual, ffn_residual_proof, variance_low, "block0_output")
+            raw_output, raw_output_proof, output_ln_reserve = _layernorm_sound_raw(
+                dispatch, ffn_residual, ffn_residual_proof, parameters["output_ln"],
+                "block0_output", variance_low, prepared)
+            variance_low = _checked_layernorm_low(variance_low, prepared)
             ln_ops = (16 * 128 *
                       (ffn_residual.num_error_terms + 1) ** 2 + 4096)
-            output_ln_reserve = _reserve_from_majorant(
-                _layernorm_majorant(
-                    ffn_residual, parameters["output_ln"]), ln_ops)
+            if output_ln_reserve is None:
+                output_ln_reserve = _reserve_from_majorant(
+                    _layernorm_majorant(ffn_residual, parameters["output_ln"]), ln_ops)
             output, output_proof = _inject(
                 raw_output, raw_output_proof, [ffn_residual],
                 "output_layernorm", ln_ops, measurements,
@@ -3303,6 +3359,8 @@ def run_sound_fp64(device=None, continuation=None,
                     output, output_proof, {
                         "checkpoint": checkpoint, "args": args,
                         "Zonotope": Zonotope, "device": device,
+                        **({"separating_variance_witnesses": dispatch.separating_variance_witnesses}
+                           if hasattr(dispatch, "separating_variance_witnesses") else {}),
                     })
             return result
     finally:

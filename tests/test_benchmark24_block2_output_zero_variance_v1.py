@@ -284,6 +284,9 @@ def test_capture_wrapper_end_to_end_with_mock_property_only(capture_fixture, mon
         _snapshot=snapshot, _write_torch_atomic=lambda path, value: torch.save(value, path)))
     monkeypatch.setattr(B, "_existing_backend", mock_backend)
     monkeypatch.setattr(B, "artifact_errors", lambda *_: [])
+    # This mocked backend executes no frozen producer. Keep the real legacy
+    # source guard unchanged (it correctly rejects the new producer revision).
+    monkeypatch.setattr(B, "execution_source_errors", lambda *_: [])
     output = manifest.parent / "new-capture"
     authenticated = CAP.execute(CAP.PROPERTY_ID, manifest.parent / "mock-inputs", output, "cuda:0")
     assert authenticated["identity"]["property_id"] == CAP.PROPERTY_ID

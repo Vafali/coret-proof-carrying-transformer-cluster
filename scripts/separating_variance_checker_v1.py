@@ -146,3 +146,31 @@ def downward_binary64(value):
     if Fraction.from_float(result) > value:
         result = math.nextafter(result, -math.inf)
     return result
+
+
+def verify_semantic_sqrt_ranges(lower_by_token, range_certificate):
+    """Check the directed FP64 range use of already verified variance bounds.
+
+    This checks the added lower constraint and directed sqrt arithmetic, not
+    the pre-existing native upper-bound transform or full graph semantics.
+    """
+    evidence = range_certificate["directed_range_evidence"]
+    if (len(evidence) != len(lower_by_token) or
+            range_certificate["variance_lower_by_token_binary64_hex"] != [x.hex() for x in lower_by_token]):
+        raise RuntimeError("separator semantic range token/bound identity differs")
+    eps = Fraction.from_float(1e-12)
+    for token, (bound, row) in enumerate(zip(lower_by_token, evidence)):
+        if row["token_index"] != token or row["variance_lower_binary64_hex"] != bound.hex():
+            raise RuntimeError("separator semantic range token/order differs")
+        values = {key: float.fromhex(row[key+"_binary64_hex"]) for key in (
+            "sqrt_input_lower", "sqrt_input_upper", "sqrt_output_lower", "sqrt_output_upper")}
+        if not all(math.isfinite(x) and x > 0 for x in values.values()):
+            raise RuntimeError("separator semantic sqrt range nonfinite/nonpositive")
+        lo, hi = map(Fraction.from_float, (values["sqrt_input_lower"], values["sqrt_input_upper"]))
+        root_lo, root_hi = map(Fraction.from_float, (values["sqrt_output_lower"], values["sqrt_output_upper"]))
+        expected_input = math.nextafter(bound+1e-12, -math.inf)
+        if (values["sqrt_input_lower"] != expected_input or lo > Fraction.from_float(bound)+eps
+                or lo > hi or root_lo*root_lo > lo or root_hi*root_hi < hi
+                or root_lo > root_hi):
+            raise RuntimeError("separator directed sqrt range relation fails")
+    return True

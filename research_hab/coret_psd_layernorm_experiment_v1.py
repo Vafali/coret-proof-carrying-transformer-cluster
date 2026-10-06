@@ -287,10 +287,13 @@ def verify_certificate(state, proof, generic_variance_low: torch.Tensor,
 def _native_layernorm_with_semantic_lower(state, proof, normalizer, delegate,
                                           semantic_lower_by_token,
                                           variance_certificate: dict,
-                                          milestones: dict):
+                                          milestones: dict, *, separator_context=None):
     """Run pinned native formulas, changing only sqrt's witnessed domain hull."""
-    if delegate._layer_norm_index != TARGET_LAYER_NORM_INDEX:
+    index = delegate._layer_norm_index
+    if separator_context is None and index != TARGET_LAYER_NORM_INDEX:
         raise RuntimeError("PSD experiment reached a non-target LayerNorm")
+    if separator_context is not None and separator_context.get("schema") != "CORET_SOUND_FP64_SEPARATING_LAYERNORM_V1":
+        raise RuntimeError("separating LayerNorm context schema differs")
     if len(proof.masks) != state.num_error_terms:
         raise RuntimeError("PSD LayerNorm input proof count differs")
     structural.validate_support(state, proof, token_axis=1)
@@ -341,6 +344,14 @@ def _native_layernorm_with_semantic_lower(state, proof, normalizer, delegate,
         raise RuntimeError("PSD LayerNorm sqrt allocation differs")
     reciprocal_low, reciprocal_high, range_evidence = _semantic_sqrt_range(
         semantic_lower_by_token, generic_high)
+    if separator_context is not None:
+        # Repair only failed tokens. Successful tokens retain the ORIGINAL
+        # native sqrt affine concretization and reciprocal relaxation inputs.
+        native_low, native_high = sqrt_state.concretize()
+        selected = torch.zeros((n, 1), dtype=torch.bool, device=state.device)
+        selected[separator_context["failed_tokens"]] = True
+        reciprocal_low = torch.where(selected, reciprocal_low, native_low)
+        reciprocal_high = torch.where(selected, reciprocal_high, native_high)
     milestones["sqrt_semantic_lower_constructed"] = True
     semantic_range_certificate = {
         "schema": "CORET_PSD_LAYERNORM_SEMANTIC_RANGE_V1",
@@ -354,6 +365,17 @@ def _native_layernorm_with_semantic_lower(state, proof, normalizer, delegate,
             for row in variance_certificate["token_certificates"]]),
         "variance_lower_by_token_binary64_hex": [
             float(value).hex() for value in semantic_lower_by_token],
+        "directed_range_evidence": range_evidence,
+        "sqrt_affine_coefficients_modified": False,
+        "reciprocal_affine_input_coefficients_modified": False,
+        "reciprocal_formula": "pinned_original_implementation_lambda=-1/u^2",
+    } if separator_context is None else {
+        "schema": "CORET_SEPARATING_LAYERNORM_SEMANTIC_RANGE_V1",
+        "state_identity": separator_context["source_state_identity"],
+        "target_label": separator_context["label"], "layernorm_index": index,
+        "range_override_tokens": list(separator_context["failed_tokens"]),
+        "separator_certificate_sha256": _json_hash(separator_context),
+        "variance_lower_by_token_binary64_hex": [float(value).hex() for value in semantic_lower_by_token],
         "directed_range_evidence": range_evidence,
         "sqrt_affine_coefficients_modified": False,
         "reciprocal_affine_input_coefficients_modified": False,
@@ -393,18 +415,22 @@ def _native_layernorm_with_semantic_lower(state, proof, normalizer, delegate,
     fresh_masks = square_masks + sqrt_masks + reciprocal_masks + product_masks
     fresh_reasons = (
         tuple("native_layernorm_variance_coordinate" for _ in square_masks)
-        + tuple("psd_witnessed_native_layernorm_sqrt_l_ne_u"
+        + tuple(("psd_witnessed_native_layernorm_sqrt_l_ne_u" if separator_context is None
+                 else "separating_witnessed_native_layernorm_sqrt_l_ne_u")
                 for _ in sqrt_masks)
         + tuple("native_layernorm_reciprocal_l_ne_u"
                 for _ in reciprocal_masks)
         + tuple("native_layernorm_final_product_coordinate"
                 for _ in product_masks))
     output_proof = delegate._layer_norm_output(
-        proof, output, "layernorm_5", fresh_masks, fresh_reasons)
+        proof, output, f"layernorm_{index}", fresh_masks, fresh_reasons)
     structural.attach_support(output, output_proof)
     structural.validate_support(output, output_proof, token_axis=1)
     delegate._layer_norm_index += 1
-    delegate._post_attention = output_proof
+    if index == 0 or index % 2 == 0:
+        delegate._hidden = output_proof
+    else:
+        delegate._post_attention = output_proof
     return output, output_proof, {
         "variance_fresh_count": square_count,
         "sqrt_flat_indices": list(sqrt_flat),
