@@ -2098,7 +2098,7 @@ def replay_algebraic_perspective_witness(problem: ExactPerspectiveProblem,
             "shared_source_correlation_preserved": True}
 
 
-def verify_branch_tree(tree: dict, certificate_checker) -> dict:
+def verify_branch_tree(tree: dict, certificate_checker, *, node_certificate_checker=None) -> dict:
     """Verify binary ReLU phase coverage and every exclusion leaf."""
     if tree.get("schema") != TREE_SCHEMA:
         raise RuntimeError("branch proof-tree schema differs")
@@ -2113,10 +2113,12 @@ def verify_branch_tree(tree: dict, certificate_checker) -> dict:
             raise RuntimeError("branch proof-tree contains a cycle/alias")
         visited.add(node_id)
         node = nodes[node_id]
-        phases = {int(key): bool(value)
-                  for key, value in (node.get("phases") or {}).items()}
-        if any(phases.get(key) != value for key, value in inherited.items()):
-            raise RuntimeError("branch child dropped an inherited phase")
+        raw_phases = node.get("phases") or {}
+        if any(type(value) is not bool for value in raw_phases.values()):
+            raise RuntimeError("branch phase is not boolean")
+        phases = {int(key): value for key, value in raw_phases.items()}
+        if len(phases) != len(raw_phases) or phases != inherited:
+            raise RuntimeError("branch child dropped or added an unwitnessed phase")
         children = node.get("children")
         if children is None:
             leaves += 1
@@ -2124,7 +2126,10 @@ def verify_branch_tree(tree: dict, certificate_checker) -> dict:
             if certificate is None:
                 open_leaves += 1
             else:
-                certificate_checker(certificate)
+                if node_certificate_checker is None:
+                    certificate_checker(certificate)
+                else:
+                    node_certificate_checker(node_id, node, certificate)
                 closed += 1
             return
         neuron = int(node["branch_neuron"])
@@ -2147,6 +2152,24 @@ def verify_branch_tree(tree: dict, certificate_checker) -> dict:
     return {"verified": True, "nodes": len(visited), "leaves": leaves,
             "closed_leaves": closed, "open_leaves": open_leaves,
             "permits_excluded": open_leaves == 0}
+
+
+def verify_partial_phase_tree(tree, root_lp, bounds, source_count):
+    """Reconstruct each certified leaf's ORIGINAL node LP, never a proposed pattern."""
+    _validate_partial_phase_root(root_lp, source_count)
+    def check_node(_node_id, node, certificate):
+        phases = {int(key): value for key, value in node.get("phases", {}).items()}
+        if any(key not in bounds["unstable"] for key in phases):
+            raise RuntimeError("node fixed a non-ambiguous ReLU phase")
+        node_lp = lp_with_relu_phases(root_lp, phases, source_count)
+        if node.get("node_lp_sha256") != node_lp.identity():
+            raise RuntimeError("node LP identity differs from root and phases")
+        return verify_exact_lp_farkas(node_lp, certificate)
+
+    for node in tree.get("nodes", {}).values():
+        if node.get("children") is not None and node.get("branch_neuron") not in bounds["unstable"]:
+            raise RuntimeError("tree branches on a non-ambiguous ReLU phase")
+    return verify_branch_tree(tree, None, node_certificate_checker=check_node)
 
 
 def scientific_status_from_proof(*, exact_witness_verified=False,
@@ -3367,15 +3390,65 @@ def _complete_phase_map(bounds, phases, dimension):
     return [fixed[i] for i in range(dimension)] if set(fixed) == set(range(dimension)) else None
 
 
+def _validate_partial_phase_root(root_lp, source_count):
+    expected_names = tuple(
+        [f"xi[{i}]" for i in range(source_count)] +
+        [f"c[{i}]" for i in range(DIMENSION)] + ["t"] +
+        [f"g[{i}]" for i in range(DIMENSION)] +
+        [f"u[{i}]" for i in range(DIMENSION)])
+    t_index = source_count + DIMENSION
+    if (root_lp.variable_names != expected_names or
+            len(root_lp.column_lower) != len(expected_names) or
+            len(root_lp.column_upper) != len(expected_names)):
+        raise FixedPhaseInvariantError("partial-phase root variable topology differs")
+    if root_lp.column_lower[t_index] is None or root_lp.column_lower[t_index] <= 0:
+        raise FixedPhaseInvariantError("partial-phase root lacks certified positive t bound")
+
+
+def solve_partial_phase_node(root_lp, phases, source_count, propose, *,
+                             certificate_solver=None, attempt_cache=None,
+                             factor_cache=None,
+                             certificate_seconds=FIXED_PHASE_CERTIFICATE_FAMILY_SECONDS):
+    """Reuse accepted ray/repair machinery on the unchanged linear node outer LP.
+
+    Unfixed triangles and every root row/bound remain present. The homogeneous
+    phase constraints are valid because the root authenticates t>0. No nonlinear
+    equality is needed to certify emptiness of this larger, linear outer set.
+    """
+    _validate_partial_phase_root(root_lp, source_count)
+    node_lp = lp_with_relu_phases(root_lp, phases, source_count)
+    identity = node_lp.identity()
+    proposal = propose(node_lp)
+    if node_lp.identity() != identity:
+        raise FixedPhaseInvariantError("partial-phase canonical LP mutated by solver")
+    audit, certificate = None, None
+    if proposal.get("model_status") == "Infeasible":
+        audit = attempt_fixed_phase_certificate(
+            node_lp, "SIMPLEX_FEASIBILITY", certificate_seconds,
+            certificate_solver=certificate_solver, factor_cache=factor_cache,
+            attempt_cache=attempt_cache, trigger_proposal=proposal)
+        certificate = audit.get("fixed_phase_farkas_certificate")
+    return {"solver_status": proposal.get("model_status"),
+            "solution": proposal.get("column_values"), "certificate": certificate,
+            "certificate_attempt": audit, "node_lp_sha256": identity}
+
+
 def run_phase_continuation(
         root_solution, bounds: dict, source_count: int,
         maximum_nodes: int, maximum_patterns: int, deadline: float,
-        solve_node, attempt_witness):
-    """Minimal deterministic ReLU-phase BaB with proof-carrying leaves."""
-    nodes = {"root": {"phases": {}, "children": None,
+        solve_node, attempt_witness, *, root_lp=None):
+    """Exhaustive partial-phase BaB; ONLY original node-LP replay closes a node.
+
+    The root proposal was already obtained on the canonical root LP. Child
+    solver statuses and branching scores have no proof authority. Without an
+    authenticated root LP this helper cannot authorize any certificate closure.
+    """
+    if root_lp is not None:
+        _validate_partial_phase_root(root_lp, source_count)
+    nodes = {"root": {"phases": {}, "phase_bab_fixed_phase_count": 0, "children": None,
                       "certificate": None, "status": "OPEN"}}
     queue = [("root", {}, root_solution, 0)]
-    patterns, closed, maximum_depth = 0, 0, 0
+    patterns, closed, maximum_depth, processed = 0, 0, 0, 0
     witness = None
     attempts = []
     limit_reason = None
@@ -3384,47 +3457,78 @@ def run_phase_continuation(
             limit_reason = "WALL_CLOCK_LIMIT"
             break
         node_id, phases, inherited_solution, depth = queue.pop(0)
+        processed += 1
         maximum_depth = max(maximum_depth, depth)
+        node = nodes[node_id]
+        node.update(phase_bab_fixed_phase_count=len(phases),
+                    node_ray_source=None, node_exact_farkas_verified=False,
+                    node_exact_farkas_rhs=None)
+        node_lp = None if root_lp is None else lp_with_relu_phases(root_lp, phases, source_count)
+        node["node_lp_sha256"] = None if node_lp is None else node_lp.identity()
         if inherited_solution is None:
             solved = solve_node(phases, node_id)
-            nodes[node_id]["solver_status"] = solved.get("solver_status")
-            if solved.get("infeasible"):
-                certificate = solved.get("certificate")
-                if certificate is not None:
-                    nodes[node_id].update(
-                        {"status": "CLOSED_EXACT_FARKAS",
-                         "certificate": certificate})
-                    closed += 1
+            node["solver_status"] = solved.get("solver_status")
+            supplied_identity = solved.get("node_lp_sha256")
+            if supplied_identity is not None and (node_lp is None or supplied_identity != node_lp.identity()):
+                raise FixedPhaseInvariantError("partial-phase solver node LP identity differs")
+            node["certificate_attempt"] = solved.get("certificate_attempt")
+            node["node_ray_source"] = (solved.get("certificate_attempt") or {}).get("certificate_ray_source")
+            certificate = solved.get("certificate")
+            if certificate is not None and node_lp is not None:
+                # Never accept a complete-pattern certificate on its partial
+                # parent, or trust a solver/cached 'verified' boolean.
+                try:
+                    replay = verify_exact_lp_farkas(node_lp, certificate)
+                except RuntimeError as error:
+                    node["node_certificate_replay_failure"] = str(error)
                 else:
-                    nodes[node_id]["status"] = "OPEN_UNCERTIFIED_INFEASIBLE"
-                continue
-            if not solved.get("feasible") or solved.get("solution") is None:
-                nodes[node_id]["status"] = "OPEN_SOLVER_UNRESOLVED"
-                continue
-            solution = solved["solution"]
+                    node.update(status="CLOSED_EXACT_FARKAS", certificate=certificate,
+                                node_exact_farkas_verified=True,
+                                node_exact_farkas_rhs=replay["exact_lambda_b"])
+                    closed += 1
+                    print(json.dumps({"stage": "partial_phase_node", "node_id": node_id, **node}), flush=True)
+                    continue
+            solution = solved.get("solution")
         else:
             solution = inherited_solution
-            nodes[node_id]["solver_status"] = "ROOT_OPTIMAL"
-        neuron, pattern, proposal = _branch_neuron(
-            solution, bounds, phases, source_count)
-        nodes[node_id]["phase_proposal"] = proposal
-        if patterns < maximum_patterns:
+            node["solver_status"] = "ROOT_OPTIMAL"
+        usable = (solution is not None and np.asarray(solution).shape ==
+                  (source_count + 3 * DIMENSION + 1,) and np.isfinite(solution).all())
+        if usable:
+            neuron, pattern, proposal = _branch_neuron(solution, bounds, phases, source_count)
+            node["branch_reason"] = "MAXIMUM_TRIANGLE_VIOLATION_TIES_BY_INDEX"
+        else:
+            remaining = sorted(set(bounds["unstable"]) - set(phases))
+            neuron = remaining[0] if remaining else None
+            pattern, proposal = None, None
+            node["branch_reason"] = "LOWEST_UNFIXED_AMBIGUOUS_INDEX_NO_USABLE_PROPOSAL"
+        node["phase_proposal"] = proposal
+        if usable and patterns < maximum_patterns:
             patterns += 1
             found, evidence = attempt_witness(pattern, solution, node_id)
             attempts.append({"node_id": node_id, **evidence})
             if found is not None:
                 witness = found
-                nodes[node_id]["status"] = "EXACT_WITNESS_VERIFIED"
+                node["status"] = "EXACT_WITNESS_VERIFIED"
+                print(json.dumps({"stage": "partial_phase_node", "node_id": node_id, **node}), flush=True)
                 break
         if neuron is None:
-            nodes[node_id]["status"] = "OPEN_FIXED_PHASE_WITHOUT_PROOF"
+            node["status"] = "OPEN_FIXED_PHASE_WITHOUT_PROOF"
+            print(json.dumps({"stage": "partial_phase_node", "node_id": node_id, **node}), flush=True)
             continue
+        if time.perf_counter() >= deadline:
+            node["status"] = "OPEN_WALL_CLOCK_LIMIT"
+            limit_reason = "WALL_CLOCK_LIMIT"
+            print(json.dumps({"stage": "partial_phase_node", "node_id": node_id, **node}), flush=True)
+            break
         if len(nodes) + 2 > maximum_nodes:
             nodes[node_id]["status"] = "OPEN_NODE_LIMIT"
             limit_reason = "MAXIMUM_NODES"
+            print(json.dumps({"stage": "partial_phase_node", "node_id": node_id, **node}), flush=True)
             break
         children = {}
         nodes[node_id].update({"branch_neuron": neuron,
+                               "branch_relu_index": neuron,
                                "children": children,
                                "status": "BRANCHED"})
         for label, active in (("inactive", False), ("active", True)):
@@ -3433,8 +3537,11 @@ def run_phase_continuation(
             children[label] = child_id
             nodes[child_id] = {"phases": {
                 str(key): value for key, value in child_phases.items()},
+                "phase_bab_fixed_phase_count": len(child_phases),
                 "children": None, "certificate": None, "status": "QUEUED"}
             queue.append((child_id, child_phases, None, depth + 1))
+            maximum_depth = max(maximum_depth, depth + 1)
+        print(json.dumps({"stage": "partial_phase_node", "node_id": node_id, **node}), flush=True)
     open_nodes = sum(
         node.get("children") is None and node.get("certificate") is None
         and node.get("status") != "EXACT_WITNESS_VERIFIED"
@@ -3446,6 +3553,12 @@ def run_phase_continuation(
         "nodes_open": open_nodes, "maximum_depth": maximum_depth,
         "phase_patterns_attempted": patterns,
         "witness_attempts": attempts, "limit_reason": limit_reason,
+        "phase_bab_nodes_created": len(nodes), "phase_bab_nodes_processed": processed,
+        "phase_bab_nodes_closed_exact_farkas": closed, "phase_bab_open_nodes": open_nodes,
+        "phase_bab_max_depth": maximum_depth,
+        "termination_reason": ("EXACT_WITNESS_VERIFIED" if witness is not None else
+                               limit_reason or ("EXHAUSTIVE_EXACT_FARKAS_CLOSURE" if open_nodes == 0 else
+                                                "UNRESOLVED_FULL_PHASE_LEAVES")),
         "tree": tree,
     }
 
@@ -5448,10 +5561,13 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
         "continuous_source_branching": False,
         "fallback_attempts": 0, "fallback_usable_primals": 0,
         "exact_anchor_reconstruction_attempts": 0, "exact_anchors_verified": 0,
+        "phase_bab_nodes_created": 0, "phase_bab_nodes_processed": 0,
+        "phase_bab_nodes_closed_exact_farkas": 0, "phase_bab_open_nodes": 0,
+        "phase_bab_max_depth": 0, "termination_reason": "PHASE_BAB_NOT_ENTERED",
     }
     complete_tree_replay = None
-    if solver is not None and solver["feasible"]:
-        if (solver["column_values"] is None
+    if solver is not None and certificate_replay is None:
+        if solver["feasible"] and (solver["column_values"] is None
                 or len(solver["column_values"]) != lp.column_count
                 or solver["solver_scaling"][
                     "original_canonical_lp_sha256"] != lp.identity()
@@ -5462,47 +5578,39 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
         exact_problem = _exact_problem_from_arrays(
             weights, token, low, high, gamma, beta, W1, b1, W2, b2,
             epsilon)
-        node_lps_by_identity = {}
         node_lps_by_id = {"root": lp}
         certificate_attempt_cache = {}
+        node_factor_cache = {}
 
         def solve_phase_node(phases, node_id):
             node_lp = lp_with_relu_phases(lp, phases, EXPECTED_SOURCES)
-            fixed_pattern = _complete_phase_map(bounds, phases, DIMENSION)
-            if fixed_pattern is not None:
-                node_lp, _audit = build_fixed_phase_linear_lp(
-                    exact_problem, fixed_pattern, node_lp)
             node_lps_by_id[node_id] = node_lp
-            node_lps_by_identity[node_lp.identity()] = node_lp
             safe = node_id.replace(".", "_")
-            node_solver = solve_highspy(
-                node_lp, artifact_dir / f"bab_{safe}_highspy.log",
-                artifact_dir / f"bab_{safe}_row_scaling.json")
-            node_certificate = None
-            if node_solver["infeasible"]:
-                if node_solver["original_row_dual_ray"] is not None:
-                    node_certificate, _attempts, _status = \
-                        repair_direct_dual_ray(
-                            node_lp, node_solver["original_row_dual_ray"],
-                            min(300.0, max(1.0, wall_seconds / 8)))
-                if node_certificate is None:
-                    node_certificate, _fallback = \
-                        phase1_exact_farkas_fallback(
-                            node_lp,
-                            min(300.0, max(1.0, wall_seconds / 8)))
-                if node_certificate is not None:
-                    verify_exact_lp_farkas(node_lp, node_certificate)
-            return {
-                "solver_status": node_solver["model_status"],
-                "feasible": node_solver["feasible"],
-                "infeasible": node_solver["infeasible"],
-                "solution": node_solver["column_values"],
-                "certificate": node_certificate,
-            }
+            remaining = max(.001, started + wall_seconds - time.perf_counter())
+            def propose(model):
+                return solve_highspy(
+                    model, artifact_dir / f"bab_{safe}_highspy.log",
+                    artifact_dir / f"bab_{safe}_row_scaling.json",
+                    objective=[Fraction(0)] * model.column_count,
+                    proposal_only=True, proposal_method="SIMPLEX_FEASIBILITY",
+                    time_limit_seconds=min(30., remaining))
+            def certificate_solve(model, seconds):
+                return solve_highspy(
+                    model, artifact_dir / f"bab_{safe}_certificate.log",
+                    artifact_dir / f"bab_{safe}_certificate_scaling.json",
+                    objective=[Fraction(0)] * model.column_count,
+                    proposal_only=True, proposal_method="FIXED_PHASE_CERTIFICATE",
+                    time_limit_seconds=min(30., seconds))
+            return solve_partial_phase_node(
+                lp, phases, EXPECTED_SOURCES, propose,
+                certificate_solver=certificate_solve,
+                attempt_cache=certificate_attempt_cache, factor_cache=node_factor_cache,
+                certificate_seconds=min(FIXED_PHASE_CERTIFICATE_FAMILY_SECONDS,
+                    max(.001, started + wall_seconds - time.perf_counter())))
 
         def attempt_witness(pattern, solution, node_id):
             # Speculative patterns are witness searches, not node exclusions.
-            # Fully fixed BaB leaves separately use exact Farkas above.
+            # Partial/full BaB nodes separately certify their own outer LP.
             if node_id not in node_lps_by_id:
                 raise FixedPhaseInvariantError("fixed-phase witness missing authenticated node LP")
             parent = node_lps_by_id[node_id]
@@ -5565,14 +5673,12 @@ def execute(capture_root: Path, downstream_report: Path, output: Path,
             }
 
         found, continuation = run_phase_continuation(
-            solver["column_values"], bounds, EXPECTED_SOURCES,
+            solver["column_values"] if solver["feasible"] else None, bounds, EXPECTED_SOURCES,
             maximum_nodes, maximum_patterns, started + wall_seconds,
-            solve_phase_node, attempt_witness)
+            solve_phase_node, attempt_witness, root_lp=lp)
         tree = continuation.pop("tree")
         if found is None and continuation["nodes_open"] == 0:
-            complete_tree_replay = verify_branch_tree(
-                tree, lambda cert: verify_exact_lp_farkas(
-                    node_lps_by_identity[cert["canonical_lp_sha256"]], cert))
+            complete_tree_replay = verify_partial_phase_tree(tree, lp, bounds, EXPECTED_SOURCES)
         tree_record = _atomic_json(
             artifact_dir / "relu_phase_proof_tree.json",
             tree)
