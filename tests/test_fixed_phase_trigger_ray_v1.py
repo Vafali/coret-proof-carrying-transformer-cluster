@@ -312,8 +312,11 @@ def test_real_presolve_infeasible_without_cached_ray_requests_values_on_same_ins
 
 
 @pytest.mark.parametrize("defect,reason", [
-    ("unavailable", "FORCED_TRIGGER_RAY_UNAVAILABLE"),
-    ("warning", "FORCED_TRIGGER_RAY_UNAVAILABLE"),
+    ("unavailable", "FORCED_TRIGGER_RAY_HAS_RAY_FALSE"),
+    ("error", "FORCED_TRIGGER_RAY_STATUS_ERROR"),
+    ("missing", "FORCED_TRIGGER_RAY_VECTOR_MISSING"),
+    ("malformed", "FORCED_TRIGGER_RAY_VECTOR_MALFORMED"),
+    ("zero", "FORCED_TRIGGER_RAY_ZERO"),
     ("dimension", "FORCED_TRIGGER_RAY_BAD_DIMENSION"),
     ("nonfinite", "FORCED_TRIGGER_RAY_NONFINITE"),
     ("provenance", "FORCED_TRIGGER_RAY_PROVENANCE_AMBIGUOUS"),
@@ -332,22 +335,38 @@ def test_forced_request_failure_is_explicit_and_uses_existing_dedicated_fallback
         def getDualRay(self):
             self.value_requests += 1
             if defect == "unavailable":
-                return highspy.HighsStatus.kOk, False, np.zeros(3)
-            if defect == "warning":
-                return highspy.HighsStatus.kWarning, True, -np.ones(3)
+                return highspy.HighsStatus.kWarning, False, np.zeros(3)
+            if defect == "error":
+                return highspy.HighsStatus.kError, True, -np.ones(3)
+            if defect == "missing":
+                return highspy.HighsStatus.kWarning, True, None
+            if defect == "malformed":
+                return highspy.HighsStatus.kWarning, True, ["not a number"]
+            if defect == "zero":
+                return highspy.HighsStatus.kWarning, True, np.zeros(3)
             if defect == "dimension":
-                return highspy.HighsStatus.kOk, True, -np.ones(2)
+                return highspy.HighsStatus.kWarning, True, -np.ones(2)
             if defect == "nonfinite":
-                return highspy.HighsStatus.kOk, True, np.full(3, np.nan)
+                return highspy.HighsStatus.kWarning, True, np.full(3, np.nan)
             assert defect == "provenance"
             self.inner.changeRowBounds(0, -highspy.kHighsInf, 7.)
-            return highspy.HighsStatus.kOk, True, -np.ones(3)
+            return highspy.HighsStatus.kWarning, True, -np.ones(3)
     monkeypatch.setattr(highspy, "Highs", Engine)
     result = trigger(lp, "IPM_FEASIBILITY")
     assert len(instances) == 1 and instances[0].value_requests == 1
     assert result["trigger_ray_forced_request_attempted"]
     assert not result["trigger_ray_cached_before_request"]
     assert result["trigger_ray_forced_request_status"]
+    assert result["trigger_ray_returned_vector_present"] is (defect != "missing")
+    if defect not in ("missing", "malformed"):
+        assert result["trigger_ray_raw_dimension"] == (2 if defect == "dimension" else 3)
+        assert result["trigger_ray_returned_vector_finite"] is (defect != "nonfinite")
+        assert result["trigger_ray_returned_vector_nonzero"] is (defect not in ("unavailable", "zero"))
+    elif defect == "malformed":
+        assert result["trigger_ray_raw_dimension"] == 1
+        assert result["trigger_ray_returned_vector_finite"] is None
+    else:
+        assert result["trigger_ray_raw_dimension"] is None
     assert result["trigger_ray_rejected_reason"] == reason
     assert result["original_row_dual_ray"] is None
     assert not result["trigger_ray_original_space_mapping_verified"]
@@ -360,6 +379,9 @@ def test_forced_request_failure_is_explicit_and_uses_existing_dedicated_fallback
     assert calls == [lp] and report["dedicated_certificate_fallback_used"]
     assert report["trigger_ray_rejected_reason"] == reason
     assert report["trigger_ray_forced_request_attempted"]
+    assert report["trigger_ray_raw_dimension"] == result["trigger_ray_raw_dimension"]
+    assert report["trigger_ray_returned_vector_present"] == result["trigger_ray_returned_vector_present"]
+    assert report["trigger_ray_returned_vector_finite"] == result["trigger_ray_returned_vector_finite"]
     assert not report["fixed_phase_farkas_verified"] and not report["exact_farkas_replay_verified"]
 
 
@@ -395,10 +417,12 @@ def test_forced_ray_without_successful_full_replay_cannot_authorize_phase_infeas
         def getDualRayExist(self):
             return highspy.HighsStatus.kOk, False
         def getDualRay(self):
-            return self.inner.getDualRay()
+            _status, has_ray, values = self.inner.getDualRay()
+            return highspy.HighsStatus.kWarning, has_ray, values
     monkeypatch.setattr(highspy, "Highs", Engine)
     candidate = trigger(lp, "PRIMARY")
     assert candidate["trigger_ray_forced_request_attempted"]
+    assert candidate["trigger_ray_forced_request_status"] == str(highspy.HighsStatus.kWarning)
     assert candidate["trigger_ray_original_space_mapping_verified"]
     cert["multipliers"][0]["multiplier"] = "-1/1"
     monkeypatch.setattr(O, "repair_fixed_phase_dual_ray", lambda *args, **kwargs: (
@@ -411,3 +435,68 @@ def test_forced_ray_without_successful_full_replay_cannot_authorize_phase_infeas
     assert report["search_status"] == "INCONCLUSIVE"
     assert not report["fixed_phase_farkas_verified"] and not report["exact_farkas_replay_verified"]
     assert not report["permits_node_exclusion"] and not report["permits_infeasibility_claim"]
+
+
+@pytest.mark.parametrize("method", ["PRIMARY", "IPM_FEASIBILITY", "SIMPLEX_FEASIBILITY"])
+@pytest.mark.parametrize("cached", [False, True])
+def test_warning_true_valid_vector_enters_exact_repair_and_requires_full_original_replay(monkeypatch, tmp_path, method, cached):
+    lp, real, instances, repairs = triangle_lp(), highspy.Highs, [], []
+    class Engine:
+        def __init__(self):
+            self.inner = real()
+            self.requests = 0
+            instances.append(self)
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+        def getDualRayExist(self):
+            return highspy.HighsStatus.kOk, cached
+        def getDualRay(self):
+            self.requests += 1
+            return highspy.HighsStatus.kWarning, True, -np.ones(len(lp.rows))
+    monkeypatch.setattr(highspy, "Highs", Engine)
+    result = O.solve_highspy(lp, tmp_path / "warning.log", proposal_only=True,
+        proposal_method=method, time_limit_seconds=1.)
+    assert len(instances) == 1 and instances[0].requests == 1
+    assert result["ray_call_status"] == str(highspy.HighsStatus.kWarning)
+    assert result["trigger_ray_forced_request_attempted"] is (not cached)
+    if not cached:
+        assert result["trigger_ray_forced_request_status"] == str(highspy.HighsStatus.kWarning)
+        assert result["trigger_ray_forced_request_has_ray"] is True
+    assert result["trigger_ray_returned_vector_present"] is True
+    assert result["trigger_ray_raw_dimension"] == len(lp.rows)
+    assert result["trigger_ray_returned_vector_finite"] is True
+    assert result["trigger_ray_returned_vector_nonzero"] is True
+    assert result["trigger_ray_returned_vector_support_size"] == len(lp.rows)
+    assert result["trigger_ray_original_space_mapping_verified"]
+    assert result["row_ray_mapping"]["mapping_count"] == 1
+    np.testing.assert_array_equal(result["raw_dual_ray"], -np.ones(len(lp.rows)))
+    assert result["trigger_ray_rejected_reason"] is None
+    # This is still only an untrusted numerical proposal, not a certificate.
+    assert not result["infeasible"] and "exact_farkas_replay_verified" not in result
+    import json
+    stored = json.loads((tmp_path / "warning.proposal.json").read_text())
+    for key in ("trigger_ray_returned_vector_present", "trigger_ray_raw_dimension",
+                "trigger_ray_returned_vector_finite", "trigger_ray_returned_vector_nonzero",
+                "trigger_ray_returned_vector_support_size"):
+        assert stored[key] == result[key]
+    original_repair, original_replay, replays = O.repair_fixed_phase_dual_ray, O.verify_exact_lp_farkas, []
+    def repair(model, ray, seconds, **kwargs):
+        assert model is lp
+        np.testing.assert_array_equal(ray, result["original_row_dual_ray"])
+        repairs.append(ray)
+        return original_repair(model, ray, seconds, **kwargs)
+    def replay(model, certificate):
+        assert model is lp and certificate["canonical_lp_sha256"] == lp.identity()
+        replays.append(certificate)
+        return original_replay(model, certificate)
+    monkeypatch.setattr(O, "repair_fixed_phase_dual_ray", repair)
+    monkeypatch.setattr(O, "verify_exact_lp_farkas", replay)
+    report = O.attempt_fixed_phase_certificate(lp, method, 2., trigger_proposal=result,
+        certificate_solver=forbidden_dedicated, factor_cache={})
+    assert len(repairs) == len(replays) == 1
+    assert report["direct_ray_repair_status"] == "EXACT_FARKAS_VERIFIED"
+    assert report["exact_farkas_replay_verified"] and report["full_original_lp_replay_completed"]
+    assert report["trigger_ray_raw_dimension"] == len(lp.rows)
+    assert report["trigger_ray_returned_vector_finite"] is True
+    assert report["certificate_ray_source"] == "TRIGGER_" + method
+    assert not report["dedicated_certificate_fallback_used"] and not report["permits_node_exclusion"]

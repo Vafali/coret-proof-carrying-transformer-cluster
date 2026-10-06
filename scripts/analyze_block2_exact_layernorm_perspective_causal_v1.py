@@ -2808,6 +2808,11 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
                  "trigger_ray_forced_request_status": None,
                  "trigger_ray_forced_request_has_ray": None,
                  "trigger_ray_forced_request_seconds": 0.,
+                 "trigger_ray_returned_vector_present": False,
+                 "trigger_ray_returned_vector_finite": None,
+                 "trigger_ray_returned_vector_nonzero": None,
+                 "trigger_ray_returned_vector_support_size": None,
+                 "trigger_ray_returned_vector_shape": None,
                  "trigger_ray_pre_request_reason": (None if ray_status == highspy.HighsStatus.kOk and ray_exists
                                                     else "NO_CACHED_TRIGGER_RAY")}
     acquisition_started = time.perf_counter()
@@ -2822,13 +2827,40 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
                 trigger_ray_forced_request_has_ray=bool(returned),
                 trigger_ray_forced_request_seconds=time.perf_counter() - request_started)
         ray_audit["trigger_ray_exist"] = bool(returned)
-        if ray_call_status == highspy.HighsStatus.kOk and returned:
+        if trigger_mode:
+            # The binding returns values even with kWarning. A status is not
+            # proof, but must not erase a supplied numerical ray candidate.
+            vector = None
+            ray_audit["trigger_ray_returned_vector_present"] = values is not None
+            if values is not None:
+                try:
+                    supplied = np.asarray(values)
+                    ray_audit.update(trigger_ray_raw_dimension=int(supplied.size),
+                                     trigger_ray_returned_vector_shape=list(supplied.shape))
+                    vector = np.asarray(supplied, dtype=np.float64)
+                except (TypeError, ValueError):
+                    ray_audit["trigger_ray_rejected_reason"] = "FORCED_TRIGGER_RAY_VECTOR_MALFORMED" if forced else "TRIGGER_RAY_VECTOR_MALFORMED"
+                else:
+                    ray_audit.update(trigger_ray_returned_vector_finite=bool(np.isfinite(vector).all()),
+                        trigger_ray_returned_vector_nonzero=bool(np.any(vector)),
+                        trigger_ray_returned_vector_support_size=int(np.count_nonzero(vector)))
+            prefix = "FORCED_TRIGGER_RAY_" if forced else "TRIGGER_RAY_"
+            if ray_call_status == highspy.HighsStatus.kError:
+                ray_audit["trigger_ray_rejected_reason"] = prefix + "STATUS_ERROR"
+            elif not returned:
+                ray_audit["trigger_ray_rejected_reason"] = prefix + "HAS_RAY_FALSE"
+            elif values is None:
+                ray_audit["trigger_ray_rejected_reason"] = prefix + "VECTOR_MISSING"
+            elif vector is not None:
+                raw_ray = vector  # kWarning is allowed ONLY as an untrusted candidate.
+        elif ray_call_status == highspy.HighsStatus.kOk and returned:
+            # Strict/root and dedicated solve extraction remain unchanged.
             raw_ray = np.asarray(values, dtype=np.float64)
     original_row_ray = None
     if trigger_mode:
         forced = ray_audit["trigger_ray_forced_request_attempted"]
         if raw_ray is None:
-            ray_audit["trigger_ray_rejected_reason"] = ("FORCED_TRIGGER_RAY_UNAVAILABLE" if forced
+            ray_audit["trigger_ray_rejected_reason"] = ray_audit["trigger_ray_rejected_reason"] or ("FORCED_TRIGGER_RAY_UNAVAILABLE" if forced
                 else "NO_EXPOSED_TRIGGER_RAY" if ray_audit["trigger_ray_cached_before_request"]
                 else "NO_CACHED_TRIGGER_RAY")
         else:
@@ -2840,7 +2872,7 @@ def solve_highspy(lp: ExactCanonicalLP, log_path: Path | None = None,
                 ray_audit["trigger_ray_rejected_reason"] = ("FORCED_TRIGGER_RAY_NONFINITE" if forced
                                                           else "TRIGGER_RAY_NONFINITE_OR_ZERO")
             elif not np.any(raw_ray):
-                ray_audit["trigger_ray_rejected_reason"] = ("FORCED_TRIGGER_RAY_UNAVAILABLE" if forced
+                ray_audit["trigger_ray_rejected_reason"] = ("FORCED_TRIGGER_RAY_ZERO" if forced
                                                           else "TRIGGER_RAY_NONFINITE_OR_ZERO")
             elif not _proposal_model_unchanged(highs, solver_arrays, diagnostic):
                 ray_audit["trigger_ray_rejected_reason"] = ("FORCED_TRIGGER_RAY_PROVENANCE_AMBIGUOUS" if forced
@@ -4420,6 +4452,11 @@ def _validated_trigger_row_ray(lp, proposal, method):
         "trigger_ray_forced_request_status": proposal.get("trigger_ray_forced_request_status"),
         "trigger_ray_forced_request_has_ray": proposal.get("trigger_ray_forced_request_has_ray"),
         "trigger_ray_forced_request_seconds": proposal.get("trigger_ray_forced_request_seconds", 0.),
+        "trigger_ray_returned_vector_present": proposal.get("trigger_ray_returned_vector_present", False),
+        "trigger_ray_returned_vector_finite": proposal.get("trigger_ray_returned_vector_finite"),
+        "trigger_ray_returned_vector_nonzero": proposal.get("trigger_ray_returned_vector_nonzero"),
+        "trigger_ray_returned_vector_support_size": proposal.get("trigger_ray_returned_vector_support_size"),
+        "trigger_ray_returned_vector_shape": proposal.get("trigger_ray_returned_vector_shape"),
         "trigger_ray_pre_request_reason": proposal.get("trigger_ray_pre_request_reason")}
     forced = audit["trigger_ray_forced_request_attempted"] is True
     def reject(reason):
@@ -4442,7 +4479,7 @@ def _validated_trigger_row_ray(lp, proposal, method):
     if not np.isfinite(raw).all() or not np.isfinite(mapped).all():
         return reject("FORCED_TRIGGER_RAY_NONFINITE" if forced else "TRIGGER_RAY_NONFINITE_OR_ZERO")
     if not np.any(mapped):
-        return reject("FORCED_TRIGGER_RAY_UNAVAILABLE" if forced else "TRIGGER_RAY_NONFINITE_OR_ZERO")
+        return reject("FORCED_TRIGGER_RAY_ZERO" if forced else "TRIGGER_RAY_NONFINITE_OR_ZERO")
     mapping = proposal.get("row_ray_mapping") or {}
     scaling = proposal.get("solver_scaling") or {}
     diagnostic = proposal.get("construction_diagnostic") or {}
