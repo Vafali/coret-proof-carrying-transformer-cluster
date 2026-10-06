@@ -54,6 +54,10 @@ EXACT_ZERO_VERIFIED = "EXACT_AUTHENTICATED_ZERO_WITNESS_VERIFIED"
 VARIANT_NAMES = (
     "complete_post_reduction", "native_only",
     "authenticated_pre_reduction")
+EXCLUSION_SCHEMA = "CORET_BLOCK2_OUTPUT_ZERO_VARIANCE_EXACT_FARKAS_V1"
+FEASIBLE = "EXACT_ZERO_VARIANCE_FEASIBLE"
+EXCLUDED = "EXACT_ZERO_VARIANCE_EXCLUDED"
+INCONCLUSIVE = "INCONCLUSIVE"
 
 
 def _atomic_json(path: Path, value: dict) -> dict:
@@ -425,6 +429,84 @@ def verify_exact_zero_certificate(problem: dict, certificate: dict) -> dict:
         "exact_equalities": len(residuals), "exact_box_constraints": len(values),
         "maximum_exact_residual": "0", "exact_variance": "0",
     }
+
+
+def _rational_json(value: Fraction) -> dict:
+    return {"numerator": str(value.numerator), "denominator": str(value.denominator)}
+
+
+def _read_rational(value: dict) -> Fraction:
+    try:
+        return Fraction(int(value["numerator"]), int(value["denominator"]))
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as error:
+        raise RuntimeError("exact certificate rational is malformed") from error
+
+
+def _farkas_replay(problem: dict, direction: list[Fraction]) -> dict:
+    """Full ORIGINAL coordinate-difference equations and box inequalities.
+
+    h + A xi = 0. Equality multiplier y is signed (equivalently split
+    between the two canonical inequality orientations). For a=y*A, bound
+    multipliers are lower=max(a,0), upper=max(-a,0). They cancel a exactly.
+    RHS = -y*h - sum min(a*low,a*high) must be STRICTLY negative.
+    No numerical LP coefficient or rounded centered matrix is used here.
+    """
+    rhs = -sum((y * _exact_center_difference(problem, row)
+                for row, y in enumerate(direction)), Fraction(0))
+    lower_count = upper_count = 0
+    for column in range(problem["variable_count"]):
+        a = sum((y * _exact_coefficient(problem, row, column)
+                 for row, y in enumerate(direction) if y), Fraction(0))
+        lower, upper = max(a, Fraction(0)), max(-a, Fraction(0))
+        if lower < 0 or upper < 0 or a - lower + upper != 0:
+            raise RuntimeError("exact Farkas cancellation/nonnegativity failed")
+        rhs -= lower * _fraction(problem["low"][column])
+        rhs += upper * _fraction(problem["high"][column])
+        lower_count += lower > 0
+        upper_count += upper > 0
+    return {"exact_farkas_rhs": _rational_json(rhs),
+            "exact_equalities": problem["dimension"] - 1,
+            "exact_box_constraints": 2 * problem["variable_count"],
+            "positive_lower_bound_multipliers": lower_count,
+            "positive_upper_bound_multipliers": upper_count,
+            "exact_cancellation_verified": True, "exact_nonnegativity_verified": True}
+
+
+def verify_exact_exclusion_certificate(problem: dict, certificate: dict) -> dict:
+    if (certificate.get("schema") != EXCLUSION_SCHEMA or
+            certificate.get("problem_sha256") != problem["problem_sha256"] or
+            certificate.get("generator_ids_sha256") != _json_sha(problem["ids"]) or
+            certificate.get("reference_coordinate") != problem["dimension"] - 1 or
+            certificate.get("bound_multiplier_rule") != "exact_sign_of_yA" or
+            len(certificate.get("equality_multipliers", [])) != problem["dimension"] - 1):
+        raise RuntimeError("exact exclusion certificate identity/shape differs")
+    direction = [_read_rational(x) for x in certificate["equality_multipliers"]]
+    checked = _farkas_replay(problem, direction)
+    if (_read_rational(checked["exact_farkas_rhs"]) >= 0 or
+            checked["exact_farkas_rhs"] != certificate.get("exact_farkas_rhs")):
+        raise RuntimeError("exact exclusion certificate RHS is not negative or differs")
+    return {**checked, "verified": True}
+
+
+def construct_exact_exclusion_certificate(problem: dict, witness) -> dict | None:
+    # A floating dual is ONLY a direction proposal. Recenter it EXACTLY to
+    # obtain a sum-zero functional; all subsequent operations are rational.
+    if len(witness) != problem["dimension"] or not np.isfinite(witness).all():
+        return None
+    values = [_fraction(x) for x in witness]
+    mean = sum(values, Fraction(0)) / problem["dimension"]
+    direction = [x - mean for x in values[:-1]]
+    checked = _farkas_replay(problem, direction)
+    if _read_rational(checked["exact_farkas_rhs"]) >= 0:
+        return None
+    certificate = {"schema": EXCLUSION_SCHEMA, "problem_sha256": problem["problem_sha256"],
+                   "generator_ids_sha256": _json_sha(problem["ids"]),
+                   "reference_coordinate": problem["dimension"] - 1,
+                   "equality_multipliers": [_rational_json(x) for x in direction],
+                   "bound_multiplier_rule": "exact_sign_of_yA",
+                   "exact_farkas_rhs": checked["exact_farkas_rhs"]}
+    verify_exact_exclusion_certificate(problem, certificate)
+    return certificate
 
 
 class ExactBareissTimeoutError(RuntimeError):
@@ -969,7 +1051,8 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
                    certificate_dir: Path, *, skip_exact: bool = False,
                    exact_only_if_near_zero: bool = True,
                    fast_first: bool = True,
-                   exact_solve_timeout_seconds: float = 300.0) -> dict:
+                   exact_solve_timeout_seconds: float = 300.0,
+                   require_exact_exclusion: bool = False) -> dict:
     started = time.perf_counter()
     problem = centered_problem(
         variant["center"], variant["generators"],
@@ -988,12 +1071,22 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
     exact = None
     upper = None
     certificate_record = None
-    if dual["best"]["outward_safe_lower"] > 0.0:
+    exclusion = None
+    exclusion_record = None
+    if require_exact_exclusion:
+        exclusion_started = time.perf_counter()
+        _progress(name, "exact_farkas_replay_start", exclusion_started)
+        exclusion = construct_exact_exclusion_certificate(
+            problem, [float.fromhex(x) for x in dual["best"]["witness_binary64_hex"]])
+        _progress(name, "exact_farkas_replay_complete", exclusion_started,
+                  verified=exclusion is not None)
+    if exclusion is not None or (not require_exact_exclusion and dual["best"]["outward_safe_lower"] > 0.0):
         exact_status = {
             "attempted": False,
-            "reason": "positive outward-safe dual lower established first",
+            "reason": ("exact original-equation/box Farkas replay verified" if require_exact_exclusion
+                       else "positive outward-safe dual lower established first"),
         }
-        decision = DECISION_POSITIVE
+        decision = EXCLUDED if require_exact_exclusion else DECISION_POSITIVE
     elif skip_exact:
         exact_status = {
             "attempted": False, "reason": "exact stage disabled by --skip-exact"}
@@ -1016,7 +1109,7 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
             verified=bool(exact_status.get("verified", False)),
             reason=exact_status.get("reason"))
         if exact is not None:
-            decision = DECISION_ZERO
+            decision = FEASIBLE if require_exact_exclusion else DECISION_ZERO
         else:
             upper_started = time.perf_counter()
             _progress(name, "exact_candidate_upper_start", upper_started)
@@ -1026,6 +1119,8 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
                 variance_upper_outward_binary64=
                     upper["variance_upper_outward_binary64"])
             decision = DECISION_UNRESOLVED
+    if require_exact_exclusion and decision == DECISION_UNRESOLVED:
+        decision = INCONCLUSIVE
     if exact is not None:
         certificate_path = certificate_dir / f"{name}_exact_zero_witness.json"
         persisted = _atomic_json(certificate_path, exact)
@@ -1036,6 +1131,12 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
             "sha256": oracle.sha256(certificate_path),
             "record_sha256": persisted["record_sha256"],
         }
+    if exclusion is not None:
+        exclusion_path = certificate_dir / f"{name}_exact_exclusion.json"
+        persisted = _atomic_json(exclusion_path, exclusion)
+        verify_exact_exclusion_certificate(problem, persisted)
+        exclusion_record = {"path": str(exclusion_path), "sha256": oracle.sha256(exclusion_path),
+                            "record_sha256": persisted["record_sha256"]}
     record = {
         "variant": name, "decision": decision,
         "generator_count": problem["variable_count"],
@@ -1046,6 +1147,7 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
         "primal_exact_binary64_candidate_upper": upper,
         "exact_zero_certificate_status": exact_status,
         "exact_zero_certificate": certificate_record,
+        "exact_exclusion_certificate": exclusion_record,
         "dual_search": dual,
         "runtime_seconds": time.perf_counter() - started,
     }
@@ -1055,12 +1157,114 @@ def decide_variant(name: str, variant: dict, exact_max_rank: int,
     return record
 
 
+def _capture_variant(state: dict, token: int) -> dict:
+    return oracle._variant({"weights": state["weights"].numpy(),
+                            "low": state["range_low"].numpy(), "high": state["range_high"].numpy(),
+                            "ids": state["proof"]["ids"], "reasons": state["proof"]["reasons"],
+                            "num_tokens": state["proof"]["num_tokens"]}, token, False)
+
+
+def _variant_problem(variant):
+    return centered_problem(variant["center"], variant["generators"],
+                            variant["low"], variant["high"], variant["ids"])
+
+
+def _authorize_all_tokens(report_path: Path, identity: dict, state: dict) -> dict:
+    if report_path is None:
+        raise RuntimeError("--token-index all requires --token4-exclusion-report; token 4 first")
+    report = cluster_common.verified_json(report_path)
+    if (report.get("schema") != SCHEMA or report.get("property_id") != identity["identity"]["property_id"] or
+            report.get("requested_token_scope") != "4" or report.get("final_status") != EXCLUDED or
+            report.get("authenticated_capture") != identity or len(report.get("results", [])) != 1):
+        raise RuntimeError("all-token authorization is not an authenticated token-4 exclusion")
+    row = report["results"][0]
+    if row.get("token_index") != 4 or row.get("decision") != EXCLUDED:
+        raise RuntimeError("token-4 exclusion result differs")
+    certificate = row.get("exact_exclusion_certificate") or {}
+    path = Path(certificate.get("path", ""))
+    if not path.is_file() or oracle.sha256(path) != certificate.get("sha256"):
+        raise RuntimeError("token-4 exclusion certificate SHA differs")
+    # Report status itself has no authority: independently replay again.
+    verify_exact_exclusion_certificate(_variant_problem(_capture_variant(state, 4)),
+                                       cluster_common.verified_json(path))
+    return row
+
+
+def _execute_benchmark_capture(manifest_path, output_path, exact_max_rank, *,
+                               fast_first, skip_exact, exact_only_if_near_zero,
+                               exact_solve_timeout_seconds, variant,
+                               expected_property_id, token_index, token4_exclusion_report):
+    import capture_benchmark24_block2_output_zero_variance_v1 as capture
+    if expected_property_id != capture.PROPERTY_ID:
+        raise RuntimeError("new capture requires its exact --expected-property-id")
+    if variant not in ("complete_post_reduction", "all"):
+        raise RuntimeError("new capture oracle must use ALL authenticated generators/ranges")
+    token_index = "4" if token_index is None else str(token_index)
+    if token_index not in ("4", "all"):
+        raise RuntimeError("first oracle target is native tensor token 4; then authorized all")
+    if output_path.exists() or output_path.with_suffix(".partial.json").exists():
+        raise RuntimeError("refusing to overwrite a zero-variance diagnostic")
+    started = time.perf_counter()
+    state, identity = capture.verify_capture(manifest_path)
+    _progress("complete_post_reduction", "loading_authentication_complete", started,
+              artifact_sha256=identity["artifact_sha256"], token_index=token_index)
+    rows = []
+    if token_index == "all":
+        rows.append(_authorize_all_tokens(token4_exclusion_report, identity, state))
+        tokens = [i for i in range(state["proof"]["num_tokens"]) if i != 4]
+    else:
+        tokens = [4]
+    for token in tokens:
+        row = decide_variant(
+            f"complete_post_reduction_token_{token}", _capture_variant(state, token),
+            exact_max_rank, output_path.parent / f"{output_path.stem}_certificates",
+            skip_exact=skip_exact, exact_only_if_near_zero=exact_only_if_near_zero,
+            fast_first=fast_first, exact_solve_timeout_seconds=exact_solve_timeout_seconds,
+            require_exact_exclusion=True)
+        row["token_index"] = token
+        rows.append(row)
+        print(json.dumps({"event": "ZERO_VARIANCE_VARIANT_RESULT", "result": row}, sort_keys=True), flush=True)
+        _atomic_json(output_path.with_suffix(".partial.json"), {
+            "schema": SCHEMA, "property_id": expected_property_id, "authenticated_capture": identity,
+            "requested_token_scope": token_index, "results": rows, "partial": True,
+            "scientific_queries": 0, "bound_calls": 0})
+        if row["decision"] == FEASIBLE:
+            break  # One exact token witness already answers the existential question.
+    final_status = (FEASIBLE if any(r["decision"] == FEASIBLE for r in rows) else
+                    EXCLUDED if len(rows) == (1 if token_index == "4" else state["proof"]["num_tokens"])
+                    and all(r["decision"] == EXCLUDED for r in rows) else INCONCLUSIVE)
+    return _atomic_json(output_path, {
+        "schema": SCHEMA, "property_id": expected_property_id, "stage_label": STAGE,
+        "authenticated_capture": identity, "requested_token_scope": token_index,
+        "token_index_convention": "zero_based_native_tensor", "results": rows,
+        "final_status": final_status, "complete_state_decision": final_status,
+        "decision_scope": "token_4_only" if token_index == "4" else "any_token_zero_variance",
+        "interpretation": {FEASIBLE: "Captured abstract state admits a constant vector; tightening alone cannot exclude it.",
+                           EXCLUDED: "Exact zero excluded only for the stated token scope; no production variance repair implemented.",
+                           INCONCLUSIVE: "No exact decision for the stated scope; numerical statuses have no authority."}[final_status],
+        "optimizer_is_untrusted": True, "all_numerical_generators_included": True,
+        "zero_decision_requires_exact_rational_witness": True,
+        "exclusion_requires_full_original_equation_and_box_farkas_replay": True,
+        "runtime_seconds": time.perf_counter() - started, "scientific_queries": 0, "bound_calls": 0})
+
+
 def execute(manifest_path: Path, output_path: Path,
             exact_max_rank: int = 128, *, fast_first: bool = True,
             skip_exact: bool = False,
             exact_only_if_near_zero: bool = True,
             exact_solve_timeout_seconds: float = 300.0,
-            variant: str = "all") -> dict:
+            variant: str = "all", expected_property_id: str | None = None,
+            token_index: str | None = None, token4_exclusion_report: Path | None = None) -> dict:
+    import capture_benchmark24_block2_output_zero_variance_v1 as capture
+    if cluster_common.verified_json(manifest_path).get("schema") == capture.MANIFEST_SCHEMA:
+        return _execute_benchmark_capture(
+            manifest_path, output_path, exact_max_rank, fast_first=fast_first,
+            skip_exact=skip_exact, exact_only_if_near_zero=exact_only_if_near_zero,
+            exact_solve_timeout_seconds=exact_solve_timeout_seconds, variant=variant,
+            expected_property_id=expected_property_id, token_index=token_index,
+            token4_exclusion_report=token4_exclusion_report)
+    if expected_property_id not in (None, PROPERTY_ID) or token_index is not None or token4_exclusion_report is not None:
+        raise RuntimeError("legacy capture property/token interface differs")
     selected_variant = variant
     load_started = time.perf_counter()
     variants, identity = _load_authenticated_variants(manifest_path)
@@ -1114,6 +1318,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--capture-manifest", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--expected-property-id")
+    parser.add_argument("--token-index", choices=("4", "all"),
+                        help="New capture: native zero-based token 4 first; all only after exact exclusion")
+    parser.add_argument("--token4-exclusion-report", type=Path)
     parser.add_argument("--exact-max-rank", type=int, default=128)
     parser.add_argument(
         "--exact-solve-timeout-seconds", type=float, default=300.0)
@@ -1136,7 +1344,9 @@ def main() -> int:
                      exact_only_if_near_zero=args.exact_only_if_near_zero,
                      exact_solve_timeout_seconds=
                      args.exact_solve_timeout_seconds,
-                     variant=args.variant)
+                     variant=args.variant, expected_property_id=args.expected_property_id,
+                     token_index=args.token_index,
+                     token4_exclusion_report=args.token4_exclusion_report)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
