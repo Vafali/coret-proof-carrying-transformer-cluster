@@ -1,0 +1,153 @@
+{
+  "benchmark_manifest_sha256": "46f5380d7bfacd0cc61da2938465d951fa3e72246b01a98223352510b331a338",
+  "independent_checker_authority": "NONE; positive producer records remain NOT_AVAILABLE/INCONCLUSIVE",
+  "non_success_threshold": 17,
+  "ordering_fields": [
+    "sequence_length",
+    "property_id"
+  ],
+  "prior_property_ids": [
+    "deept_table7_stdln3_s001_line1794_tok05",
+    "deept_table7_stdln3_s004_line216_tok09",
+    "deept_table7_stdln3_s002_line1468_tok06"
+  ],
+  "properties": [
+    {
+      "property_id": "deept_table7_stdln3_s002_line1468_tok01",
+      "sequence_length": 8,
+      "tested_radius": 0.0008825683593749998,
+      "tested_radius_hex": "0x1.ceb851eb851eap-11"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s004_line216_tok01",
+      "sequence_length": 12,
+      "tested_radius": 0.0008178710937500001,
+      "tested_radius_hex": "0x1.acccccccccccep-11"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s004_line216_tok04",
+      "sequence_length": 12,
+      "tested_radius": 0.0012731933593749997,
+      "tested_radius_hex": "0x1.4dc28f5c28f5bp-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s005_line1931_tok02",
+      "sequence_length": 16,
+      "tested_radius": 0.0009387207031249999,
+      "tested_radius_hex": "0x1.ec28f5c28f5c2p-11"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s005_line1931_tok10",
+      "sequence_length": 16,
+      "tested_radius": 0.0011572265625,
+      "tested_radius_hex": "0x1.2f5c28f5c28f6p-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s005_line1931_tok14",
+      "sequence_length": 16,
+      "tested_radius": 0.001341552734375,
+      "tested_radius_hex": "0x1.5fae147ae147bp-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s006_line882_tok03",
+      "sequence_length": 16,
+      "tested_radius": 0.001361083984375,
+      "tested_radius_hex": "0x1.64ccccccccccdp-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s006_line882_tok11",
+      "sequence_length": 16,
+      "tested_radius": 0.00115478515625,
+      "tested_radius_hex": "0x1.2eb851eb851ecp-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s006_line882_tok13",
+      "sequence_length": 16,
+      "tested_radius": 0.0013122558593749998,
+      "tested_radius_hex": "0x1.57fffffffffffp-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s003_line2031_tok01",
+      "sequence_length": 17,
+      "tested_radius": 0.0009405517578124999,
+      "tested_radius_hex": "0x1.ed1eb851eb851p-11"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s003_line2031_tok08",
+      "sequence_length": 17,
+      "tested_radius": 0.00130126953125,
+      "tested_radius_hex": "0x1.551eb851eb852p-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s003_line2031_tok12",
+      "sequence_length": 17,
+      "tested_radius": 0.0012030029296875003,
+      "tested_radius_hex": "0x1.3b5c28f5c28f7p-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s007_line1172_tok07",
+      "sequence_length": 18,
+      "tested_radius": 0.0011499023437500002,
+      "tested_radius_hex": "0x1.2d70a3d70a3d8p-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s007_line1172_tok15",
+      "sequence_length": 18,
+      "tested_radius": 0.001005859375,
+      "tested_radius_hex": "0x1.07ae147ae147bp-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s000_line504_tok01",
+      "sequence_length": 20,
+      "tested_radius": 0.000968017578125,
+      "tested_radius_hex": "0x1.fb851eb851eb8p-11"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s000_line504_tok14",
+      "sequence_length": 20,
+      "tested_radius": 0.0011590576171875001,
+      "tested_radius_hex": "0x1.2fd70a3d70a3ep-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s009_line2029_tok01",
+      "sequence_length": 22,
+      "tested_radius": 0.0009210205078124999,
+      "tested_radius_hex": "0x1.e2e147ae147adp-11"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s009_line2029_tok09",
+      "sequence_length": 22,
+      "tested_radius": 0.001243896484375,
+      "tested_radius_hex": "0x1.46147ae147ae1p-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s009_line2029_tok14",
+      "sequence_length": 22,
+      "tested_radius": 0.0012268066406250003,
+      "tested_radius_hex": "0x1.419999999999bp-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s001_line1794_tok16",
+      "sequence_length": 27,
+      "tested_radius": 0.0011920166015625,
+      "tested_radius_hex": "0x1.387ae147ae148p-10"
+    },
+    {
+      "property_id": "deept_table7_stdln3_s001_line1794_tok25",
+      "sequence_length": 27,
+      "tested_radius": 0.001397705078125,
+      "tested_radius_hex": "0x1.6e66666666666p-10"
+    }
+  ],
+  "property_count": 24,
+  "queue_sha256": "bc23bb8d2ad7dbe074326123d2e948ed0a420ee2fb4e22f564e2ab1a547982f4",
+  "remaining_count": 21,
+  "schema": "CORET_BENCHMARK24_PRODUCER_SCREENING_QUEUE_V1",
+  "source_population_sha256": "aea4f32053eeab2c88412e94156ac6f2ea7deb2513835942e9cc03569e0e49c8",
+  "success_predicate": "producer_proof_status == CERTIFIED_MARGIN AND final_sound_lower_margin > 0 AND certificate_integrity_status == PASS",
+  "success_threshold": 8,
+  "worker_ids": [
+    0,
+    1
+  ]
+}
