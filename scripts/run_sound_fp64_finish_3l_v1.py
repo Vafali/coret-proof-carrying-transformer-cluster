@@ -42,6 +42,15 @@ EXPECTED_REPORT_SHA256 = (
     "cc6d644a551dfc0beee8284a5c1ee5b94f12d9453d9a700e813735fa35565f74")
 LAYER_NORM_EPSILON = 1e-12
 LAYERNORM_DOMAIN_REASON = "SOUND_FP64_LAYERNORM_VARIANCE_DOMAIN_FAILURE"
+PRODUCER_REVISION = "SOUND_FP64_SEMANTIC_EPSILON_FLOOR_RESULT_HANDLING_V2"
+
+
+def _final_margin_verdict(lower, upper):
+    """A finite nonpositive bound is scientific failure, not an exception."""
+    if (not math.isfinite(lower) or not math.isfinite(upper) or lower > upper):
+        raise RuntimeError("final sound margin interval is nonfinite or malformed")
+    return ("CORET_SOUND_FP64_3L_PROPERTY_READY" if lower > 0
+            else "CORET_SOUND_FP64_3L_UNCERTIFIED_MARGIN")
 
 
 def _layernorm_variance_state(residual, proof, label: str):
@@ -836,9 +845,7 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                     and spot.get("state_reserve_contains_machine_error") is True
                     for spot in spots))):
                 raise RuntimeError("representative MPFR/one-ULP evidence incomplete")
-            if final_lower <= 0:
-                raise RuntimeError(
-                    f"final sound margin is not positive: {final_lower}")
+            margin_verdict = _final_margin_verdict(final_lower, final_upper)
             maximum_ratio = max(row["numerical_native_ratio"] for row in rows)
             maximum_reduction_inflation = max(
                 (float(item["support_inflation"]) for item in reductions),
@@ -851,7 +858,8 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
             total_seconds = time.perf_counter() - total_started
             artifact_report = {
                 "schema": SCHEMA,
-                "verdict": "CORET_SOUND_FP64_3L_PROPERTY_READY",
+                "verdict": margin_verdict,
+                "producer_revision": PRODUCER_REVISION,
                 "authenticated_input": authenticated,
                 "fixture_token_ids": list(prefix.FIXTURE_TOKEN_IDS),
                 "fixture_rho_hex": float(prefix.FIXTURE_RHO).hex(),

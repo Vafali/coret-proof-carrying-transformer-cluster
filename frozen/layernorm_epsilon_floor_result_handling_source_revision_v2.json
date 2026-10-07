@@ -1,0 +1,20 @@
+{
+  "benchmark_manifest_sha256": "46f5380d7bfacd0cc61da2938465d951fa3e72246b01a98223352510b331a338",
+  "bound_calls": 0,
+  "producer_revision": "SOUND_FP64_SEMANTIC_EPSILON_FLOOR_RESULT_HANDLING_V2",
+  "record_sha256": "58e9196b5fcd60a8b6b80fe12c29a194a0f08a0203ea200be54eb5a5be016d8c",
+  "scientific_queries": 0,
+  "source_hashes": {
+    "research_hab/coret_psd_layernorm_experiment_v1.py": "cea51d2e69a41444c215c3aaa0e289be5f5f83e9ff4c8c4d040d8d11d6198235",
+    "research_hab/coret_sound_fp64_block0_feasibility_v1.py": "9d68c8fd19985c2930d5ef676e40619fc5ed33b1d64e0bc73f5f3b056fec8281",
+    "scripts/certify_block2_output_separating_variance_v1.py": "b40a11a07b684e2a56c8c41e294a2f2da45ff023a639c059ca2c1d93f7e4e694",
+    "scripts/run_sound_fp64_3l_campaign.py": "20df4d1cd79134dff9baa3b6d701fde618506acd19637f431abfe77a1be1c9d8",
+    "scripts/run_sound_fp64_epsilon_floor_property_v1.py": "8c2614ee7109c1830543da974f5e9a59491b179a00434e93d2e81e9cb84c58e7",
+    "scripts/run_sound_fp64_finish_3l_v1.py": "cbabfbf4856b35c5d8e976cb84d33256e285909ad7c01ec5b9421977ee955756",
+    "scripts/run_sound_fp64_separator_property_v1.py": "f409c9b46442329ef607a2e7a580627a829e887a21de0b163cb6ced2de861933",
+    "scripts/semantic_epsilon_floor_checker_v1.py": "99237de2a6e4d2ed302d003bc475f579c9c903cfa74a4c505c68dd275a00d7fd",
+    "scripts/separating_variance_checker_v1.py": "99255b79ef91bcf03a85afd5f620b7523b258052fba6cfec1011231a4f0f6d56",
+    "scripts/sound_fp64_layernorm_epsilon_floor_v1.py": "fe95007a23e204b6f4248111a294fb79c9fe67102899d461349860ff3a469e1e",
+    "scripts/sound_fp64_layernorm_separator_v1.py": "a42b3cd4c22d6ea0e7ac855c7bf7c3dd4a15cdcdbb7fc79404f24ae512d13720"
+  }
+}

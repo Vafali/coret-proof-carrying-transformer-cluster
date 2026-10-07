@@ -1,8 +1,10 @@
 # Semantic epsilon-floor LayerNorm revision
 
-Producer revision: `SOUND_FP64_SEMANTIC_EPSILON_FLOOR_V1`. The separate
-`frozen/layernorm_epsilon_floor_source_revision_v1.json` authenticates its
-sources. The frozen benchmark manifest and historical candidate radii are
+Current result-handling revision:
+`SOUND_FP64_SEMANTIC_EPSILON_FLOOR_RESULT_HANDLING_V2`. The separate
+`frozen/layernorm_epsilon_floor_result_handling_source_revision_v2.json`
+authenticates its sources; the original epsilon-floor V1 revision record is
+preserved unchanged. The frozen benchmark manifest and historical candidate radii are
 unchanged. The previous separator revision's pins intentionally reject this
 new code; they are not rewritten.
 
@@ -70,6 +72,16 @@ separator path. Passing its domain obligation does not promise a positive
 final margin. Witness storage uses one full input and output binary64 block
 per fallback LayerNorm (`O(g*t*d)` each), plus exact bounds and proof metadata.
 
+Finite final margins, including zero/negative lower bounds, persist the final
+state, report and domain-witness archive. The existing campaign schema uses
+`terminal_status=COMPLETE` for a completed evaluation; a nonpositive lower
+margin sets `scientific_evaluation_complete=true`,
+`certified_at_historical_radius=false`, `classification=FAILED_AT_HISTORICAL_RADIUS`
+and report verdict `CORET_SOUND_FP64_3L_UNCERTIFIED_MARGIN`. Results include
+epsilon-floor labels/tokens, semantic intervals, archive path/SHA, both margin
+endpoints, generator count, widening/ratio and producer revision. Nonfinite
+or malformed final intervals still raise and become infrastructure failures.
+
 ## ONE manual ISIS property validation (not executed locally)
 
 Preconditions: these source files and the new revision manifest transferred;
@@ -83,5 +95,5 @@ sbatch --job-name=coret-s003-tok08-epsilon-floor \
   --nodes=1 --ntasks=1 --cpus-per-task=4 --mem=64G --time=02:00:00 \
   --output="$HOME/slurm_logs/coret-s003-tok08-epsilon-floor-%j.out" \
   --error="$HOME/slurm_logs/coret-s003-tok08-epsilon-floor-%j.err" \
-  --wrap='env CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 CUBLAS_WORKSPACE_CONFIG=:4096:8 "$HOME/.conda/envs/coret-cluster-a268be7/bin/python" -u "$HOME/projects/coret-proof-carrying-transformer-cluster/scripts/run_sound_fp64_epsilon_floor_property_v1.py" --property-id deept_table7_stdln3_s003_line2031_tok08 --artifact-root "$HOME/projects/coret-proof-carrying-transformer-cluster/runtime_inputs" --result-root "$HOME/coret-s003-tok08-epsilon-floor-v1" --device cuda:0'
+  --wrap='env CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 CUBLAS_WORKSPACE_CONFIG=:4096:8 "$HOME/.conda/envs/coret-cluster-a268be7/bin/python" -u "$HOME/projects/coret-proof-carrying-transformer-cluster/scripts/run_sound_fp64_epsilon_floor_property_v1.py" --property-id deept_table7_stdln3_s003_line2031_tok08 --artifact-root "$HOME/projects/coret-proof-carrying-transformer-cluster/runtime_inputs" --result-root "$HOME/coret-s003-tok08-epsilon-floor-result-v2" --device cuda:0'
 ```

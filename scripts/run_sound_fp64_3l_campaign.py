@@ -68,6 +68,13 @@ def _verified_result(path: Path) -> dict:
                 or cluster_common.sha256(report)
                 != result.get("certificate_report_sha256")):
             raise RuntimeError(f"campaign certificate identity differs: {path}")
+        lower, upper = result.get("final_sound_lower_margin"), result.get("final_sound_upper_margin")
+        if (not isinstance(lower, (int, float)) or not isinstance(upper, (int, float))
+                or isinstance(lower, bool) or isinstance(upper, bool)):
+            raise RuntimeError(f"completed campaign margin is missing/malformed: {path}")
+        finish3l._final_margin_verdict(lower, upper)
+        if result.get("certified_at_historical_radius") is not (lower > 0):
+            raise RuntimeError(f"completed campaign margin/status differs: {path}")
         expected = ("CERTIFIED_AT_HISTORICAL_RADIUS"
                     if result.get("certified_at_historical_radius") is True
                     else "FAILED_AT_HISTORICAL_RADIUS")
@@ -537,6 +544,8 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
             }
         else:
             lower = float(report["final_sound_margin"])
+            upper = float(report["final_sound_margin_upper"])
+            finish3l._final_margin_verdict(lower, upper)
             record = {
                 "schema": RESULT_SCHEMA, "terminal_status": "COMPLETE",
                 "property_id": property_id,
@@ -550,8 +559,7 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
                 "target_comparison": [int(row["clean_label"]),
                                       1 - int(row["clean_label"])],
                 "final_sound_lower_margin": lower,
-                "final_sound_upper_margin": float(
-                    report["final_sound_margin_upper"]),
+                "final_sound_upper_margin": upper,
                 "certified_at_historical_radius": lower > 0,
                 "scientific_evaluation_complete": True,
                 "classification": ("CERTIFIED_AT_HISTORICAL_RADIUS"
@@ -566,7 +574,9 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
                 "peak_gpu_reserved_bytes": int(report["peak_reserved_bytes"]),
                 "peak_cpu_rss_bytes": int(resource.getrusage(
                     resource.RUSAGE_SELF).ru_maxrss) * 1024,
-                "failure_stage": None, "failure_reason": None,
+                "failure_stage": None if lower > 0 else "final_margin",
+                "failure_reason": None if lower > 0 else "NONPOSITIVE_SOUND_MARGIN",
+                "domain_failure_diagnostic": None,
                 "certificate_sha256": cluster_common.sha256(certificate),
                 "certificate_report_sha256": cluster_common.sha256(
                     certificate_report),
@@ -614,6 +624,16 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
             "verifier_evaluations": 1,
             "generic_fallback_count": None,
         }
+    record["producer_revision"] = finish3l.PRODUCER_REVISION
+    record["epsilon_floor_labels_tokens"] = [
+        {"label": w["label"], "tokens": w["failed_tokens"]}
+        for w in separator_witnesses if w.get("path") == "semantic_epsilon_floor"]
+    record["epsilon_floor_semantic_intervals"] = [
+        {"label": w["label"], "tokens": [
+            {k: t[k] for k in ("token_index", "variance_lower_semantic", "variance_upper",
+                               "epsilon", "regularized_range", "sqrt_range", "reciprocal_range")}
+            for t in w["tokens"]]}
+        for w in separator_witnesses if w.get("path") == "semantic_epsilon_floor"]
     if separator_witnesses:
         witness_path = directory / "layernorm_separator_witnesses.pt"
         directory.mkdir(parents=True, exist_ok=True)
@@ -636,6 +656,8 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
         os.replace(temporary, witness_path)
         record["layernorm_separator_witnesses_path"] = str(witness_path)
         record["layernorm_separator_witnesses_sha256"] = cluster_common.sha256(witness_path)
+        record["layernorm_domain_witnesses_path"] = str(witness_path)
+        record["layernorm_domain_witnesses_sha256"] = record["layernorm_separator_witnesses_sha256"]
         record["layernorm_separator_repaired_tokens"] = [
             {"label": w["label"], "tokens": w["failed_tokens"],
              "lower_by_token": w["semantic_lower_by_token"],
