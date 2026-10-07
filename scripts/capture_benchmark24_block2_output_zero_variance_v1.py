@@ -50,23 +50,26 @@ def identity(manifest, property_id=PROPERTY_ID):
     return expected
 
 
-def validate_state(state, expected):
+def validate_state(state, expected, *, generator_count=None):
     import torch  # CPU tensors only; no producer import or operator call.
+    count = EXPECTED_GENERATORS if generator_count is None else generator_count
+    if type(count) is not int or count <= 0:
+        raise RuntimeError("capture expected generator count differs")
     if set(state) != {"weights", "range_low", "range_high", "proof"}:
         raise RuntimeError("capture state fields differ")
     weights, low, high = (state[k] for k in ("weights", "range_low", "range_high"))
-    shape = (EXPECTED_GENERATORS + 1, expected["sequence_length"], 128)
+    shape = (count + 1, expected["sequence_length"], 128)
     if (any(not isinstance(x, torch.Tensor) or x.dtype != torch.float64 or x.device.type != "cpu"
             for x in (weights, low, high)) or tuple(weights.shape) != shape or
-            tuple(low.shape) != (EXPECTED_GENERATORS,) or tuple(high.shape) != tuple(low.shape) or
+            tuple(low.shape) != (count,) or tuple(high.shape) != tuple(low.shape) or
             not all(bool(torch.isfinite(x).all()) for x in (weights, low, high)) or bool((low > high).any())):
         raise RuntimeError("capture state shape/dtype/ranges/finite values differ")
     proof = state["proof"]
     if (set(proof) != {"ids", "masks", "reasons", "num_tokens"} or
-            any(len(proof[k]) != EXPECTED_GENERATORS for k in ("ids", "masks", "reasons")) or
+            any(len(proof[k]) != count for k in ("ids", "masks", "reasons")) or
             proof["num_tokens"] != expected["sequence_length"] or
             any(not isinstance(x, str) or not x for x in proof["ids"] + proof["reasons"]) or
-            len(set(proof["ids"])) != EXPECTED_GENERATORS or
+            len(set(proof["ids"])) != count or
             any(type(x) is not int or not 0 <= x < (1 << expected["sequence_length"]) for x in proof["masks"])):
         raise RuntimeError("capture ordered IDs/provenance/topology differ")
     for token in range(expected["sequence_length"]):
