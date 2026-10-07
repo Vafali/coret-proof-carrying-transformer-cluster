@@ -70,6 +70,35 @@ def rewrite_artifact(manifest, artifact, payload, *, component_hashes=False):
     write_json(manifest, value)
 
 
+@pytest.fixture
+def s003_capture_fixture(capture_fixture):
+    manifest, artifact, payload = capture_fixture
+    expected = CAP.identity(B.read_protocol(), CAP.SEPARATOR_PROPERTY_ID)
+    state = payload["states"]["post_last_reduction"]
+    weights = torch.zeros(3, expected["sequence_length"], 128, dtype=torch.float64)
+    weights[:, 8] = state["weights"][:, 4]
+    state["weights"] = weights
+    state["proof"].update(masks=[1 << 8, 0], num_tokens=expected["sequence_length"])
+    payload["identity"] = expected
+    diagnostic = payload["diagnostics"]
+    diagnostic.update(minimum_token_index=8, input_shape=list(weights.shape),
+                      token_count=expected["sequence_length"],
+                      separator_attempt={"admissible": False, "failed_token": 8,
+                                         "proposal": {"objective": 0.}})
+    result_path = manifest.parent / "result.json"
+    result = C.verified_json(result_path)
+    result.update(property_id=expected["property_id"],
+                  historical_candidate_radius=expected["tested_radius"],
+                  historical_candidate_radius_hex=expected["tested_radius_hex"],
+                  clean_label=expected["clean_label"], domain_failure_diagnostic=diagnostic)
+    write_json(result_path, result)
+    value = C.verified_json(manifest)
+    value.update(identity=expected, diagnostics=diagnostic, result_sha256=C.sha256(result_path))
+    write_json(manifest, value)
+    rewrite_artifact(manifest, artifact, payload, component_hashes=True)
+    return manifest, artifact, payload
+
+
 def run_capture_oracle(manifest, output, **kwargs):
     return D.execute(manifest, output, 127, expected_property_id=CAP.PROPERTY_ID,
                      variant="complete_post_reduction", exact_solve_timeout_seconds=5, **kwargs)
@@ -260,8 +289,10 @@ def test_whole_layernorm_exclusion_requires_all_twelve_exact_certificates(captur
     assert all(r["exact_exclusion_certificate"] for r in report["results"])
 
 
-def test_capture_wrapper_end_to_end_with_mock_property_only(capture_fixture, monkeypatch):
-    manifest, _, payload = capture_fixture
+@pytest.mark.parametrize("fixture_name", ["capture_fixture", "s003_capture_fixture"])
+def test_capture_wrapper_end_to_end_with_mock_property_only(request, fixture_name, monkeypatch):
+    manifest, _, payload = request.getfixturevalue(fixture_name)
+    property_id = payload["identity"]["property_id"]
     state = payload["states"]["post_last_reduction"]
     raw = {k: v for k, v in C.verified_json(manifest.parent / "result.json").items() if k != "record_sha256"}
     raw.update(runtime_seconds=0., final_generator_count=2)
@@ -288,13 +319,96 @@ def test_capture_wrapper_end_to_end_with_mock_property_only(capture_fixture, mon
     # source guard unchanged (it correctly rejects the new producer revision).
     monkeypatch.setattr(B, "execution_source_errors", lambda *_: [])
     output = manifest.parent / "new-capture"
-    authenticated = CAP.execute(CAP.PROPERTY_ID, manifest.parent / "mock-inputs", output, "cuda:0")
-    assert authenticated["identity"]["property_id"] == CAP.PROPERTY_ID
+    authenticated = CAP.execute(property_id, manifest.parent / "mock-inputs", output, "cuda:0")
+    assert authenticated["identity"]["property_id"] == property_id
     assert finish.execute is mock_finish
     assert torch.equal(state["weights"].view(torch.int64), original_bits)
     assert set(torch.load(output / "pre_block2_output_layernorm_state.pt", weights_only=False)["states"]) == {"post_last_reduction"}
     with pytest.raises(RuntimeError, match="NEW isolated"):
-        CAP.execute(CAP.PROPERTY_ID, manifest.parent / "mock-inputs", output, "cuda:0")
+        CAP.execute(property_id, manifest.parent / "mock-inputs", output, "cuda:0")
+
+
+def test_s003_token8_feasible_requires_exact_replay(s003_capture_fixture):
+    manifest, _, payload = s003_capture_fixture
+    state, identity = CAP.verify_capture(manifest)
+    assert identity["token_index"] == 8
+    assert identity["identity"]["tested_radius"] == 0.00130126953125
+    assert identity["identity"]["tested_radius_hex"] == "0x1.551eb851eb852p-10"
+    assert identity["identity"]["sequence_length"] == 17
+    assert identity["identity"]["producer_source_audit"]["benchmark_manifest_unchanged"] is True
+    report = D.execute(manifest, manifest.parent / "token8.json", 127,
+                       expected_property_id=CAP.SEPARATOR_PROPERTY_ID,
+                       token_index="8", variant="complete_post_reduction", exact_solve_timeout_seconds=5)
+    assert report["final_status"] == D.FEASIBLE and report["decision_scope"] == "token_8_only"
+    assert [r["token_index"] for r in report["results"]] == [8]
+    certificate = report["results"][0]["exact_zero_certificate"]
+    problem = D._variant_problem(D._capture_variant(state, 8))
+    assert D.verify_exact_zero_certificate(problem, C.verified_json(Path(certificate["path"])))["exact_equalities"] == 127
+    assert torch.equal(state["weights"], payload["states"]["post_last_reduction"]["weights"])
+
+
+def test_s003_token8_exclusion_replays_original_box(s003_capture_fixture):
+    manifest, artifact, payload = s003_capture_fixture
+    payload["states"]["post_last_reduction"]["range_high"][0] = .5
+    rewrite_artifact(manifest, artifact, payload, component_hashes=True)
+    report = D.execute(manifest, manifest.parent / "excluded8.json", 127,
+                       expected_property_id=CAP.SEPARATOR_PROPERTY_ID,
+                       token_index="8", variant="complete_post_reduction", exact_solve_timeout_seconds=5)
+    assert report["final_status"] == D.EXCLUDED
+    state, _ = CAP.verify_capture(manifest)
+    problem = D._variant_problem(D._capture_variant(state, 8))
+    certificate = report["results"][0]["exact_exclusion_certificate"]
+    assert D.verify_exact_exclusion_certificate(problem, C.verified_json(Path(certificate["path"])))["verified"]
+
+
+@pytest.mark.parametrize("scope", ["4", "all"])
+def test_s003_disallows_other_tokens_and_all_token_mode(s003_capture_fixture, scope):
+    manifest, _, _ = s003_capture_fixture
+    with pytest.raises(RuntimeError, match="token 8 only"):
+        D.execute(manifest, manifest.parent / "not-permitted.json",
+                  expected_property_id=CAP.SEPARATOR_PROPERTY_ID, token_index=scope)
+
+
+@pytest.mark.parametrize("field", ["tested_radius", "token_ids", "producer_source_audit", "source_artifacts"])
+def test_s003_authentication_rejects_identity_mutation(s003_capture_fixture, field):
+    manifest, _, _ = s003_capture_fixture
+    value = C.verified_json(manifest)
+    value["identity"][field] = "tampered"
+    write_json(manifest, value)
+    with pytest.raises(RuntimeError, match="frozen property/radius/tokens/source"):
+        CAP.verify_capture(manifest)
+
+
+def test_s003_requires_unresolved_separator_token8(s003_capture_fixture):
+    manifest, artifact, payload = s003_capture_fixture
+    payload["diagnostics"]["separator_attempt"]["failed_token"] = 7
+    rewrite_artifact(manifest, artifact, payload)
+    with pytest.raises(RuntimeError, match="unresolved separator token"):
+        CAP.verify_capture(manifest)
+
+
+def test_s003_wrong_expected_property_rejected(s003_capture_fixture):
+    manifest, _, _ = s003_capture_fixture
+    with pytest.raises(RuntimeError, match="expected-property-id"):
+        D.execute(manifest, manifest.parent / "wrong-property.json",
+                  expected_property_id=CAP.PROPERTY_ID, token_index="4")
+
+
+def test_s003_uses_same_full_generator_watchdog_capped_at_180(s003_capture_fixture, monkeypatch):
+    manifest, _, _ = s003_capture_fixture
+    def bounded(*args, **kwargs):
+        assert args[0] == "complete_post_reduction_token_8"
+        assert len(args[1]["ids"]) == CAP.EXPECTED_GENERATORS
+        assert kwargs["require_exact_exclusion"] is True
+        assert kwargs["exact_solve_timeout_seconds"] == 180.
+        return {"decision": D.INCONCLUSIVE}
+    monkeypatch.setattr(D, "decide_variant", bounded)
+    report = D.execute(manifest, manifest.parent / "bounded8.json",
+                       expected_property_id=CAP.SEPARATOR_PROPERTY_ID,
+                       variant="complete_post_reduction", exact_solve_timeout_seconds=300)
+    assert report["final_status"] == D.INCONCLUSIVE
+    assert report["exact_solve_timeout_seconds"] == 180.
+    assert [r["token_index"] for r in report["results"]] == [8]
 
 
 def test_finite_near_zero_without_exact_witness_remains_inconclusive(tmp_path, monkeypatch):

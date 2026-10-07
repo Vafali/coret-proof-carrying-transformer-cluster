@@ -1292,17 +1292,26 @@ def _execute_benchmark_capture(manifest_path, output_path, exact_max_rank, *,
                                exact_solve_timeout_seconds, variant,
                                expected_property_id, token_index, token4_exclusion_report):
     import capture_benchmark24_block2_output_zero_variance_v1 as capture
-    if expected_property_id != capture.PROPERTY_ID:
+    if expected_property_id not in capture.TARGET_TOKENS:
         raise RuntimeError("new capture requires its exact --expected-property-id")
     if variant not in ("complete_post_reduction", "all"):
         raise RuntimeError("new capture oracle must use ALL authenticated generators/ranges")
-    token_index = "4" if token_index is None else str(token_index)
-    if token_index not in ("4", "all"):
+    target_token = capture.TARGET_TOKENS[expected_property_id]
+    token_index = str(target_token) if token_index is None else str(token_index)
+    if expected_property_id == capture.SEPARATOR_PROPERTY_ID:
+        if token_index != "8" or token4_exclusion_report is not None:
+            raise RuntimeError("s003 oracle permits native token 8 only; no all-token mode")
+        # The existing whole-attempt watchdog is unchanged; cap this target at
+        # the preregistered 180 seconds, including proposals and exact replay.
+        exact_solve_timeout_seconds = min(exact_solve_timeout_seconds, 180.)
+    elif token_index not in ("4", "all"):
         raise RuntimeError("first oracle target is native tensor token 4; then authorized all")
     if output_path.exists() or output_path.with_suffix(".partial.json").exists():
         raise RuntimeError("refusing to overwrite a zero-variance diagnostic")
     started = time.perf_counter()
     state, identity = capture.verify_capture(manifest_path)
+    if identity["identity"]["property_id"] != expected_property_id:
+        raise RuntimeError("capture differs from exact --expected-property-id")
     _progress("complete_post_reduction", "loading_authentication_complete", started,
               artifact_sha256=identity["artifact_sha256"], token_index=token_index)
     rows = []
@@ -1310,7 +1319,7 @@ def _execute_benchmark_capture(manifest_path, output_path, exact_max_rank, *,
         rows.append(_authorize_all_tokens(token4_exclusion_report, identity, state))
         tokens = [i for i in range(state["proof"]["num_tokens"]) if i != 4]
     else:
-        tokens = [4]
+        tokens = [target_token]
     for token in tokens:
         row = decide_variant(
             f"complete_post_reduction_token_{token}", _capture_variant(state, token),
@@ -1328,7 +1337,7 @@ def _execute_benchmark_capture(manifest_path, output_path, exact_max_rank, *,
         if row["decision"] == FEASIBLE:
             break  # One exact token witness already answers the existential question.
     final_status = (FEASIBLE if any(r["decision"] == FEASIBLE for r in rows) else
-                    EXCLUDED if len(rows) == (1 if token_index == "4" else state["proof"]["num_tokens"])
+                    EXCLUDED if len(rows) == (state["proof"]["num_tokens"] if token_index == "all" else 1)
                     and all(r["decision"] == EXCLUDED for r in rows) else INCONCLUSIVE)
     timeouts = [r for r in rows if r.get("reason") == EXACT_EXCLUSION_TIMEOUT]
     return _atomic_json(output_path, {
@@ -1338,7 +1347,8 @@ def _execute_benchmark_capture(manifest_path, output_path, exact_max_rank, *,
         "final_status": final_status, "complete_state_decision": final_status,
         "reason": EXACT_EXCLUSION_TIMEOUT if final_status == INCONCLUSIVE and timeouts else None,
         "timeout_diagnostics": timeouts[0]["timeout_diagnostics"] if timeouts else None,
-        "decision_scope": "token_4_only" if token_index == "4" else "any_token_zero_variance",
+        "decision_scope": "any_token_zero_variance" if token_index == "all" else f"token_{target_token}_only",
+        "exact_solve_timeout_seconds": exact_solve_timeout_seconds,
         "interpretation": {FEASIBLE: "Captured abstract state admits a constant vector; tightening alone cannot exclude it.",
                            EXCLUDED: "Exact zero excluded only for the stated token scope; no production variance repair implemented.",
                            INCONCLUSIVE: "No exact decision for the stated scope; numerical statuses have no authority."}[final_status],
@@ -1419,8 +1429,8 @@ def main() -> int:
     parser.add_argument("--capture-manifest", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--expected-property-id")
-    parser.add_argument("--token-index", choices=("4", "all"),
-                        help="New capture: native zero-based token 4 first; all only after exact exclusion")
+    parser.add_argument("--token-index", choices=("4", "8", "all"),
+                        help="Native zero-based token: s003 permits token 8 only; legacy s004 uses token 4")
     parser.add_argument("--token4-exclusion-report", type=Path)
     parser.add_argument("--exact-max-rank", type=int, default=128)
     parser.add_argument(
