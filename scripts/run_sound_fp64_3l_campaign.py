@@ -625,6 +625,10 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
             "generic_fallback_count": None,
         }
     record["producer_revision"] = finish3l.PRODUCER_REVISION
+    if stage == "block2_to_margin" and record.get("scientific_evaluation_complete"):
+        for key in ("final_token_projection", "final_token_projection_witness_path",
+                    "final_token_projection_witness_sha256"):
+            record[key] = report.get(key)
     record["epsilon_floor_labels_tokens"] = [
         {"label": w["label"], "tokens": w["failed_tokens"]}
         for w in separator_witnesses if w.get("path") == "semantic_epsilon_floor"]

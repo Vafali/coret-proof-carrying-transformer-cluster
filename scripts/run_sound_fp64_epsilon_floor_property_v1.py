@@ -11,7 +11,8 @@ from pathlib import Path
 import cluster_common as C
 import run_transformer_benchmark24_v1 as B
 
-REVISION = "SOUND_FP64_SEMANTIC_EPSILON_FLOOR_RESULT_HANDLING_V2"
+REVISION = "SOUND_FP64_FINAL_DEAD_TOKEN_PROJECTION_V3"
+REVISION_FILE = "frozen/final_dead_token_projection_source_revision_v3.json"
 CHANGED_EXECUTION_FILES = {
     "research_hab/coret_sound_fp64_block0_feasibility_v1.py",
     "research_hab/coret_psd_layernorm_experiment_v1.py",
@@ -26,11 +27,13 @@ ADDED_EXECUTION_FILES = {
     "scripts/semantic_epsilon_floor_checker_v1.py",
     "scripts/sound_fp64_layernorm_epsilon_floor_v1.py",
     "scripts/run_sound_fp64_epsilon_floor_property_v1.py",
+    "scripts/final_token_projection_checker_v1.py",
+    "scripts/sound_fp64_final_token_projection_v1.py",
 }
 
 
 def source_audit(manifest):
-    revision = C.verified_json(C.REPO/"frozen/layernorm_epsilon_floor_result_handling_source_revision_v2.json")
+    revision = C.verified_json(C.REPO/REVISION_FILE)
     if revision["producer_revision"] != REVISION or revision["benchmark_manifest_sha256"] != manifest["manifest_sha256"]:
         raise RuntimeError("separating LayerNorm source revision identity differs")
     expected_files = CHANGED_EXECUTION_FILES | ADDED_EXECUTION_FILES
@@ -49,7 +52,7 @@ def source_audit(manifest):
     return {"producer_revision": REVISION, "changed_sources": changed,
             "repair_source_hashes": {name: C.sha256(C.REPO/name) for name in sorted(
                 CHANGED_EXECUTION_FILES | ADDED_EXECUTION_FILES)},
-            "source_revision_file_sha256": C.sha256(C.REPO/"frozen/layernorm_epsilon_floor_result_handling_source_revision_v2.json"),
+            "source_revision_file_sha256": C.sha256(C.REPO/REVISION_FILE),
             "benchmark_manifest_unchanged": True}
 
 
@@ -80,6 +83,9 @@ def execute(property_id, artifact_root, result_root, device):
     normalized["epsilon_floor_labels_tokens"] = raw.get("epsilon_floor_labels_tokens", [])
     normalized["epsilon_floor_semantic_intervals"] = raw.get("epsilon_floor_semantic_intervals", [])
     normalized["final_sound_upper_margin"] = raw.get("final_sound_upper_margin")
+    for key in ("final_token_projection", "final_token_projection_witness_path",
+                "final_token_projection_witness_sha256"):
+        normalized[key] = raw.get(key)
     # Separator/epsilon-floor obligations are independently checked; a complete FP64 graph
     # checker is still NOT_AVAILABLE. Never upgrade that status here.
     B.validate_result(manifest, normalized)

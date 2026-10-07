@@ -21,6 +21,8 @@ from types import SimpleNamespace
 import gmpy2
 import torch
 
+import sound_fp64_final_token_projection_v1 as final_projection
+
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "research_hab"))
@@ -42,7 +44,7 @@ EXPECTED_REPORT_SHA256 = (
     "cc6d644a551dfc0beee8284a5c1ee5b94f12d9453d9a700e813735fa35565f74")
 LAYER_NORM_EPSILON = 1e-12
 LAYERNORM_DOMAIN_REASON = "SOUND_FP64_LAYERNORM_VARIANCE_DOMAIN_FAILURE"
-PRODUCER_REVISION = "SOUND_FP64_SEMANTIC_EPSILON_FLOOR_RESULT_HANDLING_V2"
+PRODUCER_REVISION = "SOUND_FP64_FINAL_DEAD_TOKEN_PROJECTION_V3"
 
 
 def _final_margin_verdict(lower, upper):
@@ -740,8 +742,22 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 raw_output, raw_output_proof, [output_input],
                 "b2_output_layernorm", ln_ops, measurements,
                 reserve=ln_reserve)
-            output, output_proof = sound._maybe_reduce(
-                output, output_proof, "b2_output_layernorm", reductions)
+            # The frozen head selects token 0; after the final encoder LN
+            # no semantic operator mixes tokens. Project BEFORE ranking rows.
+            projection_execution_identity = {
+                "producer_revision": PRODUCER_REVISION,
+                "runner_sha256": _sha256(Path(__file__)),
+                "projection_producer_sha256": _sha256(Path(final_projection.__file__)),
+                "projection_checker_sha256": _sha256(Path(final_projection.CHECK.__file__)),
+                "authenticated_input": authenticated,
+                "checkpoint_sha256": prefix.CHECKPOINT_SHA256,
+                "pinned_revision": sound.PINNED_REVISION,
+                "token_ids": list(prefix.FIXTURE_TOKEN_IDS),
+                "rho_hex": float(prefix.FIXTURE_RHO).hex(),
+            }
+            output, output_proof, final_projection_witness = final_projection.project_then_reduce(
+                output, output_proof, projection_execution_identity,
+                final_projection.CHECK.REGION, reductions)
             if run_representative_mpfr:
                 values = centered.zonotope_w[0, 0].detach().cpu().tolist()
                 with sound._mp_context(gmpy2.RoundToNearest):
@@ -887,6 +903,16 @@ def execute(input_path: Path, report_path: Path, output_path: Path,
                 "scientific_properties": 0, "bound_calls": 0,
             }
             output_path.parent.mkdir(parents=True, exist_ok=True)
+            projection_path = output_path.parent / "final_token_projection_witness.pt"
+            torch.save(final_projection_witness, projection_path)
+            artifact_report["final_token_projection"] = {
+                k: final_projection_witness[k] for k in (
+                    "schema", "region_proof", "original_token_count", "retained_token_indices",
+                    "input_state_identity", "output_state_identity", "generator_count_before",
+                    "generator_count_after", "generator_count_after_reduction",
+                    "zero_after_projection_discarded_generator_ids", "subsequent_reduction_records")}
+            artifact_report["final_token_projection_witness_path"] = str(projection_path)
+            artifact_report["final_token_projection_witness_sha256"] = _sha256(projection_path)
             if hasattr(dispatch, "separating_variance_witnesses"):
                 artifact_report["_separating_variance_witnesses"] = dispatch.separating_variance_witnesses
                 artifact_report["layernorm_separator_summaries"] = [

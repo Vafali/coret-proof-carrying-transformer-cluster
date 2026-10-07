@@ -1,0 +1,22 @@
+{
+  "benchmark_manifest_sha256": "46f5380d7bfacd0cc61da2938465d951fa3e72246b01a98223352510b331a338",
+  "bound_calls": 0,
+  "producer_revision": "SOUND_FP64_FINAL_DEAD_TOKEN_PROJECTION_V3",
+  "record_sha256": "c79df3e6a50592f4968bef91460b33b67f881348bb61340bce9023ec1e8e4823",
+  "scientific_queries": 0,
+  "source_hashes": {
+    "research_hab/coret_psd_layernorm_experiment_v1.py": "cea51d2e69a41444c215c3aaa0e289be5f5f83e9ff4c8c4d040d8d11d6198235",
+    "research_hab/coret_sound_fp64_block0_feasibility_v1.py": "9d68c8fd19985c2930d5ef676e40619fc5ed33b1d64e0bc73f5f3b056fec8281",
+    "scripts/certify_block2_output_separating_variance_v1.py": "b40a11a07b684e2a56c8c41e294a2f2da45ff023a639c059ca2c1d93f7e4e694",
+    "scripts/final_token_projection_checker_v1.py": "3f4670cfb16cb5589c0c0bce15640752db07995fafc01fdc2597a29f16903343",
+    "scripts/run_sound_fp64_3l_campaign.py": "bea8ec0587f2757f89e35c0fe6a00108023702ba74628103e9a55233ca39b3ec",
+    "scripts/run_sound_fp64_epsilon_floor_property_v1.py": "199b4722c0fa8366076762d2baa04a8a979d0b9c4a431b29a4b3865511c06e5f",
+    "scripts/run_sound_fp64_finish_3l_v1.py": "0dd695dd394d7f77a81ca04fe94fc58379ac4feffe45c67c66027f3eca1615f1",
+    "scripts/run_sound_fp64_separator_property_v1.py": "f409c9b46442329ef607a2e7a580627a829e887a21de0b163cb6ced2de861933",
+    "scripts/semantic_epsilon_floor_checker_v1.py": "99237de2a6e4d2ed302d003bc475f579c9c903cfa74a4c505c68dd275a00d7fd",
+    "scripts/separating_variance_checker_v1.py": "99255b79ef91bcf03a85afd5f620b7523b258052fba6cfec1011231a4f0f6d56",
+    "scripts/sound_fp64_final_token_projection_v1.py": "1ca4fcb1d8fd66d786220069bd6d5a461e2a404d4522f07833eb01bb2c4b1851",
+    "scripts/sound_fp64_layernorm_epsilon_floor_v1.py": "fe95007a23e204b6f4248111a294fb79c9fe67102899d461349860ff3a469e1e",
+    "scripts/sound_fp64_layernorm_separator_v1.py": "a42b3cd4c22d6ea0e7ac855c7bf7c3dd4a15cdcdbb7fc79404f24ae512d13720"
+  }
+}
