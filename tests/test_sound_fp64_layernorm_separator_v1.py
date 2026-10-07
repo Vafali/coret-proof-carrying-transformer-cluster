@@ -182,8 +182,12 @@ def test_mixed_transition_preserves_native_coefficients_of_successful_token(nati
 
 
 def test_only_declared_producer_revision_can_bypass_old_source_pins():
-    import run_sound_fp64_separator_property_v1 as runner
+    import run_sound_fp64_epsilon_floor_property_v1 as runner
+    import run_sound_fp64_separator_property_v1 as previous
     import run_transformer_benchmark24_v1 as benchmark
+    # Preserve the old revision's authentication: it must reject changed code.
+    with pytest.raises(RuntimeError, match="source revision SHA differs"):
+        previous.source_audit(benchmark.read_protocol())
     audit = runner.source_audit(benchmark.read_protocol())
     assert set(audit["changed_sources"]) == runner.CHANGED_EXECUTION_FILES
     assert audit["benchmark_manifest_unchanged"]

@@ -619,9 +619,18 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
         directory.mkdir(parents=True, exist_ok=True)
         import sound_fp64_layernorm_separator_v1 as separator
         for payload in separator_witnesses:
-            separator.replay_payload(payload)
+            if payload.get("path") == "semantic_epsilon_floor":
+                import semantic_epsilon_floor_checker_v1 as floor_checker
+                floor_checker.replay_persisted(
+                    payload, payload["source_state_identity"], payload["parameter_hashes"],
+                    payload["source_domain"], payload["output_state_identity"])
+            else:
+                separator.replay_payload(payload)
         temporary = witness_path.with_suffix(".tmp.pt")
-        sound.torch.save({"schema": "CORET_SOUND_FP64_LAYERNORM_SEPARATOR_ARCHIVE_V1",
+        domain_schema = ("CORET_SOUND_FP64_LAYERNORM_DOMAIN_ARCHIVE_V2"
+                         if any(w.get("path") == "semantic_epsilon_floor" for w in separator_witnesses)
+                         else "CORET_SOUND_FP64_LAYERNORM_SEPARATOR_ARCHIVE_V1")
+        sound.torch.save({"schema": domain_schema,
                           "property_id": property_id, "candidate_radius_hex": candidate.hex(),
                           "witnesses": separator_witnesses}, temporary)
         os.replace(temporary, witness_path)
@@ -629,7 +638,9 @@ def execute_property(row: dict, result_root: Path, device: str) -> dict:
         record["layernorm_separator_witnesses_sha256"] = cluster_common.sha256(witness_path)
         record["layernorm_separator_repaired_tokens"] = [
             {"label": w["label"], "tokens": w["failed_tokens"],
-             "lower_by_token": w["semantic_lower_by_token"]} for w in separator_witnesses]
+             "lower_by_token": w["semantic_lower_by_token"],
+             **({"path": "semantic_epsilon_floor"} if w.get("path") == "semantic_epsilon_floor" else {})}
+            for w in separator_witnesses]
     _atomic_json(result_path, record)
     shutil.rmtree(workspace, ignore_errors=True)
     return _verified_result(result_path)

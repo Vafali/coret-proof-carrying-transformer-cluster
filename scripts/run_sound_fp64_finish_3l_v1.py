@@ -216,12 +216,18 @@ def _repair_layernorm_domain(state, proof, variance_low, diagnostics):
         return variance_low, updated, prepared
     effective = sound._checked_layernorm_low(variance_low, prepared)
     lower = float(effective.min())
+    epsilon_floor = prepared["payload"].get("path") == "semantic_epsilon_floor"
+    regularized_lower = math.nextafter(lower+LAYER_NORM_EPSILON, -math.inf)
     updated.update({"generic_sound_variance_lower": diagnostics["sound_variance_lower"],
-                    "sound_variance_lower": lower, "domain_admissible": lower > 0,
-                    "sqrt_input_lower": math.nextafter(lower+LAYER_NORM_EPSILON, -math.inf),
+                    "sound_variance_lower": lower,
+                    "domain_admissible": regularized_lower > 0 if epsilon_floor else lower > 0,
+                    "sqrt_input_lower": regularized_lower,
                     "sqrt_safety_margin": lower,
                     "separating_variance_tokens": prepared["payload"]["failed_tokens"],
                     "separating_variance_lower_by_token": prepared["semantic_lower_by_token"]})
+    if epsilon_floor:
+        updated["layernorm_domain_path"] = "semantic_epsilon_floor"
+        updated["unconstrained_variance_not_used_as_semantic_domain"] = True
     return effective, updated, prepared
 
 

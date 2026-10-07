@@ -244,7 +244,11 @@ def _prepare_layernorm_separator(source, proof, generic_low, label):
     if str(REPO / "scripts") not in sys.path:
         sys.path.insert(0, str(REPO / "scripts"))
     import sound_fp64_layernorm_separator_v1 as separator
-    return separator.prepare(source, proof, generic_low, label)
+    prepared = separator.prepare(source, proof, generic_low, label)
+    if prepared is not None and not prepared["admissible"]:
+        import sound_fp64_layernorm_epsilon_floor_v1 as floor
+        return floor.prepare(source, proof, generic_low, label, prepared)
+    return prepared
 
 
 def _layernorm_sound_raw(dispatch, source, proof, normalizer, label,
@@ -261,6 +265,9 @@ def _layernorm_sound_raw(dispatch, source, proof, normalizer, label,
         raw = dispatch.layer_norm(source, normalizer, "standard")
         return raw, structural.get_support(raw), None
     import sound_fp64_layernorm_separator_v1 as separator
+    import sound_fp64_layernorm_epsilon_floor_v1 as floor
+    if prepared.get("payload", {}).get("schema") == floor.SCHEMA:
+        return floor.execute_prepared(dispatch, source, proof, normalizer, prepared)
     return separator.execute_prepared(dispatch, source, proof, normalizer, prepared)
 
 

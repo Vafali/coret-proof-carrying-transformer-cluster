@@ -212,7 +212,7 @@ def test_actual_frozen_manifest_rebuild_is_identical_without_evaluation():
     rebuilt = P.build_manifest(LOCAL_PRODUCTION, scientific, positions)
     # The population/radii remain frozen. The explicitly versioned LayerNorm
     # repair has new producer source pins, never retrofitted into that manifest.
-    from run_sound_fp64_separator_property_v1 import source_audit
+    from run_sound_fp64_epsilon_floor_property_v1 import source_audit
     audit = source_audit(frozen)
     assert set(rebuilt["frozen_execution_source_hashes"]) == set(frozen["frozen_execution_source_hashes"])
     source_fields = {"frozen_execution_source_hashes", "manifest_sha256"}
